@@ -1350,6 +1350,27 @@ async fn message_handler(
                 }
             }
         }
+        State::AwaitingClientOwner { name } => {
+            let raw = msg.text().unwrap_or_default().trim();
+            let user = raw
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| settings.user(id))
+                .or_else(|| settings.find_user_by_username(raw));
+            if let Some(user) = user {
+                if settings.assign_client_owner(&name, Some(user.user_id)) {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("✅ Ключ {name} привязан к пользователю {}.", user.user_id),
+                    )
+                    .reply_markup(menu::main_menu(lang))
+                    .await?;
+                }
+                dialogue.update(State::Idle).await?;
+            } else {
+                bot.send_message(msg.chat.id, "Пользователь не найден. Он должен сначала запустить бота. Введите Telegram ID или @username ещё раз.").await?;
+            }
+        }
         _ => {
             // /start и всё прочее.
             if !settings.has_lang(uid) {
@@ -1878,27 +1899,6 @@ async fn callback_handler(
                 .reply_markup(menu::buy_terms_menu())
                 .await?;
         }
-        State::AwaitingClientOwner { name } => {
-            let raw = msg.text().unwrap_or_default().trim();
-            let user = raw
-                .parse::<i64>()
-                .ok()
-                .and_then(|id| settings.user(id))
-                .or_else(|| settings.find_user_by_username(raw));
-            if let Some(user) = user {
-                if settings.assign_client_owner(&name, Some(user.user_id)) {
-                    bot.send_message(
-                        msg.chat.id,
-                        format!("✅ Ключ {name} привязан к пользователю {}.", user.user_id),
-                    )
-                    .reply_markup(menu::main_menu(lang))
-                    .await?;
-                }
-                dialogue.update(State::Idle).await?;
-            } else {
-                bot.send_message(msg.chat.id, "Пользователь не найден. Он должен сначала запустить бота. Введите Telegram ID или @username ещё раз.").await?;
-            }
-        }
         Action::BuyTerm(months) => {
             if tariff(months).is_some() {
                 bot.send_message(chat, "Выберите способ оплаты:")
@@ -2139,7 +2139,9 @@ async fn callback_handler(
                             .await?;
                     }
                 }
-                Err(e) => bot.send_message(chat, i18n::error_text(lang, &e)).await?,
+                Err(e) => {
+                    bot.send_message(chat, i18n::error_text(lang, &e)).await?;
+                }
             }
         }
         Action::AssignOwnerAsk(name) => {
@@ -2171,7 +2173,9 @@ async fn callback_handler(
                         bot.send_message(chat, i18n::error_text(lang, &e)).await?;
                     }
                 }
-                Err(e) => bot.send_message(chat, i18n::error_text(lang, &e)).await?,
+                Err(e) => {
+                    bot.send_message(chat, i18n::error_text(lang, &e)).await?;
+                }
             }
         }
         Action::Menu => {
