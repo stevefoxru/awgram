@@ -71,6 +71,9 @@ pub fn max_bulk_prefix_len(_slug_enabled: bool) -> usize {
 
 /// Проверка базового имени на худший поддерживаемый суффикс `_NNN`.
 pub fn validate_bulk_prefix(prefix: &str, _slug_enabled: bool) -> Result<(), ValidateError> {
+    if prefix.trim().chars().count() > max_bulk_prefix_len(false) {
+        return Err(ValidateError::BadName);
+    }
     gen_bulk_names(prefix, MAX_BULK, None).map(|_| ())
 }
 

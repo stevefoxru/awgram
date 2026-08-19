@@ -135,7 +135,8 @@ pub fn client_exists_suggest(lang: Lang, name: &str, suggested: &str) -> String 
     }
 }
 pub fn bad_name(lang: Lang, slug_on: bool) -> String {
-    let max = if slug_on { "1–26" } else { "1–32" };
+    let _ = slug_on;
+    let max = "1–32";
     match lang {
         Lang::Ru => {
             format!("⚠️ Некорректное имя (латиница/цифры/пробел/-/_, {max}). Введите ещё раз:")
@@ -1628,17 +1629,16 @@ mod tests {
     }
 
     #[test]
-    fn ask_client_name_mentions_spaces_and_slug_status() {
+    fn ask_client_name_mentions_spaces_and_numeric_suggestion() {
         for l in [Lang::Ru, Lang::En] {
             let on = ask_client_name(l, true);
             let off = ask_client_name(l, false);
             // промпт всегда предупреждает про замену пробелов
             assert!(on.contains('-'));
             assert!(off.contains('-'));
-            // и различает вкл/выкл id-префикса
-            assert_ne!(on, off);
-            // лимит в сообщении об ошибке зависит от слага
-            assert!(bad_name(l, true).contains("26"));
+            // Случайный ID-префикс удалён: старый аргумент больше не меняет текст.
+            assert_eq!(on, off);
+            assert!(bad_name(l, true).contains("32"));
             assert!(bad_name(l, false).contains("32"));
         }
     }
