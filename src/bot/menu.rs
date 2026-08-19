@@ -125,6 +125,7 @@ pub fn ga_main_menu(lang: Lang, multi: bool) -> InlineKeyboardMarkup {
     let mut rows = vec![
         vec![cb(&i18n::btn_clients(lang), "list")],
         vec![cb(&i18n::btn_add(lang), "add")],
+        vec![cb(&i18n::btn_bulk(lang), "addbulk")],
         vec![cb(&i18n::btn_stats(lang), "stats")],
     ];
     if multi {
@@ -170,10 +171,6 @@ pub fn group_scope_menu(lang: Lang, groups: &[crate::store::GroupRow]) -> Inline
     InlineKeyboardMarkup::new(rows)
 }
 
-pub fn slug_recommend_menu(lang: Lang) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![cb(&i18n::btn_slug_enable(lang), "set:slug:on")]])
-}
-
 /// Экран выбора языка при первом запуске — показывает оба варианта
 /// одновременно (ещё не знаем предпочтение пользователя), без опоры на `lang`.
 pub fn language_select() -> InlineKeyboardMarkup {
@@ -191,6 +188,7 @@ pub fn settings_menu(
     deliver_qr: bool,
     deliver_link: bool,
 ) -> InlineKeyboardMarkup {
+    let _ = name_slug;
     InlineKeyboardMarkup::new(vec![
         vec![
             cb(&i18n::btn_lang_ru(lang), "set:lang:ru"),
@@ -202,14 +200,6 @@ pub fn settings_menu(
                 "set:psk:off"
             } else {
                 "set:psk:on"
-            },
-        )],
-        vec![cb(
-            &i18n::btn_slug_toggle(lang, name_slug),
-            if name_slug {
-                "set:slug:off"
-            } else {
-                "set:slug:on"
             },
         )],
         vec![cb(
@@ -277,8 +267,7 @@ pub fn expiry_menu(lang: Lang) -> InlineKeyboardMarkup {
     ])
 }
 
-/// Экран выбора количества для массовой генерации: пресеты 1/3/5/10 (cap=10 —
-/// лимит альбома Telegram). Callback `bulk:N`.
+/// Экран выбора количества для массовой генерации. Callback `bulk:N`.
 pub fn bulk_count_menu(lang: Lang) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
@@ -286,6 +275,11 @@ pub fn bulk_count_menu(lang: Lang) -> InlineKeyboardMarkup {
             cb("3", "bulk:3"),
             cb("5", "bulk:5"),
             cb("10", "bulk:10"),
+        ],
+        vec![
+            cb("20", "bulk:20"),
+            cb("50", "bulk:50"),
+            cb("99", "bulk:99"),
         ],
         vec![cb(&i18n::btn_back(lang), "menu")],
     ])
@@ -1302,14 +1296,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_menu_toggles_slug_data_by_current_value() {
-        let data_off = all_callback_data(&settings_menu(Lang::Ru, false, false, true, true, true));
-        assert!(data_off.contains(&"set:slug:on".to_string()));
-        let data_on = all_callback_data(&settings_menu(Lang::Ru, false, true, true, true, true));
-        assert!(data_on.contains(&"set:slug:off".to_string()));
-    }
-
-    #[test]
     fn client_card_has_four_artifact_buttons() {
         let data = all_callback_data(&client_card(Lang::Ru, "alice", false));
         assert!(data.contains(&"conf:alice".to_string()));
@@ -1327,6 +1313,9 @@ mod tests {
         assert!(data.contains(&"bulk:3".to_string()));
         assert!(data.contains(&"bulk:5".to_string()));
         assert!(data.contains(&"bulk:10".to_string()));
+        assert!(data.contains(&"bulk:20".to_string()));
+        assert!(data.contains(&"bulk:50".to_string()));
+        assert!(data.contains(&"bulk:99".to_string()));
         assert!(data.contains(&"menu".to_string()));
     }
 

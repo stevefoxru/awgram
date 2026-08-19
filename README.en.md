@@ -40,7 +40,8 @@ tangible on budget VPS hosts.
 - 🟢 **Honest online status**: online only when the handshake is under
   5 minutes old.
 - 📦 **Bulk generation** — create up to 10 clients at once by prefix
-  (`user-01 … user-10`) in a single action, delivering configs as an album.
+  (`user_01 … user_99`) in a single action, continuing existing numbering
+  and delivering configs in albums.
 - 🎛️ **Delivery filter** — configure which artifacts (`.conf` / QR / link)
   are automatically sent after creation.
 - 🧩 **Per-artifact delivery** — from the client card you can request config,
@@ -65,8 +66,8 @@ tangible on budget VPS hosts.
 
 ### Settings & security
 
-- ⚙️ **Settings**: RU/EN language (per admin), default PSK, client name
-  ID prefix; everything survives restarts (persistent state).
+- ⚙️ **Settings**: RU/EN language (per admin), default PSK; everything
+  survives restarts (persistent state).
 - 🔒 **Security**: access restricted to owners from `admin_ids` and the
   group admins they appoint, shell-free manage-script invocation, secrets
   never reach the logs, hardened mode (dedicated user + sudoers).

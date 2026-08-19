@@ -119,21 +119,20 @@ pub fn private_only() -> String {
 
 // --- add-диалог ---
 pub fn ask_client_name(lang: Lang, slug_on: bool) -> String {
-    match (lang, slug_on) {
-        (Lang::Ru, true) => {
-            "Введите имя клиента.\n• пробелы будут автоматически заменены на «-»\n• ID-префикс: вкл — к имени добавится уникальный префикс (например k3x9f-name)"
-        }
-        (Lang::Ru, false) => {
-            "Введите имя клиента.\n• пробелы будут автоматически заменены на «-»\n• ID-префикс: выкл"
-        }
-        (Lang::En, true) => {
-            "Enter client name.\n• spaces are replaced with \"-\" automatically\n• ID prefix: on — a unique prefix will be added (e.g. k3x9f-name)"
-        }
-        (Lang::En, false) => {
-            "Enter client name.\n• spaces are replaced with \"-\" automatically\n• ID prefix: off"
-        }
+    let _ = slug_on;
+    match lang {
+        Lang::Ru => "Введите имя клиента.\n• пробелы будут автоматически заменены на «-»\n• если имя занято, бот предложит первый свободный номер",
+        Lang::En => "Enter client name.\n• spaces are replaced with \"-\" automatically\n• if the name exists, the bot will suggest the first free number",
     }
     .to_string()
+}
+pub fn client_exists_suggest(lang: Lang, name: &str, suggested: &str) -> String {
+    let name = html_escape(name);
+    let suggested = html_escape(suggested);
+    match lang {
+        Lang::Ru => format!("Клиент <code>{name}</code> уже существует. Предлагаю создать <code>{suggested}</code>. Выберите срок действия:"),
+        Lang::En => format!("Client <code>{name}</code> already exists. Suggested name: <code>{suggested}</code>. Choose expiry:"),
+    }
 }
 pub fn bad_name(lang: Lang, slug_on: bool) -> String {
     let max = if slug_on { "1–26" } else { "1–32" };
@@ -215,8 +214,8 @@ pub fn btn_bulk(lang: Lang) -> String {
 }
 pub fn ask_bulk_prefix(lang: Lang) -> String {
     match lang {
-        Lang::Ru => "Введите префикс для имён (напр. «user» → user-01 … user-10):",
-        Lang::En => "Enter a name prefix (e.g. \"user\" → user-01 … user-10):",
+        Lang::Ru => "Введите базовое имя (напр. «user» → user_01 … user_99):",
+        Lang::En => "Enter a base name (e.g. \"user\" → user_01 … user_99):",
     }
     .to_string()
 }
@@ -232,8 +231,8 @@ pub fn bad_bulk_prefix(lang: Lang, max_len: usize) -> String {
 }
 pub fn ask_bulk_count(lang: Lang) -> String {
     match lang {
-        Lang::Ru => "Выберите количество (максимум 10 — лимит альбома Telegram):",
-        Lang::En => "Choose quantity (max 10 — Telegram album limit):",
+        Lang::Ru => "Выберите количество (максимум 99):",
+        Lang::En => "Choose quantity (maximum 99):",
     }
     .to_string()
 }
@@ -667,6 +666,7 @@ pub fn settings_title(
     deliver_qr: bool,
     deliver_link: bool,
 ) -> String {
+    let _ = name_slug;
     let onoff = |b: bool| match (lang, b) {
         (Lang::Ru, true) => "вкл",
         (Lang::Ru, false) => "выкл",
@@ -675,17 +675,15 @@ pub fn settings_title(
     };
     match lang {
         Lang::Ru => format!(
-            "⚙️ <b>Настройки</b>\nЯзык: русский\nPSK по умолчанию: {}\nID-префикс имён: {}\n📄 Выдача конфига: {}\n🖼 Выдача QR: {}\n🔗 Выдача ссылки: {}",
+            "⚙️ <b>Настройки</b>\nЯзык: русский\nPSK по умолчанию: {}\n📄 Выдача конфига: {}\n🖼 Выдача QR: {}\n🔗 Выдача ссылки: {}",
             onoff(psk_default),
-            onoff(name_slug),
             onoff(deliver_conf),
             onoff(deliver_qr),
             onoff(deliver_link)
         ),
         Lang::En => format!(
-            "⚙️ <b>Settings</b>\nLanguage: English\nDefault PSK: {}\nName ID prefix: {}\n📄 Deliver config: {}\n🖼 Deliver QR: {}\n🔗 Deliver link: {}",
+            "⚙️ <b>Settings</b>\nLanguage: English\nDefault PSK: {}\n📄 Deliver config: {}\n🖼 Deliver QR: {}\n🔗 Deliver link: {}",
             onoff(psk_default),
-            onoff(name_slug),
             onoff(deliver_conf),
             onoff(deliver_qr),
             onoff(deliver_link)

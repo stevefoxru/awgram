@@ -448,8 +448,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
     }
     match action {
         // Доступно всем аутентифицированным ролям.
-        Menu | List | Add | Stats | Page(_) | Expiry(_) | AddPsk(_) | Lang(_)
-        | SetListFilter(_) | Unknown => true,
+        Menu | List | Add | Stats | Page(_) | Expiry(_) | AddPsk(_) | AddBulk | AddBulkRun(_)
+        | BulkExpiry(_) | AddBulkPsk(_) | Lang(_) | SetListFilter(_) | Unknown => true,
         // Экран/установка текущей группы: только GA, группа — только своя.
         GroupSelectMenu => matches!(role, Role::GroupAdmin(_)),
         GroupSelect(id) => matches!(role, Role::GroupAdmin(groups) if groups.contains(id)),
@@ -461,10 +461,6 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         // Всё остальное — только владелец.
         RegenAll
         | RegenAllRun(_)
-        | AddBulk
-        | AddBulkRun(_)
-        | BulkExpiry(_)
-        | AddBulkPsk(_)
         | Settings
         | SetLang(_)
         | SetPsk(_)
@@ -513,7 +509,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
 /// привязка: пересоздание не отвязывает клиента у владельца и не переносит
 /// его в текущую группу группового админа (скоуп на объект уже перепроверен
 /// вызывающим). Новому клиенту: групповому админу — его текущая группа,
-/// владельцу — без группы. None — текущей группы нет (нужен экран выбора).
+/// владельцу — выбранная в фильтре группа (если выбрана), иначе без группы.
+/// None — текущей группы нет (нужен экран выбора).
 fn group_for_new_client(
     role: &Role,
     settings: &Store,
@@ -526,7 +523,11 @@ fn group_for_new_client(
     }
     match role {
         Role::GroupAdmin(groups) => current_ga_group(settings, uid, groups).map(Some),
-        _ => Some(None),
+        Role::Owner => Some(match settings.owner_scope(uid) {
+            ListScope::Group(id) => Some(id),
+            _ => None,
+        }),
+        Role::Denied => Some(None),
     }
 }
 
@@ -713,12 +714,7 @@ async fn message_handler(
     match state {
         State::AwaitingName => {
             let name = msg.text().unwrap_or_default().to_string();
-            let slug = if settings.name_slug() {
-                Some(crate::vpn::validate::gen_slug())
-            } else {
-                None
-            };
-            match crate::vpn::validate::normalize_name(&name, slug.as_deref()) {
+            match crate::vpn::validate::normalize_name(&name, None) {
                 Ok(valid) => {
                     match vpn.exists(&valid).await {
                         Ok(false) => {
@@ -740,6 +736,31 @@ async fn message_handler(
                                 .await?;
                         }
                         Ok(true) => {
+                            let suggestion = vpn.list().await.ok().and_then(|clients| {
+                                let existing = clients
+                                    .into_iter()
+                                    .map(|c| c.name)
+                                    .collect::<std::collections::HashSet<_>>();
+                                crate::vpn::validate::gen_available_names(&valid, 1, &existing)
+                                    .ok()
+                                    .and_then(|mut names| names.pop())
+                            });
+                            if let Some(suggested) = suggestion {
+                                bot.send_message(
+                                    msg.chat.id,
+                                    i18n::client_exists_suggest(lang, &valid, &suggested),
+                                )
+                                .reply_markup(menu::expiry_menu(lang))
+                                .parse_mode(ParseMode::Html)
+                                .await?;
+                                dialogue
+                                    .update(State::AwaitingExpiry {
+                                        name: suggested,
+                                        recreate: false,
+                                    })
+                                    .await?;
+                                return Ok(());
+                            }
                             // Клавиатуру «Пересоздать» показываем только если этот
                             // клиент в скоупе роли — иначе групповой админ увидел бы
                             // кнопку для чужого клиента (клик всё равно блокирует
@@ -772,7 +793,7 @@ async fn message_handler(
                     }
                 }
                 Err(_e) => {
-                    bot.send_message(msg.chat.id, i18n::bad_name(lang, settings.name_slug()))
+                    bot.send_message(msg.chat.id, i18n::bad_name(lang, false))
                         .await?;
                 }
             }
@@ -864,7 +885,7 @@ async fn message_handler(
             // Худший случай сразу (count=MAX_BULK, slug по текущей настройке):
             // слишком длинный префикс отбивается на первом шаге, а не после
             // выбора срока и PSK в finish_bulk.
-            let slug_enabled = settings.name_slug();
+            let slug_enabled = false;
             match crate::vpn::validate::validate_bulk_prefix(prefix.trim(), slug_enabled) {
                 Ok(()) => {
                     bot.send_message(msg.chat.id, i18n::ask_bulk_count(lang))
@@ -1051,11 +1072,7 @@ async fn message_handler(
                             .parse_mode(ParseMode::Html)
                             .reply_markup(menu::main_menu(lang))
                             .await?;
-                        if first_admin_ever && !settings.name_slug() {
-                            bot.send_message(msg.chat.id, i18n::slug_recommend(lang))
-                                .reply_markup(menu::slug_recommend_menu(lang))
-                                .await?;
-                        }
+                        let _ = first_admin_ever;
                     } else {
                         bot.send_message(msg.chat.id, i18n::admin_already(lang, new_admin))
                             .await?;
@@ -1315,28 +1332,49 @@ async fn finish_bulk(
     expires: Option<&str>,
     psk: bool,
     uid: i64,
+    group: Option<i64>,
 ) {
     let waiting = bot.send_message(chat, i18n::bulk_creating(lang)).await.ok();
 
-    // 1. Генерация имён (slug из настроек — единый для всей пачки, как в add).
-    let slug = if settings.name_slug() {
-        Some(crate::vpn::validate::gen_slug())
-    } else {
-        None
+    // 1. Продолжаем нумерацию и заполняем свободные пропуски.
+    let existing = match vpn.list().await {
+        Ok(clients) => clients
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<std::collections::HashSet<_>>(),
+        Err(e) => {
+            tracing::warn!(error = %e, "list для нумерации упал — используем пустой список");
+            std::collections::HashSet::new()
+        }
     };
-    let names = match crate::vpn::validate::gen_bulk_names(prefix, count as u32, slug.as_deref()) {
+    let names = match crate::vpn::validate::gen_available_names(prefix, count, &existing) {
         Ok(n) => n,
         Err(_) => {
             if let Some(m) = waiting {
                 let _ = bot.delete_message(chat, m.id).await;
             }
-            let max = crate::vpn::validate::max_bulk_prefix_len(slug.is_some());
+            let max = crate::vpn::validate::max_bulk_prefix_len(false);
             let _ = bot
                 .send_message(chat, i18n::bad_bulk_prefix(lang, max))
                 .await;
             return;
         }
     };
+
+    if let Some(gid) = group {
+        if let Some(remaining) = settings.group_remaining(gid) {
+            if remaining < count as i64 {
+                if let Some(m) = waiting {
+                    let _ = bot.delete_message(chat, m.id).await;
+                }
+                let quota = settings.group(gid).and_then(|g| g.max_clients).unwrap_or(0);
+                let _ = bot
+                    .send_message(chat, i18n::quota_reached(lang, quota))
+                    .await;
+                return;
+            }
+        }
+    }
 
     // 2. Превентивная проверка свободных адресов (capacity учитывает v4-подсеть).
     match vpn.capacity().await {
@@ -1372,30 +1410,7 @@ async fn finish_bulk(
         }
     }
 
-    // 3. Превентивная проверка коллизий (сгенерированные имена ∩ существующие).
-    // list() fail-open: если упал, не блокируем создание (add_many сам соберёт
-    // коллизии в skipped и вернёт осмысленный результат).
-    match vpn.list().await {
-        Ok(existing) => {
-            let existing_names: std::collections::HashSet<&str> =
-                existing.iter().map(|c| c.name.as_str()).collect();
-            if let Some(collision) = names.iter().find(|n| existing_names.contains(n.as_str())) {
-                if let Some(m) = waiting {
-                    let _ = bot.delete_message(chat, m.id).await;
-                }
-                let _ = bot
-                    .send_message(chat, i18n::client_exists(lang, collision))
-                    .parse_mode(ParseMode::Html)
-                    .await;
-                return;
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "list для проверки коллизий упал — продолжаем (fail-open)");
-        }
-    }
-
-    // 4. Один вызов add_many (сразу со всеми именами). add_many возвращает
+    // 3. Один вызов add_many (сразу со всеми именами). add_many возвращает
     // BulkResult{created, skipped} — все результаты, не только первый.
     match vpn.add_many(&names, expires, psk).await {
         Ok(res) => {
@@ -1411,17 +1426,17 @@ async fn finish_bulk(
                 // после удаления клиента с чужим group_id — bulk всегда
                 // owner-only и без группы, поэтому явно отвязываем строку,
                 // а не оставляем «воскресшую» привязку от прежнего клиента.
-                settings.assign_client_group(&r.name, None, now_epoch());
+                settings.assign_client_group(&r.name, group, now_epoch());
             }
-            // 5. Альбом .conf — одним sendMediaGroup (только если включён и есть
-            // что отправлять; пустой альбом Telegram отклонит).
+            // 4. Telegram принимает не больше 10 элементов в одном альбоме.
             if settings.deliver_conf() && !res.created.is_empty() {
                 let conf_paths: Vec<String> =
                     res.created.iter().map(|c| c.conf_path.clone()).collect();
-                if let Err(e) = render::send_album(bot, chat, &conf_paths).await {
-                    tracing::error!(error = %e, "альбом .conf не отправлен");
-                    // Файлы созданы, но не доставлены — сообщаем как ошибку.
-                    let _ = bot.send_message(chat, i18n::error_text(lang, &e)).await;
+                for chunk in conf_paths.chunks(10) {
+                    if let Err(e) = render::send_album(bot, chat, chunk).await {
+                        tracing::error!(error = %e, "альбом .conf не отправлен");
+                        let _ = bot.send_message(chat, i18n::error_text(lang, &e)).await;
+                    }
                 }
             }
             // 6. Итог: «Создано N» (+ список пропущенных с причинами, если есть).
@@ -1962,7 +1977,7 @@ async fn callback_handler(
                     return Ok(());
                 }
             }
-            bot.send_message(chat, i18n::ask_client_name(lang, settings.name_slug()))
+            bot.send_message(chat, i18n::ask_client_name(lang, false))
                 .await?;
             dialogue.update(State::AwaitingName).await?;
         }
@@ -2062,6 +2077,12 @@ async fn callback_handler(
             dialogue.exit().await?;
         }
         Action::AddBulk => {
+            if let Role::GroupAdmin(groups) = &role {
+                if current_ga_group(&settings, uid, groups).is_none() {
+                    show_group_select(&bot, chat, msg_id, lang, &settings, groups).await;
+                    return Ok(());
+                }
+            }
             // Шаг 1/4 массового диалога: запрос префикса (текстовый ввод, а не
             // кнопка). Валидация префикса — на следующем шаге (gen_bulk_names с
             // count=1 как smoke-проверка), тут только приглашение к вводу.
@@ -2164,6 +2185,14 @@ async fn callback_handler(
                 expires.as_deref(),
                 psk,
                 uid,
+                match &role {
+                    Role::GroupAdmin(groups) => current_ga_group(&settings, uid, groups),
+                    Role::Owner => match settings.owner_scope(uid) {
+                        ListScope::Group(id) => Some(id),
+                        _ => None,
+                    },
+                    Role::Denied => None,
+                },
             )
             .await;
             dialogue.exit().await?;
@@ -2673,11 +2702,7 @@ async fn callback_handler(
             bot.send_message(chat, i18n::invite_link_text(lang, &url, hours))
                 .parse_mode(ParseMode::Html)
                 .await?;
-            if first_admin_ever && !settings.name_slug() {
-                bot.send_message(chat, i18n::slug_recommend(lang))
-                    .reply_markup(menu::slug_recommend_menu(lang))
-                    .await?;
-            }
+            let _ = first_admin_ever;
             show_group_card(&bot, chat, msg_id, lang, &settings, id).await;
         }
         Action::GroupInviteRevoke(id) => {
@@ -2882,6 +2907,11 @@ mod tests {
         assert_eq!(
             group_for_new_client(&Role::Owner, &store, 1, false, "bob"),
             Some(None)
+        );
+        store.set_owner_scope(1, ListScope::Group(a));
+        assert_eq!(
+            group_for_new_client(&Role::Owner, &store, 1, false, "bob"),
+            Some(Some(a))
         );
         // Сохранённая текущая группа отозвана → выбор группы.
         let ga_only_a = Role::GroupAdmin(vec![a, b]);
@@ -3288,7 +3318,6 @@ mod tests {
             menu::move_client_menu(Lang::Ru, "alice", &[sample_group()]),
             menu::group_scope_menu(Lang::Ru, &[sample_group()]),
             menu::clients_empty_menu(Lang::Ru, crate::vpn::model::ClientFilter::All, true),
-            menu::slug_recommend_menu(Lang::Ru),
         ];
 
         for kb in &keyboards {
@@ -3524,10 +3553,10 @@ mod tests {
             // Owner-only.
             (Action::RegenAll, true, false),
             (Action::RegenAllRun(false), true, false),
-            (Action::AddBulk, true, false),
-            (Action::AddBulkRun(3), true, false),
-            (Action::BulkExpiry("1d".into()), true, false),
-            (Action::AddBulkPsk(true), true, false),
+            (Action::AddBulk, true, true),
+            (Action::AddBulkRun(3), true, true),
+            (Action::BulkExpiry("1d".into()), true, true),
+            (Action::AddBulkPsk(true), true, true),
             (Action::Settings, true, false),
             (Action::SetLang("en".into()), true, false),
             (Action::SetPsk(true), true, false),

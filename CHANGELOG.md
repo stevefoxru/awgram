@@ -9,6 +9,12 @@ Format — [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning 
 
 #### 🔧 Изменено
 
+- Массовое создание использует последовательные имена `name_01`…`name_99`,
+  продолжает существующую нумерацию, заполняет пропуски и поддерживает
+  `name_100`; конфиги отправляются альбомами по 10 файлов.
+- При совпадении одиночного имени бот предлагает первый свободный номер.
+- Пакетное создание доступно в активной группе и автоматически привязывает
+  созданных клиентов к ней. Случайные ID-префиксы больше не используются.
 - **rusqlite 0.32 → 0.40** (bundled SQLite 3.53); для сборки из исходников
   теперь нужен Rust не ниже 1.95 — MSRV зафиксирован в `Cargo.toml`
   ([#44](https://github.com/ekuraev/awgram/pull/44)).
@@ -17,6 +23,13 @@ Format — [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning 
 
 #### 🔧 Changed
 
+- Bulk creation now uses sequential names `name_01`…`name_99`, continues
+  existing numbering, fills gaps, and supports `name_100`; configuration files
+  are delivered in albums of 10.
+- When a single client name already exists, the bot suggests the first free
+  numbered name.
+- Bulk creation works in the active group and automatically assigns new
+  clients to it. Random name ID prefixes are no longer used.
 - **rusqlite 0.32 → 0.40** (bundled SQLite 3.53); building from source now
   requires Rust 1.95 or newer — the MSRV is pinned in `Cargo.toml`
   ([#44](https://github.com/ekuraev/awgram/pull/44)).
