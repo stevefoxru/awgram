@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# awgram — установщик и менеджер (https://github.com/ekuraev/awgram)
+# awgram — установщик и менеджер (https://github.com/stevefoxru/awgram)
 # Установка одной командой:
-#   curl -fsSL https://github.com/ekuraev/awgram/releases/latest/download/install.sh | bash
+#   curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/install.sh | bash
 # После установки доступен как awgram-setup (install|update|config|status|uninstall|help).
 set -euo pipefail
 
 # shellcheck disable=SC2034  # версия скрипта, зарезервирована для будущего использования (self-update/--version)
 SCRIPT_VERSION="1.0.0"
-REPO="ekuraev/awgram"
+REPO="stevefoxru/awgram"
 BIN_PATH="/usr/local/bin/awgram"
 SETUP_PATH="/usr/local/bin/awgram-setup"
 CFG_DIR="/etc/awgram"
@@ -614,7 +614,7 @@ awgram-setup — установка и управление awgram (Telegram-б�
 так он не попадает в историю shell и не виден в ps.
 
 Примеры:
-  curl -fsSL https://github.com/ekuraev/awgram/releases/latest/download/install.sh | bash
+  curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/install.sh | bash
   curl -fsSL ... | bash -s -- install --lang ru --mode hardened --token 'X' --admins 1 --yes
   awgram-setup config --admins 1,2
   awgram-setup update --channel rc
@@ -652,7 +652,7 @@ The token can be passed via the AWGRAM_TOKEN environment variable instead of
 --token — it then stays out of shell history and ps output.
 
 Examples:
-  curl -fsSL https://github.com/ekuraev/awgram/releases/latest/download/install.sh | bash
+  curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/install.sh | bash
   curl -fsSL ... | bash -s -- install --lang en --mode hardened --token 'X' --admins 1 --yes
   awgram-setup config --admins 1,2
   awgram-setup update --channel rc

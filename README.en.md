@@ -2,8 +2,8 @@
 
 [🇷🇺 Русский](README.md) · 🇬🇧 English
 
-[![CI](https://github.com/ekuraev/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ekuraev/awgram/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/ekuraev/awgram)](https://github.com/ekuraev/awgram/releases)
+[![CI](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/stevefoxru/awgram)](https://github.com/stevefoxru/awgram/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A Rust Telegram bot for managing [AmneziaWG](https://amnezia.org/) clients
@@ -79,7 +79,7 @@ tangible on budget VPS hosts.
    [AmneziaWG installer](https://github.com/bivlked/amneziawg-installer) set up, run:
 
    ```bash
-   curl -fsSL https://github.com/ekuraev/awgram/releases/latest/download/install.sh | bash
+   curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/install.sh | bash
    ```
 
 3. Answer the installer's questions (language, root/hardened mode, token,
@@ -88,7 +88,7 @@ tangible on budget VPS hosts.
 Fully automated install — via flags:
 
 ```bash
-curl -fsSL https://github.com/ekuraev/awgram/releases/latest/download/install.sh \
+curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/install.sh \
   | bash -s -- install --lang en --mode root --token 'TOKEN' --admins 111111111 --yes
 ```
 
@@ -106,7 +106,7 @@ yet — either run a plain `awgram-setup update` (it updates the script
 itself too), or install an rc right away with a one-liner from the release:
 
 ```bash
-curl -fsSL https://github.com/ekuraev/awgram/releases/download/vX.Y.Z-rc.N/install.sh \
+curl -fsSL https://github.com/stevefoxru/awgram/releases/download/vX.Y.Z-rc.N/install.sh \
   | bash -s -- update --channel rc
 ```
 

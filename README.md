@@ -2,8 +2,8 @@
 
 🇷🇺 Русский · [🇬🇧 English](README.en.md)
 
-[![CI](https://github.com/ekuraev/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ekuraev/awgram/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/ekuraev/awgram)](https://github.com/ekuraev/awgram/releases)
+[![CI](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/stevefoxru/awgram)](https://github.com/stevefoxru/awgram/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Telegram-бот на Rust для управления клиентами [AmneziaWG](https://amnezia.org/) прямо
@@ -79,7 +79,7 @@ Telegram-бот на Rust для управления клиентами [Amnezi
    [AmneziaWG-инсталлером](https://github.com/bivlked/amneziawg-installer) выполните:
 
    ```bash
-   curl -fsSL https://github.com/ekuraev/awgram/releases/latest/download/install.sh | bash
+   curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/install.sh | bash
    ```
 
 3. Ответьте на вопросы установщика (язык, режим root/hardened, токен,
@@ -88,7 +88,7 @@ Telegram-бот на Rust для управления клиентами [Amnezi
 Полностью автоматическая установка — флагами:
 
 ```bash
-curl -fsSL https://github.com/ekuraev/awgram/releases/latest/download/install.sh \
+curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/install.sh \
   | bash -s -- install --lang ru --mode root --token 'ТОКЕН' --admins 111111111 --yes
 ```
 
@@ -106,7 +106,7 @@ curl -fsSL https://github.com/ekuraev/awgram/releases/latest/download/install.sh
 поставьте rc сразу однострочником из нужного релиза:
 
 ```bash
-curl -fsSL https://github.com/ekuraev/awgram/releases/download/vX.Y.Z-rc.N/install.sh \
+curl -fsSL https://github.com/stevefoxru/awgram/releases/download/vX.Y.Z-rc.N/install.sh \
   | bash -s -- update --channel rc
 ```
 
