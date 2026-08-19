@@ -72,6 +72,14 @@ tangible on budget VPS hosts.
   group admins they appoint, shell-free manage-script invocation, secrets
   never reach the logs, hardened mode (dedicated user + sudoers).
 
+### Users & subscriptions
+
+- 👤 Open registration by Telegram ID with multiple VPN keys per account.
+- 💳 1/3/6/12-month plans, manual transfer approval, and automatic key delivery.
+- 💰 Internal balance with top-ups and an append-only transaction ledger.
+- 🎁 Referral rewards of 25% after subscription activation.
+- 🔗 Assignment of existing keys by Telegram ID or `@username`.
+
 ## Quick start
 
 1. Get a bot token from [@BotFather](https://t.me/BotFather) (`/newbot`)

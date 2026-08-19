@@ -89,6 +89,18 @@ pub enum Action {
     MoveClientTo(Option<i64>, String),
     GroupScopeAsk,
     GroupScopeSet(ListScope),
+    Buy,
+    BuyTerm(i64),
+    BuyMethod(i64, String),
+    BuyPaid(i64),
+    MyKeys,
+    Profile,
+    Balance,
+    PaymentApprove(i64),
+    PaymentReject(i64),
+    AssignOwnerAsk(String),
+    PaymentInstructionsAsk,
+    CustomerKey(String),
     Unknown,
 }
 
@@ -115,8 +127,35 @@ fn parse_callback(data: &str) -> Action {
         "g:new" => Action::GroupCreate,
         "g:selmenu" => Action::GroupSelectMenu,
         "gscope" => Action::GroupScopeAsk,
+        "buy" => Action::Buy,
+        "mykeys" => Action::MyKeys,
+        "profile" => Action::Profile,
+        "balance" => Action::Balance,
+        "set:payment" => Action::PaymentInstructionsAsk,
         _ => {
-            if let Some(v) = data.strip_prefix("g:card:") {
+            if let Some(v) = data.strip_prefix("buy:term:") {
+                v.parse().map(Action::BuyTerm).unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("buy:method:") {
+                let mut parts = v.splitn(2, ':');
+                match (parts.next().and_then(|p| p.parse().ok()), parts.next()) {
+                    (Some(months), Some(method)) => Action::BuyMethod(months, method.to_string()),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("buy:paid:") {
+                v.parse().map(Action::BuyPaid).unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("pay:ok:") {
+                v.parse()
+                    .map(Action::PaymentApprove)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("pay:no:") {
+                v.parse()
+                    .map(Action::PaymentReject)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("owner:assign:") {
+                Action::AssignOwnerAsk(v.to_string())
+            } else if let Some(v) = data.strip_prefix("mykey:") {
+                Action::CustomerKey(v.to_string())
+            } else if let Some(v) = data.strip_prefix("g:card:") {
                 v.parse().map(Action::GroupCard).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("g:ren:") {
                 v.parse()
@@ -332,6 +371,59 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+fn tariff(months: i64) -> Option<(i64, &'static str)> {
+    match months {
+        1 => Some((20_000, "30d")),
+        3 => Some((60_000, "90d")),
+        6 => Some((100_000, "180d")),
+        12 => Some((200_000, "365d")),
+        _ => None,
+    }
+}
+
+fn customer_base_name(user: &crate::store::UserRow) -> String {
+    let raw = user
+        .username
+        .clone()
+        .unwrap_or_else(|| format!("user{}", user.user_id));
+    let mut base: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(28)
+        .collect();
+    if base.is_empty() || base.starts_with('-') {
+        base = format!("user{}", user.user_id);
+        base.truncate(28);
+    }
+    base
+}
+
+async fn provision_customer_key(
+    vpn: &Vpn,
+    settings: &Store,
+    user_id: i64,
+    months: i64,
+) -> crate::error::Result<crate::vpn::model::AddResult> {
+    let user = settings
+        .user(user_id)
+        .ok_or_else(|| crate::error::Error::Parse("пользователь не зарегистрирован".to_string()))?;
+    let existing = vpn
+        .list()
+        .await?
+        .into_iter()
+        .map(|c| c.name)
+        .collect::<std::collections::HashSet<_>>();
+    let name = crate::vpn::validate::gen_available_names(&customer_base_name(&user), 1, &existing)
+        .map_err(|e| crate::error::Error::Parse(e.to_string()))?
+        .remove(0);
+    let (_, expiry) = tariff(months)
+        .ok_or_else(|| crate::error::Error::Parse("неизвестный тариф".to_string()))?;
+    let result = vpn.add(&name, Some(expiry), settings.psk_default()).await?;
+    settings.assign_client_group(&name, None, now_epoch());
+    settings.assign_client_owner(&name, Some(user_id));
+    Ok(result)
+}
+
 /// Обрезает вывод скрипта до лимита Telegram-сообщения (3500 байт, с запасом
 /// на HTML-обёртку), округляя вниз до границы UTF-8-символа — байтовый индекс
 /// может попасть внутрь многобайтового символа (кириллица в выводе скрипта).
@@ -448,8 +540,28 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
     }
     match action {
         // Доступно всем аутентифицированным ролям.
-        Menu | List | Add | Stats | Page(_) | Expiry(_) | AddPsk(_) | AddBulk | AddBulkRun(_)
-        | BulkExpiry(_) | AddBulkPsk(_) | Lang(_) | SetListFilter(_) | Unknown => true,
+        Menu
+        | List
+        | Add
+        | Stats
+        | Page(_)
+        | Expiry(_)
+        | AddPsk(_)
+        | AddBulk
+        | AddBulkRun(_)
+        | BulkExpiry(_)
+        | AddBulkPsk(_)
+        | Lang(_)
+        | SetListFilter(_)
+        | Buy
+        | BuyTerm(_)
+        | BuyMethod(_, _)
+        | BuyPaid(_)
+        | MyKeys
+        | Profile
+        | Balance
+        | CustomerKey(_)
+        | Unknown => true,
         // Экран/установка текущей группы: только GA, группа — только своя.
         GroupSelectMenu => matches!(role, Role::GroupAdmin(_)),
         GroupSelect(id) => matches!(role, Role::GroupAdmin(groups) if groups.contains(id)),
@@ -501,7 +613,11 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | MoveClientAsk(_)
         | MoveClientTo(_, _)
         | GroupScopeAsk
-        | GroupScopeSet(_) => role.is_owner(),
+        | GroupScopeSet(_)
+        | PaymentApprove(_)
+        | PaymentReject(_)
+        | AssignOwnerAsk(_)
+        | PaymentInstructionsAsk => role.is_owner(),
     }
 }
 
@@ -636,6 +752,22 @@ async fn message_handler(
         return Ok(());
     }
 
+    let uid = user_id_of_msg(&msg).unwrap_or(0);
+    if let Some(user) = msg.from.as_ref() {
+        let referrer = msg
+            .text()
+            .and_then(|t| t.strip_prefix("/start ref_"))
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|id| settings.user(*id).is_some());
+        settings.upsert_user(
+            uid,
+            user.username.as_deref(),
+            &user.full_name(),
+            referrer,
+            now_epoch(),
+        );
+    }
+
     // Инвайт-ссылка: /start inv_<token>. Обрабатывается ДО роль-гейта —
     // приглашённый ещё не имеет никакой роли. Токен одноразовый с TTL, так что
     // подбор мусорных токенов даёт лишь "ссылка недействительна".
@@ -644,7 +776,6 @@ async fn message_handler(
         .and_then(|t| t.strip_prefix("/start inv_"))
         .map(str::trim)
     {
-        let uid = user_id_of_msg(&msg).unwrap_or(0);
         let lang = settings.lang(uid);
         match settings.use_invite(payload, uid, now_epoch()) {
             crate::store::InviteUse::Joined(gid) => {
@@ -680,6 +811,9 @@ async fn message_handler(
                         )
                         .parse_mode(ParseMode::Html)
                         .await;
+                    let _ = bot
+                        .forward_message(ChatId(*owner), msg.chat.id, msg.id)
+                        .await;
                 }
             }
             crate::store::InviteUse::AlreadyAdmin(gid) => {
@@ -699,18 +833,149 @@ async fn message_handler(
         return Ok(());
     }
 
-    let uid = user_id_of_msg(&msg).unwrap_or(0);
     let role = resolve_role(uid, &cfg.admin_ids, &settings);
+    let state = dialogue.get().await?.unwrap_or_default();
+    if let State::AwaitingPaymentProof { id } = state.clone() {
+        let proof = msg.text().unwrap_or("Подтверждение отправлено");
+        if settings.set_payment_proof(id, uid, proof) {
+            if let Some(req) = settings.payment_request(id) {
+                let user = settings.user(uid);
+                let label = user
+                    .as_ref()
+                    .and_then(|u| u.username.as_ref().map(|v| format!("@{v}")))
+                    .unwrap_or_else(|| uid.to_string());
+                let text = format!(
+                    "💳 Новая заявка #{}\nПользователь: {}\nTelegram ID: {}\nТариф: {} мес.\nСумма: {} ₽\nПодтверждение: {}",
+                    req.id,
+                    label,
+                    uid,
+                    req.months,
+                    req.amount_kopecks / 100,
+                    crate::i18n::html_escape(proof)
+                );
+                for owner in &cfg.admin_ids {
+                    let _ = bot
+                        .send_message(ChatId(*owner), &text)
+                        .reply_markup(menu::payment_admin_menu(id))
+                        .parse_mode(ParseMode::Html)
+                        .await;
+                }
+            }
+            bot.send_message(msg.chat.id, "✅ Заявка отправлена администратору.")
+                .reply_markup(menu::customer_keyboard())
+                .await?;
+        }
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingTopupAmount) {
+        let rubles = msg.text().unwrap_or_default().trim().parse::<i64>().ok();
+        if let Some(rubles) = rubles.filter(|v| (100..=100_000).contains(v)) {
+            if let Some(id) =
+                settings.create_payment_request(uid, 0, rubles * 100, "topup", now_epoch())
+            {
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "Заявка на пополнение #{id}\nСумма: {rubles} ₽\n\n{}",
+                        settings.payment_instructions()
+                    ),
+                )
+                .reply_markup(menu::payment_paid_menu(id))
+                .await?;
+                dialogue.update(State::Idle).await?;
+            }
+        } else {
+            bot.send_message(msg.chat.id, "Введите сумму от 100 до 100000 рублей.")
+                .await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingPaymentInstructions) {
+        let value = msg.text().unwrap_or_default().trim();
+        if !value.is_empty() && value.len() <= 1000 {
+            settings.set_payment_instructions(value);
+            bot.send_message(msg.chat.id, "✅ Текст реквизитов обновлён.")
+                .reply_markup(menu::main_menu(settings.lang(uid)))
+                .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(msg.chat.id, "Введите текст длиной от 1 до 1000 символов.")
+                .await?;
+        }
+        return Ok(());
+    }
     if role == Role::Denied {
-        tracing::warn!(user_id = uid, "отклонён доступ (message)");
-        let lang = settings.lang(uid);
-        bot.send_message(msg.chat.id, i18n::access_denied(lang))
-            .await?;
+        match msg.text().unwrap_or_default() {
+            "/start" | "🏠 Меню" => {
+                bot.send_message(
+                    msg.chat.id,
+                    "Добро пожаловать! Здесь можно приобрести и управлять VPN-ключами.",
+                )
+                .reply_markup(menu::customer_keyboard())
+                .await?;
+            }
+            "➕ Купить ключ" => {
+                bot.send_message(msg.chat.id, "Выберите срок подписки:")
+                    .reply_markup(menu::buy_terms_menu())
+                    .await?;
+            }
+            "🔑 Мои ключи" => {
+                let names = settings.user_client_names(uid);
+                let text = if names.is_empty() {
+                    "У вас пока нет ключей.".to_string()
+                } else {
+                    format!(
+                        "🔑 Ваши ключи:\n{}",
+                        names
+                            .iter()
+                            .map(|n| format!("• {n}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                };
+                let mut request = bot.send_message(msg.chat.id, text);
+                if !names.is_empty() {
+                    request = request.reply_markup(menu::customer_keys_menu(&names));
+                }
+                request.await?;
+            }
+            "💰 Баланс" => {
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "💰 Баланс: {:.2} ₽",
+                        settings.balance_kopecks(uid) as f64 / 100.0
+                    ),
+                )
+                .reply_markup(menu::customer_keyboard())
+                .await?;
+            }
+            "➕ Пополнить" => {
+                bot.send_message(
+                    msg.chat.id,
+                    "Введите сумму пополнения в рублях (от 100 до 100000):",
+                )
+                .await?;
+                dialogue.update(State::AwaitingTopupAmount).await?;
+            }
+            "👤 Профиль" => {
+                let count = settings.user_client_names(uid).len();
+                let me = bot.get_me().await?;
+                let username = me.username.clone().unwrap_or_default();
+                bot.send_message(msg.chat.id, format!("👤 Telegram ID: {uid}\nАктивных ключей: {count}\nРеферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}"))
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+            }
+            _ => {
+                bot.send_message(msg.chat.id, "Используйте кнопки меню ниже.")
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+            }
+        }
         return Ok(());
     }
     let lang = settings.lang(uid);
-
-    let state = dialogue.get().await?.unwrap_or_default();
     match state {
         State::AwaitingName => {
             let name = msg.text().unwrap_or_default().to_string();
@@ -1576,21 +1841,339 @@ async fn callback_handler(
     let msg_id = src.id();
 
     let uid = user_id_of_cb(&q);
+    settings.upsert_user(
+        uid,
+        q.from.username.as_deref(),
+        &q.from.full_name(),
+        None,
+        now_epoch(),
+    );
     let role = resolve_role(uid, &cfg.admin_ids, &settings);
-    if role == Role::Denied {
+    let data = q.data.clone().unwrap_or_default();
+    let action = parse_callback(&data);
+    let customer_action = matches!(
+        &action,
+        Action::Buy
+            | Action::BuyTerm(_)
+            | Action::BuyMethod(_, _)
+            | Action::BuyPaid(_)
+            | Action::MyKeys
+            | Action::Profile
+            | Action::Balance
+            | Action::CustomerKey(_)
+    );
+    if role == Role::Denied && !customer_action {
         tracing::warn!(user_id = uid, "отклонён доступ (callback)");
         return Ok(());
     }
     let lang = settings.lang(uid);
-
-    let data = q.data.clone().unwrap_or_default();
-    let action = parse_callback(&data);
     // Единая авторизация. Отказ — молчаливый выход: callback уже отвечен в
     // начале функции, прежние guard'ы вели себя так же.
-    if !authorize(&action, &role, &settings) {
+    if role != Role::Denied && !authorize(&action, &role, &settings) {
         return Ok(());
     }
     match action {
+        Action::Buy => {
+            bot.send_message(chat, "Выберите срок подписки:")
+                .reply_markup(menu::buy_terms_menu())
+                .await?;
+        }
+        State::AwaitingClientOwner { name } => {
+            let raw = msg.text().unwrap_or_default().trim();
+            let user = raw
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| settings.user(id))
+                .or_else(|| settings.find_user_by_username(raw));
+            if let Some(user) = user {
+                if settings.assign_client_owner(&name, Some(user.user_id)) {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("✅ Ключ {name} привязан к пользователю {}.", user.user_id),
+                    )
+                    .reply_markup(menu::main_menu(lang))
+                    .await?;
+                }
+                dialogue.update(State::Idle).await?;
+            } else {
+                bot.send_message(msg.chat.id, "Пользователь не найден. Он должен сначала запустить бота. Введите Telegram ID или @username ещё раз.").await?;
+            }
+        }
+        Action::BuyTerm(months) => {
+            if tariff(months).is_some() {
+                bot.send_message(chat, "Выберите способ оплаты:")
+                    .reply_markup(menu::buy_method_menu(months))
+                    .await?;
+            }
+        }
+        Action::BuyMethod(months, method) => {
+            let Some((amount, _)) = tariff(months) else {
+                return Ok(());
+            };
+            if method == "balance" {
+                let reference = format!("balance:{}:{}", uid, now_epoch());
+                if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
+                    bot.send_message(chat, "Недостаточно средств на внутреннем балансе.")
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    return Ok(());
+                }
+                match provision_customer_key(&vpn, &settings, uid, months).await {
+                    Ok(result) => {
+                        if let Some(referrer) = settings.user(uid).and_then(|u| u.referrer_id) {
+                            let reward = amount * i64::from(settings.referral_percent()) / 100;
+                            let _ = settings.add_ledger_entry(
+                                referrer,
+                                reward,
+                                "referral",
+                                &format!("referral:{reference}"),
+                                Some(&format!("user={uid}")),
+                                now_epoch(),
+                            );
+                            let _ = bot
+                                .send_message(
+                                    ChatId(referrer),
+                                    format!(
+                                        "🎁 Реферальное начисление: {:.2} ₽",
+                                        reward as f64 / 100.0
+                                    ),
+                                )
+                                .await;
+                        }
+                        settings.log_event(
+                            now_epoch(),
+                            EventKind::ClientAdd,
+                            Some(&result.name),
+                            Some(uid),
+                            Some("balance_purchase"),
+                        );
+                        bot.send_message(chat, format!("✅ Ключ {} создан.", result.name))
+                            .await?;
+                        if let Err(e) = render::send_client_files(&bot, chat, lang, &result).await {
+                            tracing::error!(error = %e, "не удалось выдать купленный ключ");
+                        }
+                    }
+                    Err(e) => {
+                        let _ = settings.add_ledger_entry(
+                            uid,
+                            amount,
+                            "refund",
+                            &format!("refund:{reference}"),
+                            Some("provision failed"),
+                            now_epoch(),
+                        );
+                        bot.send_message(chat, i18n::error_text(lang, &e)).await?;
+                    }
+                }
+            } else if method == "manual" {
+                if let Some(id) =
+                    settings.create_payment_request(uid, months, amount, "manual", now_epoch())
+                {
+                    let text = format!(
+                        "Заявка #{id}\nТариф: {months} мес.\nСумма: {} ₽\n\n{}",
+                        amount / 100,
+                        settings.payment_instructions()
+                    );
+                    bot.send_message(chat, text)
+                        .reply_markup(menu::payment_paid_menu(id))
+                        .await?;
+                }
+            }
+        }
+        Action::BuyPaid(id) => {
+            if settings.payment_request(id).is_some_and(|p| {
+                p.user_id == uid && p.status == crate::store::PaymentStatus::Pending
+            }) {
+                bot.send_message(
+                    chat,
+                    "Пришлите номер операции, комментарий или скриншот чека.",
+                )
+                .await?;
+                dialogue.update(State::AwaitingPaymentProof { id }).await?;
+            }
+        }
+        Action::MyKeys => {
+            let names = settings.user_client_names(uid);
+            let text = if names.is_empty() {
+                "У вас пока нет ключей.".to_string()
+            } else {
+                format!("🔑 Ваши ключи:\n{}", names.join("\n"))
+            };
+            let mut request = bot.send_message(chat, text);
+            if !names.is_empty() {
+                request = request.reply_markup(menu::customer_keys_menu(&names));
+            }
+            request.await?;
+        }
+        Action::Balance => {
+            bot.send_message(
+                chat,
+                format!(
+                    "💰 Баланс: {:.2} ₽",
+                    settings.balance_kopecks(uid) as f64 / 100.0
+                ),
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+        }
+        Action::Profile => {
+            let me = bot.get_me().await?;
+            let username = me.username.clone().unwrap_or_default();
+            bot.send_message(chat, format!("👤 Telegram ID: {uid}\nАктивных ключей: {}\nРеферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}", settings.user_client_names(uid).len()))
+                .reply_markup(menu::customer_keyboard()).await?;
+        }
+        Action::PaymentReject(id) => {
+            if settings.decide_payment(
+                id,
+                crate::store::PaymentStatus::Rejected,
+                uid,
+                None,
+                now_epoch(),
+            ) {
+                if let Some(req) = settings.payment_request(id) {
+                    let _ = bot
+                        .send_message(
+                            ChatId(req.user_id),
+                            format!("❌ Заявка #{} отклонена.", req.id),
+                        )
+                        .reply_markup(menu::customer_keyboard())
+                        .await;
+                }
+            }
+        }
+        Action::PaymentApprove(id) => {
+            let Some(req) = settings.payment_request(id) else {
+                return Ok(());
+            };
+            if req.status != crate::store::PaymentStatus::Pending {
+                return Ok(());
+            }
+            if req.method == "topup" {
+                if settings.decide_payment(
+                    id,
+                    crate::store::PaymentStatus::Approved,
+                    uid,
+                    None,
+                    now_epoch(),
+                ) {
+                    let _ = settings.add_ledger_entry(
+                        req.user_id,
+                        req.amount_kopecks,
+                        "topup",
+                        &format!("payment:{id}"),
+                        None,
+                        now_epoch(),
+                    );
+                    let _ = bot
+                        .send_message(
+                            ChatId(req.user_id),
+                            format!(
+                                "✅ Баланс пополнен на {:.2} ₽.",
+                                req.amount_kopecks as f64 / 100.0
+                            ),
+                        )
+                        .reply_markup(menu::customer_keyboard())
+                        .await;
+                    bot.send_message(chat, format!("✅ Пополнение #{id} одобрено."))
+                        .await?;
+                }
+                return Ok(());
+            }
+            match provision_customer_key(&vpn, &settings, req.user_id, req.months).await {
+                Ok(result) => {
+                    if settings.decide_payment(
+                        id,
+                        crate::store::PaymentStatus::Approved,
+                        uid,
+                        Some(&result.name),
+                        now_epoch(),
+                    ) {
+                        if let Some(user) = settings.user(req.user_id) {
+                            if let Some(referrer) = user.referrer_id {
+                                let reward = req.amount_kopecks
+                                    * i64::from(settings.referral_percent())
+                                    / 100;
+                                let _ = settings.add_ledger_entry(
+                                    referrer,
+                                    reward,
+                                    "referral",
+                                    &format!("referral:payment:{id}"),
+                                    Some(&format!("user={}", req.user_id)),
+                                    now_epoch(),
+                                );
+                                let _ = bot
+                                    .send_message(
+                                        ChatId(referrer),
+                                        format!(
+                                            "🎁 Реферальное начисление: {:.2} ₽",
+                                            reward as f64 / 100.0
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+                        settings.log_event(
+                            now_epoch(),
+                            EventKind::ClientAdd,
+                            Some(&result.name),
+                            Some(req.user_id),
+                            Some("manual_purchase"),
+                        );
+                        let _ = bot
+                            .send_message(
+                                ChatId(req.user_id),
+                                format!("✅ Оплата подтверждена. Ключ {} создан.", result.name),
+                            )
+                            .await;
+                        if let Err(e) = render::send_client_files(
+                            &bot,
+                            ChatId(req.user_id),
+                            settings.lang(req.user_id),
+                            &result,
+                        )
+                        .await
+                        {
+                            tracing::error!(error = %e, "не удалось выдать оплаченный ключ");
+                        }
+                        bot.send_message(chat, format!("✅ Заявка #{id} одобрена."))
+                            .await?;
+                    }
+                }
+                Err(e) => bot.send_message(chat, i18n::error_text(lang, &e)).await?,
+            }
+        }
+        Action::AssignOwnerAsk(name) => {
+            bot.send_message(
+                chat,
+                format!("Введите Telegram ID или @username владельца ключа {name}:"),
+            )
+            .await?;
+            dialogue.update(State::AwaitingClientOwner { name }).await?;
+        }
+        Action::PaymentInstructionsAsk => {
+            bot.send_message(
+                chat,
+                format!(
+                    "Текущий текст:\n\n{}\n\nОтправьте новый текст реквизитов:",
+                    settings.payment_instructions()
+                ),
+            )
+            .await?;
+            dialogue.update(State::AwaitingPaymentInstructions).await?;
+        }
+        Action::CustomerKey(name) => {
+            if settings.client_owner(&name) != Some(uid) {
+                return Ok(());
+            }
+            match vpn.existing_files(&name) {
+                Ok(res) => {
+                    if let Err(e) = render::send_client_files(&bot, chat, lang, &res).await {
+                        bot.send_message(chat, i18n::error_text(lang, &e)).await?;
+                    }
+                }
+                Err(e) => bot.send_message(chat, i18n::error_text(lang, &e)).await?,
+            }
+        }
         Action::Menu => {
             dialogue.update(State::Idle).await?;
             match &role {
@@ -3483,6 +4066,18 @@ mod tests {
                 MoveClientTo(_, _) => {}
                 GroupScopeAsk => {}
                 GroupScopeSet(_) => {}
+                Buy => {}
+                BuyTerm(_) => {}
+                BuyMethod(_, _) => {}
+                BuyPaid(_) => {}
+                MyKeys => {}
+                Profile => {}
+                Balance => {}
+                PaymentApprove(_) => {}
+                PaymentReject(_) => {}
+                AssignOwnerAsk(_) => {}
+                PaymentInstructionsAsk => {}
+                CustomerKey(_) => {}
                 Unknown => {}
             }
         }

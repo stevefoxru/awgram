@@ -7,11 +7,13 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
+mod commerce;
 mod events;
 mod groups;
 mod settings;
 mod stats;
 
+pub use commerce::{PaymentRequest, PaymentStatus, UserRow};
 pub use events::{EventKind, EventRow};
 pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
@@ -101,6 +103,43 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE clients ADD COLUMN group_id INTEGER REFERENCES groups(id);
     "#,
+    // v3: обычные пользователи, владение ключами и ручные платежи.
+    r#"
+    CREATE TABLE users(
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        display_name TEXT NOT NULL DEFAULT '',
+        referrer_id INTEGER REFERENCES users(user_id),
+        created_at INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL
+    );
+    ALTER TABLE clients ADD COLUMN owner_user_id INTEGER REFERENCES users(user_id);
+    CREATE INDEX idx_clients_owner ON clients(owner_user_id, removed_at);
+    CREATE TABLE balance_ledger(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        amount_kopecks INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        reference TEXT NOT NULL UNIQUE,
+        details TEXT,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_ledger_user ON balance_ledger(user_id, created_at);
+    CREATE TABLE payment_requests(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        months INTEGER NOT NULL,
+        amount_kopecks INTEGER NOT NULL,
+        method TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        proof TEXT,
+        client_name TEXT,
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER,
+        decided_by INTEGER
+    );
+    CREATE INDEX idx_payments_status ON payment_requests(status, created_at);
+    "#,
 ];
 
 pub struct Store {
@@ -188,7 +227,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 2);
+        assert_eq!(store.schema_version(), 3);
     }
 
     #[test]
@@ -197,12 +236,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 2);
+        assert_eq!(store.schema_version(), 3);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 2);
+        assert_eq!(store.schema_version(), 3);
     }
 }

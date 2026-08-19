@@ -1,4 +1,4 @@
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup};
 
 use crate::i18n::{self, Lang};
 use crate::vpn::model::{format_handshake_compact, Client, ClientFilter};
@@ -6,6 +6,64 @@ use crate::vpn::BackupFile;
 
 fn cb(text: &str, data: &str) -> InlineKeyboardButton {
     InlineKeyboardButton::callback(text.to_string(), data.to_string())
+}
+
+pub fn customer_keyboard() -> KeyboardMarkup {
+    KeyboardMarkup::new(vec![
+        vec![
+            KeyboardButton::new("🔑 Мои ключи"),
+            KeyboardButton::new("➕ Купить ключ"),
+        ],
+        vec![
+            KeyboardButton::new("💰 Баланс"),
+            KeyboardButton::new("➕ Пополнить"),
+            KeyboardButton::new("👤 Профиль"),
+        ],
+    ])
+    .resize_keyboard()
+    .persistent()
+}
+
+pub fn buy_terms_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("1 месяц — 200 ₽", "buy:term:1"),
+            cb("3 месяца — 600 ₽", "buy:term:3"),
+        ],
+        vec![
+            cb("6 месяцев — 1000 ₽", "buy:term:6"),
+            cb("12 месяцев — 2000 ₽", "buy:term:12"),
+        ],
+    ])
+}
+
+pub fn buy_method_menu(months: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("💳 Перевод", &format!("buy:method:{months}:manual"))],
+        vec![cb(
+            "💰 Внутренний баланс",
+            &format!("buy:method:{months}:balance"),
+        )],
+    ])
+}
+
+pub fn payment_paid_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![cb("✅ Я оплатил", &format!("buy:paid:{id}"))]])
+}
+
+pub fn payment_admin_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        cb("✅ Одобрить", &format!("pay:ok:{id}")),
+        cb("❌ Отклонить", &format!("pay:no:{id}")),
+    ]])
+}
+
+pub fn customer_keys_menu(names: &[String]) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(
+        names
+            .iter()
+            .map(|name| vec![cb(&format!("🔑 {name}"), &format!("mykey:{name}"))]),
+    )
 }
 
 pub fn main_menu(lang: Lang) -> InlineKeyboardMarkup {
@@ -226,6 +284,7 @@ pub fn settings_menu(
                 "set:link:on"
             },
         )],
+        vec![cb("💳 Реквизиты оплаты", "set:payment")],
         vec![cb(&i18n::btn_back(lang), "menu")],
     ])
 }
@@ -504,6 +563,10 @@ pub fn client_card(lang: Lang, name: &str, is_owner: bool) -> InlineKeyboardMark
     // групповому админу мёртвые кнопки не показываем); «История» — всем.
     let mut util_row = Vec::new();
     if is_owner {
+        rows.push(vec![cb(
+            "👤 Назначить владельца",
+            &format!("owner:assign:{name}"),
+        )]);
         util_row.push(cb(&i18n::btn_modify(lang), &format!("mod:{name}")));
     }
     util_row.push(cb(&i18n::btn_history(lang), &format!("history:{name}")));

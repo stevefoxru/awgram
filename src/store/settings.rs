@@ -105,6 +105,22 @@ impl Store {
     pub fn set_deliver_link(&self, v: bool) {
         self.set_json("deliver_link", &v);
     }
+    pub fn payment_instructions(&self) -> String {
+        self.get_json("payment_instructions").unwrap_or_else(|| {
+            "+79999611890 — Яндекс Банк. После перевода нажмите «Я оплатил».".to_string()
+        })
+    }
+    pub fn set_payment_instructions(&self, value: &str) {
+        self.set_json("payment_instructions", &value.to_string());
+    }
+    pub fn referral_percent(&self) -> u8 {
+        self.get_json::<u8>("referral_percent")
+            .unwrap_or(25)
+            .min(100)
+    }
+    pub fn set_referral_percent(&self, value: u8) {
+        self.set_json("referral_percent", &value.min(100));
+    }
     /// Фильтр списка клиентов — персональный (групповой админ не меняет вид
     /// владельцу). Фолбэк на старый глобальный ключ: туда писали версии до
     /// per-user фильтра и миграция из legacy state.json.

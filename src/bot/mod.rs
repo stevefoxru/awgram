@@ -58,6 +58,14 @@ pub enum State {
     AwaitingGroupAdminId {
         id: i64,
     },
+    AwaitingPaymentProof {
+        id: i64,
+    },
+    AwaitingClientOwner {
+        name: String,
+    },
+    AwaitingTopupAmount,
+    AwaitingPaymentInstructions,
 }
 
 #[cfg(test)]

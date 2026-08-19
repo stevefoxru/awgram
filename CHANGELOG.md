@@ -9,6 +9,14 @@ Format — [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning 
 
 #### 🔧 Изменено
 
+- Добавлен пользовательский кабинет с нижним меню, покупкой ключей на
+  1/3/6/12 месяцев, собственными ключами, балансом и профилем.
+- Добавлены ручные заявки на оплату, одобрение/отклонение владельцем и
+  автоматическая выдача ключа.
+- Добавлены внутренний баланс, пополнение, неизменяемый журнал операций и
+  реферальное начисление 25% после активации подписки.
+- Существующие ключи можно назначить пользователю по Telegram ID или
+  `@username` из карточки клиента.
 - Массовое создание использует последовательные имена `name_01`…`name_99`,
   продолжает существующую нумерацию, заполняет пропуски и поддерживает
   `name_100`; конфиги отправляются альбомами по 10 файлов.
@@ -23,6 +31,13 @@ Format — [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning 
 
 #### 🔧 Changed
 
+- Added an end-user account with a reply keyboard, 1/3/6/12-month purchases,
+  owned keys, internal balance, and profile.
+- Added manual payment requests, owner approval/rejection, and automatic key
+  provisioning.
+- Added top-ups, an append-only balance ledger, and a 25% referral reward after
+  subscription activation.
+- Existing keys can be assigned by Telegram ID or `@username`.
 - Bulk creation now uses sequential names `name_01`…`name_99`, continues
   existing numbering, fills gaps, and supports `name_100`; configuration files
   are delivered in albums of 10.
