@@ -82,6 +82,11 @@ pub enum State {
         source_chat_id: i64,
         source_message_id: i32,
     },
+    AwaitingAdminSearch,
+    AwaitingStaffRole,
+    AwaitingBulkManage {
+        operation: String,
+    },
 }
 
 #[cfg(test)]

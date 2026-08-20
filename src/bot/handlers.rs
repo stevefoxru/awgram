@@ -22,6 +22,9 @@ pub enum Action {
     AdminSupport,
     AdminBroadcast,
     AdminHelp,
+    AdminSearch,
+    AdminRoles,
+    AdminBulk(String),
     Menu,
     List,
     Add,
@@ -130,6 +133,8 @@ fn parse_callback(data: &str) -> Action {
         "admin:support" => Action::AdminSupport,
         "admin:broadcast" => Action::AdminBroadcast,
         "admin:help" => Action::AdminHelp,
+        "admin:search" => Action::AdminSearch,
+        "admin:roles" => Action::AdminRoles,
         "menu" => Action::Menu,
         "list" => Action::List,
         "add" => Action::Add,
@@ -204,6 +209,8 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::SupportTicket)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:bulk:") {
+                Action::AdminBulk(v.to_string())
             } else if let Some(v) = data.strip_prefix("renew:term:") {
                 let mut parts = v.rsplitn(2, ':');
                 match (parts.next().and_then(|p| p.parse().ok()), parts.next()) {
@@ -755,6 +762,7 @@ async fn edit_or_send(
 pub fn home_menu(role: &Role, lang: Lang) -> InlineKeyboardMarkup {
     match role {
         Role::GroupAdmin(groups) => menu::ga_main_menu(lang, groups.len() > 1),
+        Role::Owner => menu::admin_dashboard_menu(),
         Role::Staff(_) => menu::main_menu(lang),
         _ => menu::main_menu(lang),
     }
@@ -910,6 +918,9 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminSupport
         | AdminBroadcast
         | AdminHelp
+        | AdminSearch
+        | AdminRoles
+        | AdminBulk(_)
         | PaymentInstructionsAsk => role.is_owner(),
     }
 }
@@ -1589,6 +1600,151 @@ async fn message_handler(
             )
             .await?;
         }
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingAdminSearch) {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let query = msg.text().unwrap_or_default().trim();
+        let rows = settings.search_clients(query, 30);
+        let text = if rows.is_empty() {
+            "Ничего не найдено.".into()
+        } else {
+            rows.into_iter()
+                .map(|(name, owner, label)| {
+                    format!(
+                        "• {name} · {} · {}",
+                        label.unwrap_or_else(|| "без устройства".into()),
+                        owner
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "без владельца".into())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        bot.send_message(
+            msg.chat.id,
+            format!("🔎 Результаты поиска «{query}»\n\n{text}"),
+        )
+        .reply_markup(menu::admin_dashboard_menu())
+        .await?;
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingStaffRole) {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let parts = msg
+            .text()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let selected = match (
+            parts.first().and_then(|v| v.parse::<i64>().ok()),
+            parts.get(1).map(String::as_str),
+        ) {
+            (Some(user_id), Some(value)) => Some((user_id, value)),
+            _ => None,
+        };
+        let result = selected.is_some_and(|(user_id, value)| {
+            let changed = settings.set_staff_role(
+                user_id,
+                if value == "remove" { None } else { Some(value) },
+                uid,
+                now_epoch(),
+            );
+            if changed {
+                settings.log_event(
+                    now_epoch(),
+                    EventKind::RoleChange,
+                    None,
+                    Some(uid),
+                    Some(&format!("user={user_id} role={value}")),
+                );
+            }
+            changed
+        });
+        bot.send_message(
+            msg.chat.id,
+            if result {
+                "✅ Роль обновлена."
+            } else {
+                "Не удалось изменить роль. Формат: TELEGRAM_ID technical|support|finance|remove"
+            },
+        )
+        .reply_markup(menu::admin_dashboard_menu())
+        .await?;
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if let State::AwaitingBulkManage { operation } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let parts = msg
+            .text()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let prefix = parts.first().cloned().unwrap_or_default();
+        let seconds = parts.get(1).and_then(|v| duration_seconds(v));
+        if prefix.is_empty() || (operation == "extend" && seconds.is_none()) {
+            bot.send_message(
+                msg.chat.id,
+                "Введите префикс; для продления также срок. Например: client 30d",
+            )
+            .await?;
+            return Ok(());
+        }
+        let names = vpn
+            .list()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|n| n.starts_with(&prefix))
+            .take(100)
+            .collect::<Vec<_>>();
+        let mut ok = 0usize;
+        for name in &names {
+            let result = match operation.as_str() {
+                "disable" => vpn.disable_client(name).await,
+                "enable" => vpn.enable_client(name).await,
+                "extend" => vpn
+                    .extend_client(name, seconds.unwrap_or(0), now_epoch())
+                    .await
+                    .map(|_| ()),
+                _ => Err(crate::error::Error::Parse("неизвестная операция".into())),
+            };
+            if result.is_ok() {
+                ok += 1;
+                settings.log_event(
+                    now_epoch(),
+                    EventKind::Modify,
+                    Some(name),
+                    Some(uid),
+                    Some(&format!("bulk_{operation}")),
+                );
+            }
+        }
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "✅ Обработано {ok}/{} ключей с префиксом {prefix}.",
+                names.len()
+            ),
+        )
+        .reply_markup(menu::admin_dashboard_menu())
+        .await?;
         dialogue.update(State::Idle).await?;
         return Ok(());
     }
@@ -2601,7 +2757,36 @@ async fn callback_handler(
             dialogue.update(State::AwaitingBroadcast).await?;
         }
         Action::AdminHelp => {
-            bot.send_message(chat,"ℹ️ Команды владельца\n\n/find QUERY — поиск ключа или владельца\n/role ID technical|support|finance|remove — роли сотрудников\n/bulk_disable PREFIX — отключить группу ключей\n/bulk_enable PREFIX — включить\n/bulk_extend PREFIX 30d — продлить\n\nОсновные повседневные действия доступны кнопками панели.").reply_markup(menu::admin_dashboard_menu()).await?;
+            bot.send_message(chat,"ℹ️ Навигация\n\n➕ Создать ключ — один новый клиент\n📦 Создать оптом — пакет последовательных ключей\n📊 Статистика — трафик, активность, лидеры и подразделы\n🔎 Поиск — ключи и владельцы\n🧰 Массовое управление — включение, отключение и продление по префиксу\n🧑‍💼 Роли — назначение сотрудников\n\nВсе основные действия выполняются кнопками; текстовые команды оставлены только для совместимости.").reply_markup(menu::admin_dashboard_menu()).await?;
+        }
+        Action::AdminSearch => {
+            bot.send_message(
+                chat,
+                "Введите имя ключа, устройство, Telegram ID или username владельца:",
+            )
+            .await?;
+            dialogue.update(State::AwaitingAdminSearch).await?;
+        }
+        Action::AdminRoles => {
+            bot.send_message(chat,"Введите Telegram ID и роль через пробел.\nНапример: 123456789 support\n\nРоли: technical, support, finance. Для отзыва: 123456789 remove").await?;
+            dialogue.update(State::AwaitingStaffRole).await?;
+        }
+        Action::AdminBulk(operation) => {
+            if operation == "menu" {
+                bot.send_message(chat, "🧰 Массовое управление ключами\nВыберите операцию:")
+                    .reply_markup(menu::bulk_manage_menu())
+                    .await?;
+            } else if matches!(operation.as_str(), "disable" | "enable" | "extend") {
+                let prompt = if operation == "extend" {
+                    "Введите префикс и срок, например: client 30d"
+                } else {
+                    "Введите префикс имён ключей, например: client"
+                };
+                bot.send_message(chat, prompt).await?;
+                dialogue
+                    .update(State::AwaitingBulkManage { operation })
+                    .await?;
+            }
         }
         Action::Buy => {
             bot.send_message(chat, "Выберите срок подписки:")
@@ -3311,7 +3496,11 @@ async fn callback_handler(
                         chat,
                         msg_id,
                         format_stats(lang, &clients, now, &summary, &top),
-                        home_menu(&role, lang),
+                        if role.is_owner() {
+                            menu::statistics_menu()
+                        } else {
+                            home_menu(&role, lang)
+                        },
                     )
                     .await;
                 }
@@ -4852,6 +5041,9 @@ mod tests {
 
         let keyboards = vec![
             menu::main_menu(Lang::Ru),
+            menu::admin_dashboard_menu(),
+            menu::bulk_manage_menu(),
+            menu::statistics_menu(),
             menu::expiry_menu(Lang::Ru),
             menu::client_card(Lang::Ru, "alice", true),
             menu::confirm_delete(Lang::Ru, "bob"),
@@ -5086,6 +5278,9 @@ mod tests {
                 AdminSupport => {}
                 AdminBroadcast => {}
                 AdminHelp => {}
+                AdminSearch => {}
+                AdminRoles => {}
+                AdminBulk(_) => {}
                 Unknown => {}
             }
         }

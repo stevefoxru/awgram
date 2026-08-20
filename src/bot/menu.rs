@@ -49,6 +49,11 @@ pub fn admin_keyboard() -> KeyboardMarkup {
 
 pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("➕ Создать ключ", "add"),
+            cb("📦 Создать оптом", "addbulk"),
+        ],
+        vec![cb("📊 Статистика", "stats"), cb("🔎 Поиск", "admin:search")],
         vec![cb("👥 Клиенты", "list"), cb("🔗 Владельцы", "admin:owners")],
         vec![
             cb("💳 Финансы", "admin:finance"),
@@ -66,7 +71,32 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("⚙️ Настройки", "settings"),
             cb("🔄 Обновить", "admin:dashboard"),
         ],
-        vec![cb("ℹ️ Команды и роли", "admin:help")],
+        vec![
+            cb("🧰 Массовое управление", "admin:bulk:menu"),
+            cb("🧑‍💼 Роли", "admin:roles"),
+        ],
+        vec![cb("ℹ️ Справка", "admin:help")],
+    ])
+}
+
+pub fn bulk_manage_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("⏸ Отключить по префиксу", "admin:bulk:disable")],
+        vec![cb("▶️ Включить по префиксу", "admin:bulk:enable")],
+        vec![cb("📅 Продлить по префиксу", "admin:bulk:extend")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn statistics_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🔄 Обновить VPN-статистику", "stats")],
+        vec![
+            cb("💳 Финансы", "admin:finance"),
+            cb("🔗 Владельцы", "admin:owners"),
+        ],
+        vec![cb("🩺 Сервер", "check"), cb("👥 Список ключей", "list")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
 
@@ -1520,6 +1550,10 @@ mod tests {
     fn admin_dashboard_reaches_every_primary_section() {
         let data = all_callback_data(&admin_dashboard_menu());
         for expected in [
+            "add",
+            "addbulk",
+            "stats",
+            "admin:search",
             "list",
             "admin:owners",
             "admin:finance",
@@ -1530,6 +1564,8 @@ mod tests {
             "backup",
             "settings",
             "admin:help",
+            "admin:bulk:menu",
+            "admin:roles",
         ] {
             assert!(
                 data.iter().any(|value| value == expected),
