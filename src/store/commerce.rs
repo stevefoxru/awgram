@@ -57,6 +57,8 @@ pub struct SupportTicket {
     pub assigned_to: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub category: String,
+    pub priority: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -68,7 +70,194 @@ pub struct FinanceSummary {
     pub pending: i64,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct AdminUserStats {
+    pub total: i64,
+    pub new_today: i64,
+    pub new_30d: i64,
+    pub paying: i64,
+    pub blocked: i64,
+    pub referred: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminUserProfile {
+    pub user: UserRow,
+    pub blocked: bool,
+    pub admin_note: Option<String>,
+    pub last_seen: i64,
+    pub balance_kopecks: i64,
+    pub key_count: i64,
+    pub payment_count: i64,
+    pub spent_kopecks: i64,
+    pub referral_count: i64,
+    pub ticket_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromoCode {
+    pub code: String,
+    pub discount_percent: i64,
+    pub max_uses: Option<i64>,
+    pub used_count: i64,
+    pub expires_at: Option<i64>,
+    pub active: bool,
+}
+
 impl Store {
+    pub fn admin_user_stats(&self, now: i64) -> AdminUserStats {
+        self.with_conn(|c| c.query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN created_at>=?1 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN created_at>=?2 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN blocked<>0 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN referrer_id IS NOT NULL THEN 1 ELSE 0 END)
+             FROM users",
+            rusqlite::params![now-86_400,now-30*86_400],
+            |r| Ok(AdminUserStats{total:r.get(0)?,new_today:r.get(1)?,new_30d:r.get(2)?,blocked:r.get(3)?,referred:r.get(4)?,paying:0})
+        )).map(|mut s| { s.paying=self.with_conn(|c|c.query_row("SELECT COUNT(DISTINCT user_id) FROM payment_requests WHERE status='approved' AND months>0",[],|r|r.get(0))).unwrap_or(0); s }).unwrap_or_default()
+    }
+
+    pub fn admin_user_profile(&self, user_id: i64) -> Option<AdminUserProfile> {
+        let user = self.user(user_id)?;
+        self.with_conn(|c| c.query_row(
+            "SELECT blocked,admin_note,last_seen,
+                    (SELECT COUNT(*) FROM clients WHERE owner_user_id=?1 AND removed_at IS NULL),
+                    (SELECT COUNT(*) FROM payment_requests WHERE user_id=?1),
+                    (SELECT COALESCE(SUM(amount_kopecks),0) FROM payment_requests WHERE user_id=?1 AND status='approved' AND months>0),
+                    (SELECT COUNT(*) FROM users WHERE referrer_id=?1),
+                    (SELECT COUNT(*) FROM support_tickets WHERE user_id=?1)
+             FROM users WHERE user_id=?1", [user_id], |r| Ok((r.get::<_,i64>(0)?!=0,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))
+        )).ok().map(|(blocked,admin_note,last_seen,key_count,payment_count,spent_kopecks,referral_count,ticket_count)| AdminUserProfile{
+            user,blocked,admin_note,last_seen,balance_kopecks:self.balance_kopecks(user_id),key_count,payment_count,spent_kopecks,referral_count,ticket_count
+        })
+    }
+
+    pub fn set_user_blocked(&self, user_id: i64, blocked: bool) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE users SET blocked=?2 WHERE user_id=?1",
+                rusqlite::params![user_id, if blocked { 1 } else { 0 }],
+            )
+        })
+        .map(|n| n == 1)
+        .unwrap_or(false)
+    }
+
+    pub fn user_blocked(&self, user_id: i64) -> bool {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT blocked FROM users WHERE user_id=?1",
+                [user_id],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .is_ok_and(|v| v != 0)
+    }
+
+    pub fn set_user_note(&self, user_id: i64, note: Option<&str>) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE users SET admin_note=?2 WHERE user_id=?1",
+                rusqlite::params![user_id, note],
+            )
+        })
+        .map(|n| n == 1)
+        .unwrap_or(false)
+    }
+
+    pub fn set_client_note(&self, name: &str, note: Option<&str>) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE clients SET admin_note=?2 WHERE name=?1 AND removed_at IS NULL",
+                rusqlite::params![name, note],
+            )
+        })
+        .map(|n| n == 1)
+        .unwrap_or(false)
+    }
+
+    pub fn client_note(&self, name: &str) -> Option<String> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT admin_note FROM clients WHERE name=?1 AND removed_at IS NULL",
+                [name],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .flatten()
+    }
+
+    pub fn user_payments(&self, user_id: i64, limit: usize) -> Vec<PaymentRequest> {
+        self.with_conn(|c| { let mut s=c.prepare("SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at FROM payment_requests WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2")?; let rows=s.query_map(rusqlite::params![user_id,limit as i64],payment_from_row)?; rows.collect() }).unwrap_or_default()
+    }
+
+    pub fn create_promo(
+        &self,
+        code: &str,
+        percent: i64,
+        max_uses: Option<i64>,
+        expires_at: Option<i64>,
+        actor: i64,
+        now: i64,
+    ) -> bool {
+        let code = code.trim().to_uppercase();
+        if code.is_empty() || code.len() > 24 || !(1..=100).contains(&percent) {
+            return false;
+        }
+        self.with_conn(|c|c.execute("INSERT INTO promo_codes(code,discount_percent,max_uses,expires_at,created_by,created_at) VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![code,percent,max_uses,expires_at,actor,now])).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn promo(&self, code: &str, now: i64) -> Option<PromoCode> {
+        self.with_conn(|c|c.query_row("SELECT code,discount_percent,max_uses,used_count,expires_at,active FROM promo_codes WHERE code=?1 COLLATE NOCASE AND active=1 AND (expires_at IS NULL OR expires_at>?2) AND (max_uses IS NULL OR used_count<max_uses)",rusqlite::params![code.trim(),now],|r|Ok(PromoCode{code:r.get(0)?,discount_percent:r.get(1)?,max_uses:r.get(2)?,used_count:r.get(3)?,expires_at:r.get(4)?,active:r.get::<_,i64>(5)?!=0})).optional()).ok().flatten()
+    }
+
+    pub fn activate_promo(&self, user_id: i64, code: &str, now: i64) -> Option<i64> {
+        let code = code.trim().to_uppercase();
+        self.with_conn(|c|{
+            c.execute_batch("BEGIN IMMEDIATE")?;
+            let result=(||{
+                let discount:i64=c.query_row("SELECT discount_percent FROM promo_codes WHERE code=?1 COLLATE NOCASE AND active=1 AND (expires_at IS NULL OR expires_at>?2) AND (max_uses IS NULL OR used_count<max_uses)",rusqlite::params![code,now],|r|r.get(0))?;
+                c.execute("INSERT INTO promo_uses(code,user_id,used_at) VALUES(?1,?2,?3)",rusqlite::params![code,user_id,now])?;
+                c.execute("UPDATE promo_codes SET used_count=used_count+1 WHERE code=?1 COLLATE NOCASE",[&code])?;
+                c.execute("UPDATE users SET promo_discount=?2 WHERE user_id=?1",rusqlite::params![user_id,discount])?;
+                Ok(discount)
+            })();
+            if result.is_ok(){c.execute_batch("COMMIT")?;}else{let _=c.execute_batch("ROLLBACK");}
+            result
+        }).ok()
+    }
+
+    pub fn take_promo_discount(&self, user_id: i64) -> i64 {
+        self.with_conn(|c| {
+            let value: Option<i64> = c.query_row(
+                "SELECT promo_discount FROM users WHERE user_id=?1",
+                [user_id],
+                |r| r.get(0),
+            )?;
+            if value.is_some() {
+                c.execute(
+                    "UPDATE users SET promo_discount=NULL WHERE user_id=?1",
+                    [user_id],
+                )?;
+            }
+            Ok(value.unwrap_or(0))
+        })
+        .unwrap_or(0)
+    }
+
+    pub fn set_subscription_pause(
+        &self,
+        name: &str,
+        grace_until: Option<i64>,
+        frozen_until: Option<i64>,
+        now: i64,
+    ) -> bool {
+        self.with_conn(|c|c.execute("UPDATE client_subscriptions SET grace_until=?2,frozen_until=?3,updated_at=?4 WHERE client_name=?1",rusqlite::params![name,grace_until,frozen_until,now])).map(|n|n==1).unwrap_or(false)
+    }
     pub fn search_clients(
         &self,
         query: &str,
@@ -192,11 +381,11 @@ impl Store {
     }
 
     pub fn support_tickets(&self, status: &str, limit: usize) -> Vec<SupportTicket> {
-        self.with_conn(|c| { let mut s=c.prepare("SELECT id,user_id,status,subject,assigned_to,created_at,updated_at FROM support_tickets WHERE status=?1 ORDER BY updated_at DESC LIMIT ?2")?; let rows=s.query_map(rusqlite::params![status,limit as i64], ticket_from_row)?; rows.collect() }).unwrap_or_default()
+        self.with_conn(|c| { let mut s=c.prepare("SELECT id,user_id,status,subject,assigned_to,created_at,updated_at,category,priority FROM support_tickets WHERE status=?1 ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,updated_at DESC LIMIT ?2")?; let rows=s.query_map(rusqlite::params![status,limit as i64], ticket_from_row)?; rows.collect() }).unwrap_or_default()
     }
 
     pub fn support_ticket(&self, id: i64) -> Option<SupportTicket> {
-        self.with_conn(|c| c.query_row("SELECT id,user_id,status,subject,assigned_to,created_at,updated_at FROM support_tickets WHERE id=?1",[id],ticket_from_row).optional()).ok().flatten()
+        self.with_conn(|c| c.query_row("SELECT id,user_id,status,subject,assigned_to,created_at,updated_at,category,priority FROM support_tickets WHERE id=?1",[id],ticket_from_row).optional()).ok().flatten()
     }
 
     pub fn assign_support_ticket(&self, id: i64, admin_id: i64, now: i64) -> bool {
@@ -205,6 +394,20 @@ impl Store {
 
     pub fn close_support_ticket(&self, id: i64, admin_id: i64, now: i64) -> bool {
         self.with_conn(|c| c.execute("UPDATE support_tickets SET status='closed',closed_at=?3,closed_by=?2,updated_at=?3 WHERE id=?1 AND status!='closed'",rusqlite::params![id,admin_id,now])).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn set_support_priority(&self, id: i64, priority: &str, now: i64) -> bool {
+        if !matches!(priority, "normal" | "high" | "urgent") {
+            return false;
+        }
+        self.with_conn(|c|c.execute("UPDATE support_tickets SET priority=?2,updated_at=?3 WHERE id=?1 AND status!='closed'",rusqlite::params![id,priority,now])).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn rate_support_ticket(&self, id: i64, user_id: i64, rating: i64) -> bool {
+        if !(1..=5).contains(&rating) {
+            return false;
+        }
+        self.with_conn(|c|c.execute("UPDATE support_tickets SET rating=?3 WHERE id=?1 AND user_id=?2 AND status='closed' AND rating IS NULL",rusqlite::params![id,user_id,rating])).map(|n|n==1).unwrap_or(false)
     }
 
     pub fn add_support_message(
@@ -357,11 +560,26 @@ impl Store {
     }
 
     pub fn open_support_ticket(&self, user_id: i64, subject: &str, now: i64) -> Option<i64> {
+        self.open_support_ticket_in_category(user_id, "general", subject, now)
+    }
+
+    pub fn open_support_ticket_in_category(
+        &self,
+        user_id: i64,
+        category: &str,
+        subject: &str,
+        now: i64,
+    ) -> Option<i64> {
+        let category = if matches!(category, "connection" | "payment" | "bug" | "general") {
+            category
+        } else {
+            "general"
+        };
         self.with_conn(|c| {
             c.execute(
-                "INSERT INTO support_tickets(user_id,subject,created_at,updated_at)
-                 VALUES(?1,?2,?3,?3)",
-                rusqlite::params![user_id, subject, now],
+                "INSERT INTO support_tickets(user_id,subject,category,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?4)",
+                rusqlite::params![user_id, subject, category, now],
             )?;
             Ok(c.last_insert_rowid())
         })
@@ -626,6 +844,14 @@ impl Store {
         .unwrap_or(false)
     }
 
+    pub fn reject_payment(&self, id: i64, admin_id: i64, reason: &str, now: i64) -> bool {
+        let reason = reason.trim();
+        if reason.is_empty() || reason.chars().count() > 500 {
+            return false;
+        }
+        self.with_conn(|c|c.execute("UPDATE payment_requests SET status='rejected',reject_reason=?2,decided_at=?3,decided_by=?4 WHERE id=?1 AND status='pending'",rusqlite::params![id,reason,now,admin_id])).map(|n|n==1).unwrap_or(false)
+    }
+
     pub fn assign_client_owner(&self, name: &str, user_id: Option<i64>) -> bool {
         self.with_conn(|c| {
             c.execute(
@@ -673,6 +899,8 @@ fn ticket_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SupportTicket> {
         assigned_to: r.get(4)?,
         created_at: r.get(5)?,
         updated_at: r.get(6)?,
+        category: r.get(7)?,
+        priority: r.get(8)?,
     })
 }
 
@@ -766,5 +994,27 @@ mod tests {
         s.backup_database(&path).unwrap();
         let backup = Store::open(&path).unwrap();
         assert!(backup.user(7).is_some());
+    }
+
+    #[test]
+    fn crm_promo_and_support_category_are_persistent() {
+        let s = Store::open_in_memory();
+        s.upsert_user(7, Some("alice"), "Alice", None, 10);
+        assert!(s.set_user_note(7, Some("VIP")));
+        assert!(s.set_user_blocked(7, true));
+        let profile = s.admin_user_profile(7).unwrap();
+        assert!(profile.blocked);
+        assert_eq!(profile.admin_note.as_deref(), Some("VIP"));
+        assert!(s.create_promo("FRIEND25", 25, Some(1), None, 1, 20));
+        assert_eq!(s.activate_promo(7, "friend25", 21), Some(25));
+        assert_eq!(s.take_promo_discount(7), 25);
+        assert_eq!(s.take_promo_discount(7), 0);
+        assert_eq!(s.activate_promo(7, "FRIEND25", 22), None);
+        let id = s
+            .open_support_ticket_in_category(7, "payment", "Не прошла оплата", 30)
+            .unwrap();
+        let ticket = s.support_ticket(id).unwrap();
+        assert_eq!(ticket.category, "payment");
+        assert_eq!(ticket.priority, "normal");
     }
 }

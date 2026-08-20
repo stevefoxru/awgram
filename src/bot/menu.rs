@@ -22,6 +22,7 @@ pub fn customer_keyboard() -> KeyboardMarkup {
             KeyboardButton::new("📖 Инструкция"),
             KeyboardButton::new("🆘 Поддержка"),
         ],
+        vec![KeyboardButton::new("🎟 Промокод")],
     ])
     .resize_keyboard()
     .persistent()
@@ -54,7 +55,10 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("📦 Создать оптом", "addbulk"),
         ],
         vec![cb("📊 Статистика", "stats"), cb("🔎 Поиск", "admin:search")],
-        vec![cb("👥 Клиенты", "list"), cb("🔗 Владельцы", "admin:owners")],
+        vec![
+            cb("👥 Клиенты", "list"),
+            cb("👤 Пользователи", "admin:owners"),
+        ],
         vec![
             cb("💳 Финансы", "admin:finance"),
             cb("🆘 Поддержка", "admin:support"),
@@ -71,6 +75,7 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("⚙️ Настройки", "settings"),
             cb("🔄 Обновить", "admin:dashboard"),
         ],
+        vec![cb("🎟 Промокоды", "admin:promos")],
         vec![
             cb("🧰 Массовое управление", "admin:bulk:menu"),
             cb("🧑‍💼 Роли", "admin:roles"),
@@ -88,15 +93,65 @@ pub fn bulk_manage_menu() -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn bulk_confirm_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("✅ Подтвердить операцию", "admin:bulk:confirm")],
+        vec![cb("❌ Отмена", "admin:bulk:menu")],
+    ])
+}
+
 pub fn statistics_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("🔄 Обновить VPN-статистику", "stats")],
+        vec![cb("🔐 VPN", "stats"), cb("👤 Пользователи", "stats:users")],
         vec![
-            cb("💳 Финансы", "admin:finance"),
-            cb("🔗 Владельцы", "admin:owners"),
+            cb("💳 Подписки", "stats:subscriptions"),
+            cb("📈 Тарифы", "stats:tariffs"),
         ],
+        vec![cb("💳 Финансы", "admin:finance"), cb("🗂 Группы", "groups")],
         vec![cb("🩺 Сервер", "check"), cb("👥 Список ключей", "list")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn admin_users_menu(users: &[crate::store::UserRow]) -> InlineKeyboardMarkup {
+    let mut rows = users
+        .iter()
+        .map(|u| {
+            let label = u
+                .username
+                .as_ref()
+                .map(|v| format!("@{v}"))
+                .unwrap_or_else(|| format!("{} · {}", u.display_name, u.user_id));
+            vec![cb(&label, &format!("admin:user:{}", u.user_id))]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("🔎 Найти пользователя", "admin:search")]);
+    rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn admin_user_menu(user_id: i64, blocked: bool) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("🔑 Ключи", &format!("admin:userkeys:{user_id}")),
+            cb("💳 Платежи", &format!("admin:userpay:{user_id}")),
+        ],
+        vec![
+            cb("➕ Баланс", &format!("admin:userbal:{user_id}")),
+            cb("📝 Заметка", &format!("admin:usernote:{user_id}")),
+        ],
+        vec![cb(
+            if blocked {
+                "✅ Разблокировать"
+            } else {
+                "⛔ Заблокировать"
+            },
+            &format!(
+                "admin:userblock:{user_id}:{}",
+                if blocked { "off" } else { "on" }
+            ),
+        )],
+        vec![cb("⬅️ Пользователи", "admin:owners")],
     ])
 }
 
@@ -137,10 +192,23 @@ pub fn payment_admin_menu(id: i64) -> InlineKeyboardMarkup {
 pub fn support_tickets_menu(tickets: &[crate::store::SupportTicket]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(tickets.iter().map(|t| {
         vec![cb(
-            &format!("#{} · user {} · {}", t.id, t.user_id, t.status),
+            &format!("#{} · {} · {} · {}", t.id, t.category, t.priority, t.status),
             &format!("support:ticket:{}", t.id),
         )]
     }))
+}
+
+pub fn support_category_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("🔌 Подключение", "support:new:connection"),
+            cb("💳 Оплата", "support:new:payment"),
+        ],
+        vec![
+            cb("🐞 Ошибка", "support:new:bug"),
+            cb("💬 Другой вопрос", "support:new:general"),
+        ],
+    ])
 }
 
 pub fn support_ticket_menu(id: i64) -> InlineKeyboardMarkup {
@@ -150,12 +218,81 @@ pub fn support_ticket_menu(id: i64) -> InlineKeyboardMarkup {
             cb("✉️ Ответить", &format!("support:reply:{id}")),
             cb("✅ Закрыть", &format!("support:close:{id}")),
         ],
+        vec![
+            cb("Обычный", &format!("support:priority:{id}:normal")),
+            cb("Высокий", &format!("support:priority:{id}:high")),
+            cb("Срочный", &format!("support:priority:{id}:urgent")),
+        ],
+        vec![cb("⬅️ Обращения", "admin:support")],
     ])
+}
+
+pub fn support_rating_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![(1..=5)
+        .map(|v| cb(&format!("{v}⭐"), &format!("support:rate:{id}:{v}")))
+        .collect::<Vec<_>>()])
+}
+
+pub fn support_filters_menu(tickets: &[crate::store::SupportTicket]) -> InlineKeyboardMarkup {
+    let mut rows = vec![vec![
+        cb("🆕 Новые", "support:filter:open"),
+        cb("🛠 В работе", "support:filter:in_progress"),
+        cb("✅ Закрытые", "support:filter:closed"),
+    ]];
+    rows.extend(tickets.iter().map(|t| {
+        vec![cb(
+            &format!("#{} · {} · {} · {}", t.id, t.category, t.priority, t.status),
+            &format!("support:ticket:{}", t.id),
+        )]
+    }));
+    rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn finance_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb("📥 Скачать CSV", "finance:export")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn finance_dashboard_menu(payments: &[crate::store::PaymentRequest]) -> InlineKeyboardMarkup {
+    let mut rows = payments
+        .iter()
+        .take(20)
+        .flat_map(|p| {
+            vec![
+                vec![cb(
+                    &format!(
+                        "#{} · user {} · {:.2} ₽",
+                        p.id,
+                        p.user_id,
+                        p.amount_kopecks as f64 / 100.0
+                    ),
+                    &format!("admin:userpay:{}", p.user_id),
+                )],
+                vec![
+                    cb("✅ Одобрить", &format!("pay:ok:{}", p.id)),
+                    cb("❌ Отклонить", &format!("pay:no:{}", p.id)),
+                ],
+            ]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("📥 Скачать CSV", "finance:export")]);
+    rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn broadcast_audience_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("👥 Все", "broadcast:audience:all"),
+            cb("✅ С активными ключами", "broadcast:audience:active"),
+        ],
+        vec![
+            cb("⏳ Истекают за 7 дней", "broadcast:audience:expiring"),
+            cb("🆕 Без ключей", "broadcast:audience:nokeys"),
+        ],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
@@ -722,6 +859,10 @@ pub fn client_card(lang: Lang, name: &str, is_owner: bool) -> InlineKeyboardMark
             cb("⏸ Отключить", &format!("owner:disable:{name}")),
             cb("▶️ Включить", &format!("owner:enable:{name}")),
         ]);
+        rows.push(vec![cb(
+            "📝 Заметка о ключе",
+            &format!("client:note:{name}"),
+        )]);
         util_row.push(cb(&i18n::btn_modify(lang), &format!("mod:{name}")));
     }
     util_row.push(cb(&i18n::btn_history(lang), &format!("history:{name}")));
@@ -1564,6 +1705,7 @@ mod tests {
             "backup",
             "settings",
             "admin:help",
+            "admin:promos",
             "admin:bulk:menu",
             "admin:roles",
         ] {

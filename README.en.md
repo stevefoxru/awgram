@@ -85,14 +85,17 @@ tangible on budget VPS hosts.
 - ⏳ 7/3/1-day reminders. Expired peers are disabled while preserving their
   config, restored after renewal, and deleted after seven days.
 - 📱 Device labels and key cards with status and expiry information.
-- 🆘 Support tickets with assignment, replies, history, and closure.
+- 🎟 One-use discount promo codes with usage limits.
+- 🆘 Categorized support tickets with priority, assignment, replies, and ratings.
 
 ### Administration & operations
 
 - 💳 Daily/30-day financial analytics and CSV payment export.
+- 👤 User and key CRM cards with balances, payments, referrals, blocking, and notes.
 - 🧑‍💼 Restricted `technical`, `support`, and `finance` staff roles.
-- 🔎 `/find QUERY` search and `/bulk_disable`, `/bulk_enable`, and
-  `/bulk_extend` owner commands.
+- 🔎 Button-driven search and confirmed bulk operations with previews.
+- 📊 VPN, user, subscription, tariff, and finance statistics sections.
+- 📣 Confirmed broadcasts to selected user audiences.
 - 💾 Daily SQLite backups, five-minute VPN health monitoring, broadcasts,
   recovery alerts, and an administrative audit trail.
 

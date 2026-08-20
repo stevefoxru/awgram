@@ -21,10 +21,22 @@ pub enum Action {
     AdminFinance,
     AdminSupport,
     AdminBroadcast,
+    BroadcastAudience(String),
     AdminHelp,
     AdminSearch,
     AdminRoles,
     AdminBulk(String),
+    AdminBulkConfirm,
+    AdminUser(i64),
+    AdminUserKeys(i64),
+    AdminUserPayments(i64),
+    AdminUserBalance(i64),
+    AdminUserNote(i64),
+    AdminUserBlock(i64, bool),
+    StatsSection(String),
+    SupportFilter(String),
+    AdminPromos,
+    ClientNoteAsk(String),
     Menu,
     List,
     Add,
@@ -118,9 +130,12 @@ pub enum Action {
     AutoRenew(String, i64, bool),
     DeviceLabelAsk(String),
     SupportTicket(i64),
+    SupportNewCategory(String),
     SupportTake(i64),
     SupportReply(i64),
     SupportClose(i64),
+    SupportPriority(i64, String),
+    SupportRate(i64, i64),
     FinanceExport,
     Unknown,
 }
@@ -140,6 +155,7 @@ fn parse_callback(data: &str) -> Action {
         "add" => Action::Add,
         "addbulk" => Action::AddBulk,
         "stats" => Action::Stats,
+        "admin:bulk:confirm" => Action::AdminBulkConfirm,
         "settings" => Action::Settings,
         "backup" => Action::Backup,
         "bk:new" => Action::BackupNew,
@@ -162,6 +178,7 @@ fn parse_callback(data: &str) -> Action {
         "balance" => Action::Balance,
         "set:payment" => Action::PaymentInstructionsAsk,
         "finance:export" => Action::FinanceExport,
+        "admin:promos" => Action::AdminPromos,
         _ => {
             if let Some(v) = data.strip_prefix("buy:term:") {
                 v.parse().map(Action::BuyTerm).unwrap_or(Action::Unknown)
@@ -197,6 +214,8 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::SupportTake)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("support:new:") {
+                Action::SupportNewCategory(v.to_string())
             } else if let Some(v) = data.strip_prefix("support:reply:") {
                 v.parse()
                     .map(Action::SupportReply)
@@ -205,12 +224,59 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::SupportClose)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("support:priority:") {
+                let mut p = v.splitn(2, ':');
+                match (p.next().and_then(|x| x.parse().ok()), p.next()) {
+                    (Some(id), Some(priority)) => Action::SupportPriority(id, priority.into()),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("support:rate:") {
+                let mut p = v.splitn(2, ':');
+                match (
+                    p.next().and_then(|x| x.parse().ok()),
+                    p.next().and_then(|x| x.parse().ok()),
+                ) {
+                    (Some(id), Some(rating)) => Action::SupportRate(id, rating),
+                    _ => Action::Unknown,
+                }
             } else if let Some(v) = data.strip_prefix("support:ticket:") {
                 v.parse()
                     .map(Action::SupportTicket)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("support:filter:") {
+                Action::SupportFilter(v.to_string())
+            } else if let Some(v) = data.strip_prefix("client:note:") {
+                Action::ClientNoteAsk(v.to_string())
             } else if let Some(v) = data.strip_prefix("admin:bulk:") {
                 Action::AdminBulk(v.to_string())
+            } else if let Some(v) = data.strip_prefix("broadcast:audience:") {
+                Action::BroadcastAudience(v.to_string())
+            } else if let Some(v) = data.strip_prefix("admin:userblock:") {
+                let mut p = v.split(':');
+                match (p.next().and_then(|x| x.parse().ok()), p.next()) {
+                    (Some(id), Some(flag)) => Action::AdminUserBlock(id, flag == "on"),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("admin:userkeys:") {
+                v.parse()
+                    .map(Action::AdminUserKeys)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:userpay:") {
+                v.parse()
+                    .map(Action::AdminUserPayments)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:userbal:") {
+                v.parse()
+                    .map(Action::AdminUserBalance)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:usernote:") {
+                v.parse()
+                    .map(Action::AdminUserNote)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:user:") {
+                v.parse().map(Action::AdminUser).unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("stats:") {
+                Action::StatsSection(v.to_string())
             } else if let Some(v) = data.strip_prefix("renew:term:") {
                 let mut parts = v.rsplitn(2, ':');
                 match (parts.next().and_then(|p| p.parse().ok()), parts.next()) {
@@ -578,49 +644,76 @@ async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -
 }
 
 async fn owners_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
-    let lines = settings
+    let users = settings
         .all_user_ids()
         .into_iter()
-        .filter_map(|id| {
-            let keys = settings.user_client_names(id);
-            (!keys.is_empty()).then(|| {
-                let user = settings.user(id);
-                let label = user
-                    .and_then(|u| u.username.map(|v| format!("@{v}")))
-                    .unwrap_or_else(|| id.to_string());
-                format!("• {label}: {}", keys.join(", "))
-            })
-        })
+        .filter_map(|id| settings.user(id))
+        .rev()
+        .take(50)
         .collect::<Vec<_>>();
     bot.send_message(
         chat,
         format!(
-            "🔗 Владельцы ключей\n\n{}",
-            if lines.is_empty() {
-                "Привязок нет".into()
-            } else {
-                lines.join("\n")
-            }
+            "👤 Пользователи\n\nВсего: {}\nПоказаны последние {}. Откройте карточку или воспользуйтесь поиском.",
+            settings.all_user_ids().len(), users.len()
         ),
     )
-    .reply_markup(menu::admin_dashboard_menu())
+    .reply_markup(menu::admin_users_menu(&users))
     .await?;
+    Ok(())
+}
+
+async fn admin_user_screen(
+    bot: &Bot,
+    chat: ChatId,
+    settings: &Store,
+    user_id: i64,
+) -> HandlerResult {
+    let Some(p) = settings.admin_user_profile(user_id) else {
+        bot.send_message(chat, "Пользователь не найден.")
+            .reply_markup(menu::admin_users_menu(&[]))
+            .await?;
+        return Ok(());
+    };
+    let username = p
+        .user
+        .username
+        .as_ref()
+        .map(|v| format!("@{v}"))
+        .unwrap_or_else(|| "—".into());
+    let note = p.admin_note.as_deref().unwrap_or("—");
+    bot.send_message(chat,format!(
+        "👤 Карточка пользователя\n\n{}\nTelegram ID: {}\nUsername: {}\nСтатус: {}\nСоздан: {}\nПоследняя активность: {}\n\n💰 Баланс: {:.2} ₽\n💳 Платежей: {} · Потрачено: {:.2} ₽\n🔑 Ключей: {}\n👥 Рефералов: {}\n🆘 Обращений: {}\n📝 Заметка: {}",
+        p.user.display_name,p.user.user_id,username,if p.blocked{"⛔ заблокирован"}else{"✅ активен"},p.user.created_at,p.last_seen,p.balance_kopecks as f64/100.0,p.payment_count,p.spent_kopecks as f64/100.0,p.key_count,p.referral_count,p.ticket_count,note
+    )).reply_markup(menu::admin_user_menu(user_id,p.blocked)).await?;
     Ok(())
 }
 
 async fn support_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
     let mut tickets = settings.support_tickets("open", 25);
     tickets.extend(settings.support_tickets("in_progress", 25));
-    let mut req = bot.send_message(
+    bot.send_message(
         chat,
         format!("🆘 Поддержка\nАктивных обращений: {}", tickets.len()),
-    );
-    if !tickets.is_empty() {
-        req = req.reply_markup(menu::support_tickets_menu(&tickets));
-    } else {
-        req = req.reply_markup(menu::admin_dashboard_menu());
-    }
-    req.await?;
+    )
+    .reply_markup(menu::support_filters_menu(&tickets))
+    .await?;
+    Ok(())
+}
+
+async fn support_filtered_screen(
+    bot: &Bot,
+    chat: ChatId,
+    settings: &Store,
+    status: &str,
+) -> HandlerResult {
+    let tickets = settings.support_tickets(status, 50);
+    bot.send_message(
+        chat,
+        format!("🆘 Обращения · {status}\nНайдено: {}", tickets.len()),
+    )
+    .reply_markup(menu::support_filters_menu(&tickets))
+    .await?;
     Ok(())
 }
 
@@ -628,7 +721,8 @@ async fn finance_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
     let now = now_epoch();
     let day = settings.finance_summary(now - 86_400);
     let month = settings.finance_summary(now - 30 * 86_400);
-    bot.send_message(chat,format!("💳 Финансы\n\nСегодня: {} продаж · {:.2} ₽\n30 дней: {} продаж · {:.2} ₽\nПополнения: {:.2} ₽\nВозвраты: {:.2} ₽\nОжидают решения: {}",day.approved_sales,day.revenue_kopecks as f64/100.0,month.approved_sales,month.revenue_kopecks as f64/100.0,month.topups_kopecks as f64/100.0,month.refunds_kopecks as f64/100.0,month.pending)).reply_markup(menu::finance_menu()).await?;
+    let pending = settings.pending_payments();
+    bot.send_message(chat,format!("💳 Финансы\n\nСегодня: {} продаж · {:.2} ₽\n30 дней: {} продаж · {:.2} ₽\nПополнения: {:.2} ₽\nВозвраты: {:.2} ₽\nОжидают решения: {}",day.approved_sales,day.revenue_kopecks as f64/100.0,month.approved_sales,month.revenue_kopecks as f64/100.0,month.topups_kopecks as f64/100.0,month.refunds_kopecks as f64/100.0,month.pending)).reply_markup(menu::finance_dashboard_menu(&pending)).await?;
     Ok(())
 }
 
@@ -796,11 +890,18 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         return match staff_role.as_str() {
             "support" => matches!(
                 action,
-                SupportTicket(_) | SupportTake(_) | SupportReply(_) | SupportClose(_) | Menu
+                AdminSupport
+                    | SupportFilter(_)
+                    | SupportTicket(_)
+                    | SupportTake(_)
+                    | SupportReply(_)
+                    | SupportClose(_)
+                    | SupportPriority(_, _)
+                    | Menu
             ),
             "finance" => matches!(
                 action,
-                FinanceExport | PaymentApprove(_) | PaymentReject(_) | Menu
+                AdminFinance | FinanceExport | PaymentApprove(_) | PaymentReject(_) | Menu
             ),
             "technical" => matches!(
                 action,
@@ -849,6 +950,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | RenewMethod(_, _, _)
         | AutoRenew(_, _, _)
         | DeviceLabelAsk(_)
+        | SupportRate(_, _)
         | Unknown => true,
         // Экран/установка текущей группы: только GA, группа — только своя.
         GroupSelectMenu => matches!(role, Role::GroupAdmin(_)),
@@ -908,19 +1010,33 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminExpiryAsk(_)
         | SetClientEnabled(_, _)
         | SupportTicket(_)
+        | SupportNewCategory(_)
         | SupportTake(_)
         | SupportReply(_)
         | SupportClose(_)
+        | SupportPriority(_, _)
         | FinanceExport
         | AdminDashboard
         | AdminOwners
         | AdminFinance
         | AdminSupport
         | AdminBroadcast
+        | BroadcastAudience(_)
         | AdminHelp
         | AdminSearch
         | AdminRoles
         | AdminBulk(_)
+        | AdminBulkConfirm
+        | AdminUser(_)
+        | AdminUserKeys(_)
+        | AdminUserPayments(_)
+        | AdminUserBalance(_)
+        | AdminUserNote(_)
+        | AdminUserBlock(_, _)
+        | StatsSection(_)
+        | SupportFilter(_)
+        | AdminPromos
+        | ClientNoteAsk(_)
         | PaymentInstructionsAsk => role.is_owner(),
     }
 }
@@ -1226,10 +1342,10 @@ async fn message_handler(
             }
         }
     }
-    if matches!(&state, State::AwaitingSupportMessage) {
+    if let State::AwaitingSupportMessage { category } = state.clone() {
         let subject = msg.text().unwrap_or("Вложение");
         let ticket = settings
-            .open_support_ticket(uid, subject, now_epoch())
+            .open_support_ticket_in_category(uid, &category, subject, now_epoch())
             .unwrap_or(0);
         settings.add_support_message(
             ticket,
@@ -1271,10 +1387,10 @@ async fn message_handler(
         dialogue.update(State::Idle).await?;
         return Ok(());
     }
-    if matches!(&state, State::AwaitingBroadcast) {
+    if let State::AwaitingBroadcast { audience } = state.clone() {
         bot.send_message(
             msg.chat.id,
-            "Проверьте сообщение выше. Для отправки всем пользователям напишите: ОТПРАВИТЬ",
+            format!("Предпросмотр готов. Сегмент: {audience}. Для запуска напишите: ОТПРАВИТЬ"),
         )
         .reply_markup(menu::admin_keyboard())
         .await?;
@@ -1282,6 +1398,7 @@ async fn message_handler(
             .update(State::AwaitingBroadcastConfirm {
                 source_chat_id: msg.chat.id.0,
                 source_message_id: msg.id.0,
+                audience,
             })
             .await?;
         return Ok(());
@@ -1289,12 +1406,32 @@ async fn message_handler(
     if let State::AwaitingBroadcastConfirm {
         source_chat_id,
         source_message_id,
+        audience,
     } = state.clone()
     {
         if msg.text().is_some_and(|v| v.trim() == "ОТПРАВИТЬ") {
             let mut delivered = 0;
             let mut failed = 0;
-            for user_id in settings.all_user_ids() {
+            let now = now_epoch();
+            let recipients = settings
+                .all_user_ids()
+                .into_iter()
+                .filter(|user_id| {
+                    let keys = settings.user_client_names(*user_id);
+                    match audience.as_str() {
+                        "active" => keys.iter().any(|n| {
+                            !vpn.client_disabled(n) && vpn.client_expiry(n).is_none_or(|e| e > now)
+                        }),
+                        "expiring" => keys.iter().any(|n| {
+                            vpn.client_expiry(n)
+                                .is_some_and(|e| e > now && e - now <= 7 * 86_400)
+                        }),
+                        "nokeys" => keys.is_empty(),
+                        _ => true,
+                    }
+                })
+                .collect::<Vec<_>>();
+            for user_id in recipients {
                 match bot
                     .copy_message(
                         ChatId(user_id),
@@ -1319,7 +1456,9 @@ async fn message_handler(
                 EventKind::Broadcast,
                 None,
                 Some(uid),
-                Some(&format!("delivered={delivered} failed={failed}")),
+                Some(&format!(
+                    "audience={audience} delivered={delivered} failed={failed}"
+                )),
             );
         } else {
             bot.send_message(msg.chat.id, "Рассылка отменена.")
@@ -1410,12 +1549,9 @@ async fn message_handler(
                 return Ok(());
             }
             "📣 Рассылка" => {
-                bot.send_message(
-                    msg.chat.id,
-                    "Отправьте сообщение для рассылки. Поддерживаются текст, фото и документы.",
-                )
-                .await?;
-                dialogue.update(State::AwaitingBroadcast).await?;
+                bot.send_message(msg.chat.id, "Выберите получателей рассылки:")
+                    .reply_markup(menu::broadcast_audience_menu())
+                    .await?;
                 return Ok(());
             }
             "🆘 Обращения" => {
@@ -1472,6 +1608,35 @@ async fn message_handler(
             }
             return Ok(());
         }
+    }
+    if let State::AwaitingPaymentReject { id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let reason = msg.text().unwrap_or_default().trim();
+        if settings.reject_payment(id, uid, reason, now_epoch()) {
+            if let Some(req) = settings.payment_request(id) {
+                let _ = bot
+                    .send_message(
+                        ChatId(req.user_id),
+                        format!("❌ Заявка #{} отклонена.\nПричина: {reason}", req.id),
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await;
+            }
+            bot.send_message(msg.chat.id, "✅ Заявка отклонена, пользователь уведомлён.")
+                .reply_markup(menu::finance_menu())
+                .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Укажите причину длиной до 500 символов либо заявка уже обработана.",
+            )
+            .await?;
+        }
+        return Ok(());
     }
     if let State::AwaitingPaymentProof { id } = state.clone() {
         let proof = msg.text().unwrap_or("Подтверждение отправлено");
@@ -1714,38 +1879,185 @@ async fn message_handler(
             .filter(|n| n.starts_with(&prefix))
             .take(100)
             .collect::<Vec<_>>();
-        let mut ok = 0usize;
-        for name in &names {
-            let result = match operation.as_str() {
-                "disable" => vpn.disable_client(name).await,
-                "enable" => vpn.enable_client(name).await,
-                "extend" => vpn
-                    .extend_client(name, seconds.unwrap_or(0), now_epoch())
-                    .await
-                    .map(|_| ()),
-                _ => Err(crate::error::Error::Parse("неизвестная операция".into())),
-            };
-            if result.is_ok() {
-                ok += 1;
-                settings.log_event(
-                    now_epoch(),
-                    EventKind::Modify,
-                    Some(name),
-                    Some(uid),
-                    Some(&format!("bulk_{operation}")),
-                );
-            }
-        }
+        let preview = names
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         bot.send_message(
             msg.chat.id,
             format!(
-                "✅ Обработано {ok}/{} ключей с префиксом {prefix}.",
-                names.len()
+                "⚠️ Предпросмотр массовой операции\n\nОперация: {operation}\nПрефикс: {prefix}\nБудет затронуто: {}\nПервые ключи: {}{}",
+                names.len(),if preview.is_empty(){"—"}else{&preview},if names.len()>10{" …"}else{""}
             ),
+        )
+        .reply_markup(menu::bulk_confirm_menu())
+        .await?;
+        dialogue
+            .update(State::AwaitingBulkConfirm {
+                operation,
+                prefix,
+                names,
+                seconds,
+            })
+            .await?;
+        return Ok(());
+    }
+    if let State::AwaitingUserBalance { user_id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let value = msg
+            .text()
+            .unwrap_or_default()
+            .trim()
+            .replace(',', ".")
+            .parse::<f64>()
+            .ok();
+        let kopecks = value
+            .map(|v| (v * 100.0).round() as i64)
+            .filter(|v| *v != 0);
+        let changed = kopecks.is_some_and(|amount| {
+            settings.add_ledger_entry(
+                user_id,
+                amount,
+                "admin_adjustment",
+                &format!("admin:{uid}:{user_id}:{}", now_epoch()),
+                Some("Ручная корректировка администратором"),
+                now_epoch(),
+            )
+        });
+        bot.send_message(
+            msg.chat.id,
+            if changed {
+                "✅ Баланс скорректирован."
+            } else {
+                "Введите ненулевую сумму в рублях, например 500 или -200."
+            },
+        )
+        .reply_markup(menu::admin_user_menu(
+            user_id,
+            settings.user_blocked(user_id),
+        ))
+        .await?;
+        if changed {
+            dialogue.update(State::Idle).await?;
+        }
+        return Ok(());
+    }
+    if let State::AwaitingUserNote { user_id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let raw = msg.text().unwrap_or_default().trim();
+        let note = if raw.eq_ignore_ascii_case("clear") {
+            None
+        } else {
+            Some(raw)
+        };
+        let changed = raw.chars().count() <= 500 && settings.set_user_note(user_id, note);
+        bot.send_message(
+            msg.chat.id,
+            if changed {
+                "✅ Заметка сохранена."
+            } else {
+                "Заметка не сохранена: максимум 500 символов."
+            },
+        )
+        .reply_markup(menu::admin_user_menu(
+            user_id,
+            settings.user_blocked(user_id),
+        ))
+        .await?;
+        if changed {
+            dialogue.update(State::Idle).await?;
+        }
+        return Ok(());
+    }
+    if let State::AwaitingClientNote { name } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let raw = msg.text().unwrap_or_default().trim();
+        let note = if raw.eq_ignore_ascii_case("clear") {
+            None
+        } else {
+            Some(raw)
+        };
+        let changed = raw.chars().count() <= 500 && settings.set_client_note(&name, note);
+        bot.send_message(
+            msg.chat.id,
+            if changed {
+                "✅ Заметка ключа сохранена."
+            } else {
+                "Не удалось сохранить заметку."
+            },
         )
         .reply_markup(menu::admin_dashboard_menu())
         .await?;
-        dialogue.update(State::Idle).await?;
+        if changed {
+            dialogue.update(State::Idle).await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingCustomerPromo) {
+        let code = msg.text().unwrap_or_default().trim();
+        match settings.activate_promo(uid, code, now_epoch()) {
+            Some(discount) => {
+                bot.send_message(msg.chat.id,format!("✅ Промокод активирован. Скидка {discount}% применится к следующей покупке или продлению.")).reply_markup(menu::customer_keyboard()).await?;
+                dialogue.update(State::Idle).await?;
+            }
+            None => {
+                bot.send_message(
+                    msg.chat.id,
+                    "Промокод не найден, истёк, исчерпан или уже использован вами.",
+                )
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingPromoCode) {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let p = msg
+            .text()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let code = p.first().copied().unwrap_or_default();
+        let percent = p.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let max_uses = p.get(2).and_then(|v| v.parse().ok());
+        let changed = settings.create_promo(code, percent, max_uses, None, uid, now_epoch());
+        bot.send_message(
+            msg.chat.id,
+            if changed {
+                "✅ Промокод создан."
+            } else {
+                "Формат: CODE PERCENT [MAX_USES]. Процент 1–100."
+            },
+        )
+        .reply_markup(menu::admin_dashboard_menu())
+        .await?;
+        if changed {
+            dialogue.update(State::Idle).await?;
+        }
+        return Ok(());
+    }
+    if role == Role::Denied && settings.user_blocked(uid) {
+        if msg.text() == Some("🆘 Поддержка") {
+            bot.send_message(msg.chat.id, "Выберите тему обращения:")
+                .reply_markup(menu::support_category_menu())
+                .await?;
+        } else {
+            bot.send_message(msg.chat.id,"⛔ Доступ к боту приостановлен. Обратитесь в поддержку, если считаете это ошибкой.").reply_markup(menu::customer_keyboard()).await?;
+        }
         return Ok(());
     }
     if role == Role::Denied {
@@ -1797,12 +2109,13 @@ async fn message_handler(
                 bot.send_message(msg.chat.id, "📖 Как подключить ключ\n\nAmneziaVPN:\n1. Откройте приложение и нажмите «+».\n2. Выберите импорт из файла или строки.\n3. Загрузите присланный .conf либо вставьте VPN-ссылку.\n4. Сохраните подключение и включите его.\n\nAmneziaWG:\n1. Нажмите «+» → импорт из файла.\n2. Выберите присланный .conf.\n3. Включите созданный туннель.\n\nОдин ключ используйте на одном устройстве одновременно.").reply_markup(menu::customer_keyboard()).await?;
             }
             "🆘 Поддержка" => {
-                bot.send_message(
-                    msg.chat.id,
-                    "Опишите проблему одним сообщением. Можно приложить скриншот или документ.",
-                )
-                .await?;
-                dialogue.update(State::AwaitingSupportMessage).await?;
+                bot.send_message(msg.chat.id, "Выберите тему обращения:")
+                    .reply_markup(menu::support_category_menu())
+                    .await?;
+            }
+            "🎟 Промокод" => {
+                bot.send_message(msg.chat.id, "Введите промокод:").await?;
+                dialogue.update(State::AwaitingCustomerPromo).await?;
             }
             _ => {
                 bot.send_message(msg.chat.id, "Используйте кнопки меню ниже.")
@@ -2724,7 +3037,23 @@ async fn callback_handler(
             | Action::RenewMethod(_, _, _)
             | Action::AutoRenew(_, _, _)
             | Action::DeviceLabelAsk(_)
+            | Action::SupportNewCategory(_)
+            | Action::SupportRate(_, _)
     );
+    if role == Role::Denied
+        && settings.user_blocked(uid)
+        && !matches!(
+            &action,
+            Action::SupportNewCategory(_) | Action::SupportRate(_, _)
+        )
+    {
+        bot.send_message(
+            chat,
+            "⛔ Доступ к боту приостановлен. Обратитесь в поддержку.",
+        )
+        .await?;
+        return Ok(());
+    }
     if role == Role::Denied && !customer_action {
         tracing::warn!(user_id = uid, "отклонён доступ (callback)");
         return Ok(());
@@ -2748,16 +3077,34 @@ async fn callback_handler(
         Action::AdminSupport => {
             support_screen(&bot, chat, &settings).await?;
         }
+        Action::SupportFilter(status) => {
+            if matches!(status.as_str(), "open" | "in_progress" | "closed") {
+                support_filtered_screen(&bot, chat, &settings, &status).await?;
+            }
+        }
         Action::AdminBroadcast => {
-            bot.send_message(
-                chat,
-                "Отправьте сообщение для рассылки. После него бот запросит подтверждение.",
-            )
-            .await?;
-            dialogue.update(State::AwaitingBroadcast).await?;
+            bot.send_message(chat, "Выберите получателей рассылки:")
+                .reply_markup(menu::broadcast_audience_menu())
+                .await?;
+        }
+        Action::BroadcastAudience(audience) => {
+            if matches!(audience.as_str(), "all" | "active" | "expiring" | "nokeys") {
+                bot.send_message(chat,format!("Сегмент: {audience}. Отправьте сообщение для предпросмотра; поддерживаются текст, фото и документы.")).await?;
+                dialogue
+                    .update(State::AwaitingBroadcast { audience })
+                    .await?;
+            }
         }
         Action::AdminHelp => {
             bot.send_message(chat,"ℹ️ Навигация\n\n➕ Создать ключ — один новый клиент\n📦 Создать оптом — пакет последовательных ключей\n📊 Статистика — трафик, активность, лидеры и подразделы\n🔎 Поиск — ключи и владельцы\n🧰 Массовое управление — включение, отключение и продление по префиксу\n🧑‍💼 Роли — назначение сотрудников\n\nВсе основные действия выполняются кнопками; текстовые команды оставлены только для совместимости.").reply_markup(menu::admin_dashboard_menu()).await?;
+        }
+        Action::AdminPromos => {
+            bot.send_message(
+                chat,
+                "🎟 Создание промокода\nВведите: CODE PERCENT [MAX_USES]\nНапример: FRIEND25 25 100",
+            )
+            .await?;
+            dialogue.update(State::AwaitingPromoCode).await?;
         }
         Action::AdminSearch => {
             bot.send_message(
@@ -2788,6 +3135,187 @@ async fn callback_handler(
                     .await?;
             }
         }
+        Action::AdminBulkConfirm => {
+            let State::AwaitingBulkConfirm {
+                operation,
+                prefix,
+                names,
+                seconds,
+            } = dialogue.get().await?.unwrap_or_default()
+            else {
+                bot.send_message(chat, "Операция уже завершена или отменена.")
+                    .reply_markup(menu::admin_dashboard_menu())
+                    .await?;
+                return Ok(());
+            };
+            let mut ok = 0usize;
+            for name in &names {
+                let result = match operation.as_str() {
+                    "disable" => vpn.disable_client(name).await,
+                    "enable" => vpn.enable_client(name).await,
+                    "extend" => vpn
+                        .extend_client(name, seconds.unwrap_or(0), now_epoch())
+                        .await
+                        .map(|_| ()),
+                    _ => Err(crate::error::Error::Parse("неизвестная операция".into())),
+                };
+                if result.is_ok() {
+                    ok += 1;
+                    settings.log_event(
+                        now_epoch(),
+                        EventKind::Modify,
+                        Some(name),
+                        Some(uid),
+                        Some(&format!("bulk_{operation}")),
+                    );
+                }
+            }
+            bot.send_message(
+                chat,
+                format!(
+                    "✅ Обработано {ok}/{} ключей с префиксом {prefix}.",
+                    names.len()
+                ),
+            )
+            .reply_markup(menu::admin_dashboard_menu())
+            .await?;
+            dialogue.update(State::Idle).await?;
+        }
+        Action::AdminUser(user_id) => admin_user_screen(&bot, chat, &settings, user_id).await?,
+        Action::AdminUserKeys(user_id) => {
+            let names = settings.user_client_names(user_id);
+            let text = if names.is_empty() {
+                "Ключей нет.".into()
+            } else {
+                names
+                    .iter()
+                    .map(|n| {
+                        let status = if vpn.client_disabled(n) { "⏸" } else { "✅" };
+                        let expiry = crate::vpn::model::format_expiry(
+                            settings.lang(uid),
+                            now_epoch(),
+                            vpn.client_expiry(n),
+                        );
+                        format!("{status} {n} · {expiry}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            bot.send_message(chat, format!("🔑 Ключи пользователя {user_id}\n\n{text}"))
+                .reply_markup(menu::admin_user_menu(
+                    user_id,
+                    settings.user_blocked(user_id),
+                ))
+                .await?;
+        }
+        Action::AdminUserPayments(user_id) => {
+            let rows = settings.user_payments(user_id, 20);
+            let text = if rows.is_empty() {
+                "Платежей нет.".into()
+            } else {
+                rows.iter()
+                    .map(|p| {
+                        format!(
+                            "#{} · {:?} · {:.2} ₽ · {} мес. · {}",
+                            p.id,
+                            p.status,
+                            p.amount_kopecks as f64 / 100.0,
+                            p.months,
+                            p.client_name.as_deref().unwrap_or("без ключа")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            bot.send_message(chat, format!("💳 Платежи пользователя {user_id}\n\n{text}"))
+                .reply_markup(menu::admin_user_menu(
+                    user_id,
+                    settings.user_blocked(user_id),
+                ))
+                .await?;
+        }
+        Action::AdminUserBalance(user_id) => {
+            bot.send_message(
+                chat,
+                "Введите изменение баланса в рублях. Пополнение: 500; списание: -200.",
+            )
+            .await?;
+            dialogue
+                .update(State::AwaitingUserBalance { user_id })
+                .await?;
+        }
+        Action::AdminUserNote(user_id) => {
+            bot.send_message(
+                chat,
+                "Введите внутреннюю заметку (до 500 символов). Для удаления отправьте clear.",
+            )
+            .await?;
+            dialogue.update(State::AwaitingUserNote { user_id }).await?;
+        }
+        Action::AdminUserBlock(user_id, blocked) => {
+            let changed = settings.set_user_blocked(user_id, blocked);
+            if changed {
+                settings.log_event(
+                    now_epoch(),
+                    EventKind::Modify,
+                    None,
+                    Some(uid),
+                    Some(&format!("user={user_id} blocked={blocked}")),
+                );
+            }
+            admin_user_screen(&bot, chat, &settings, user_id).await?;
+        }
+        Action::ClientNoteAsk(name) => {
+            bot.send_message(
+                chat,
+                format!(
+                    "Введите внутреннюю заметку для ключа {name}. Для удаления отправьте clear."
+                ),
+            )
+            .await?;
+            dialogue.update(State::AwaitingClientNote { name }).await?;
+        }
+        Action::StatsSection(section) => {
+            let now = now_epoch();
+            let text = match section.as_str() {
+                "users" => {
+                    let s = settings.admin_user_stats(now);
+                    format!("👤 Пользователи\n\nВсего: {}\nНовых сегодня: {}\nНовых за 30 дней: {}\nПлатящих: {}\nПришли по рефералам: {}\nЗаблокировано: {}",s.total,s.new_today,s.new_30d,s.paying,s.referred,s.blocked)
+                }
+                "subscriptions" => {
+                    let clients = vpn.list().await.unwrap_or_default();
+                    let active = clients
+                        .iter()
+                        .filter(|c| {
+                            !vpn.client_disabled(&c.name)
+                                && vpn.client_expiry(&c.name).is_none_or(|e| e > now)
+                        })
+                        .count();
+                    let expiring = clients
+                        .iter()
+                        .filter(|c| {
+                            vpn.client_expiry(&c.name)
+                                .is_some_and(|e| e > now && e - now <= 7 * 86_400)
+                        })
+                        .count();
+                    format!("💳 Подписки\n\nАктивных: {active}\nИстекают за 7 дней: {expiring}\nОтключено: {}\nВсего ключей: {}",clients.iter().filter(|c|vpn.client_disabled(&c.name)).count(),clients.len())
+                }
+                "tariffs" => {
+                    let rows = settings.recent_payments(100_000);
+                    let approved = rows
+                        .iter()
+                        .filter(|p| {
+                            p.status == crate::store::PaymentStatus::Approved && p.months > 0
+                        })
+                        .collect::<Vec<_>>();
+                    format!("📈 Популярность тарифов\n\n1 месяц: {}\n3 месяца: {}\n6 месяцев: {}\n12 месяцев: {}",approved.iter().filter(|p|p.months==1).count(),approved.iter().filter(|p|p.months==3).count(),approved.iter().filter(|p|p.months==6).count(),approved.iter().filter(|p|p.months==12).count())
+                }
+                _ => "Раздел статистики не найден.".into(),
+            };
+            bot.send_message(chat, text)
+                .reply_markup(menu::statistics_menu())
+                .await?;
+        }
         Action::Buy => {
             bot.send_message(chat, "Выберите срок подписки:")
                 .reply_markup(menu::buy_terms_menu())
@@ -2801,9 +3329,11 @@ async fn callback_handler(
             }
         }
         Action::BuyMethod(months, method) => {
-            let Some((amount, _)) = tariff(months) else {
+            let Some((base_amount, _)) = tariff(months) else {
                 return Ok(());
             };
+            let discount = settings.take_promo_discount(uid);
+            let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
             if method == "balance" {
                 let reference = format!("balance:{}:{}", uid, now_epoch());
                 if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
@@ -2946,9 +3476,11 @@ async fn callback_handler(
             {
                 return Ok(());
             }
-            let Some((amount, expiry)) = tariff(months) else {
+            let Some((base_amount, expiry)) = tariff(months) else {
                 return Ok(());
             };
+            let discount = settings.take_promo_discount(uid);
+            let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
             let seconds = duration_seconds(expiry).unwrap_or(0);
             if method == "balance" {
                 let reference = format!("renew:{uid}:{name}:{}", now_epoch());
@@ -3009,23 +3541,9 @@ async fn callback_handler(
                 .reply_markup(menu::customer_keyboard()).await?;
         }
         Action::PaymentReject(id) => {
-            if settings.decide_payment(
-                id,
-                crate::store::PaymentStatus::Rejected,
-                uid,
-                None,
-                now_epoch(),
-            ) {
-                if let Some(req) = settings.payment_request(id) {
-                    let _ = bot
-                        .send_message(
-                            ChatId(req.user_id),
-                            format!("❌ Заявка #{} отклонена.", req.id),
-                        )
-                        .reply_markup(menu::customer_keyboard())
-                        .await;
-                }
-            }
+            bot.send_message(chat, format!("Укажите причину отказа по заявке #{id}:"))
+                .await?;
+            dialogue.update(State::AwaitingPaymentReject { id }).await?;
         }
         Action::PaymentApprove(id) => {
             let Some(req) = settings.payment_request(id) else {
@@ -3234,9 +3752,11 @@ async fn callback_handler(
                 bot.send_message(
                     chat,
                     format!(
-                        "🆘 Обращение #{}\nПользователь: {}\nСтатус: {}\nОтветственный: {}\n\n{}",
+                        "🆘 Обращение #{}\nПользователь: {}\nКатегория: {}\nПриоритет: {}\nСтатус: {}\nОтветственный: {}\n\n{}",
                         t.id,
                         t.user_id,
+                        t.category,
+                        t.priority,
                         t.status,
                         t.assigned_to
                             .map(|v| v.to_string())
@@ -3246,6 +3766,21 @@ async fn callback_handler(
                 )
                 .reply_markup(menu::support_ticket_menu(id))
                 .await?;
+            }
+        }
+        Action::SupportNewCategory(category) => {
+            if matches!(
+                category.as_str(),
+                "connection" | "payment" | "bug" | "general"
+            ) {
+                bot.send_message(
+                    chat,
+                    "Опишите проблему одним сообщением. Можно приложить скриншот или документ.",
+                )
+                .await?;
+                dialogue
+                    .update(State::AwaitingSupportMessage { category })
+                    .await?;
             }
         }
         Action::SupportTake(id) => {
@@ -3276,10 +3811,29 @@ async fn callback_handler(
                         Some(uid),
                         Some(&format!("closed ticket={id}")),
                     );
-                    let _=bot.send_message(ChatId(t.user_id),format!("✅ Обращение #{id} закрыто. Если помощь ещё нужна, создайте новое обращение.")).await;
+                    let _ = bot
+                        .send_message(
+                            ChatId(t.user_id),
+                            format!("✅ Обращение #{id} закрыто. Оцените качество помощи:"),
+                        )
+                        .reply_markup(menu::support_rating_menu(id))
+                        .await;
                     bot.send_message(chat, format!("✅ Обращение #{id} закрыто."))
                         .await?;
                 }
+            }
+        }
+        Action::SupportPriority(id, priority) => {
+            if settings.set_support_priority(id, &priority, now_epoch()) {
+                bot.send_message(chat, format!("✅ Приоритет обращения #{id}: {priority}"))
+                    .await?;
+            }
+        }
+        Action::SupportRate(id, rating) => {
+            if settings.rate_support_ticket(id, uid, rating) {
+                bot.send_message(chat, "Спасибо за оценку!")
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
             }
         }
         Action::FinanceExport => {
@@ -3520,14 +4074,27 @@ async fn callback_handler(
                         .and_then(|gid| settings.group(gid))
                         .map(|g| i18n::group_label_line(lang, &g.name))
                         .unwrap_or_default();
+                    let crm_line = if role.is_owner() {
+                        format!(
+                            "\n👤 Владелец: {}\n📝 Заметка: {}",
+                            settings
+                                .client_owner(&name)
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "не назначен".into()),
+                            settings.client_note(&name).unwrap_or_else(|| "—".into())
+                        )
+                    } else {
+                        String::new()
+                    };
                     edit_or_send(
                         &bot,
                         chat,
                         msg_id,
                         format!(
-                            "{}{}",
+                            "{}{}{}",
                             format_client_card(lang, c, now, expiry, &traffic),
-                            group_line
+                            group_line,
+                            crm_line
                         ),
                         menu::client_card(lang, &name, role.is_owner()),
                     )
@@ -5044,6 +5611,12 @@ mod tests {
             menu::admin_dashboard_menu(),
             menu::bulk_manage_menu(),
             menu::statistics_menu(),
+            menu::admin_user_menu(42, false),
+            menu::broadcast_audience_menu(),
+            menu::support_filters_menu(&[]),
+            menu::support_category_menu(),
+            menu::support_ticket_menu(1),
+            menu::support_rating_menu(1),
             menu::expiry_menu(Lang::Ru),
             menu::client_card(Lang::Ru, "alice", true),
             menu::confirm_delete(Lang::Ru, "bob"),
@@ -5268,19 +5841,34 @@ mod tests {
                 AutoRenew(_, _, _) => {}
                 DeviceLabelAsk(_) => {}
                 SupportTicket(_) => {}
+                SupportNewCategory(_) => {}
                 SupportTake(_) => {}
                 SupportReply(_) => {}
                 SupportClose(_) => {}
+                SupportPriority(_, _) => {}
+                SupportRate(_, _) => {}
                 FinanceExport => {}
                 AdminDashboard => {}
                 AdminOwners => {}
                 AdminFinance => {}
                 AdminSupport => {}
                 AdminBroadcast => {}
+                BroadcastAudience(_) => {}
                 AdminHelp => {}
                 AdminSearch => {}
                 AdminRoles => {}
                 AdminBulk(_) => {}
+                AdminBulkConfirm => {}
+                AdminUser(_) => {}
+                AdminUserKeys(_) => {}
+                AdminUserPayments(_) => {}
+                AdminUserBalance(_) => {}
+                AdminUserNote(_) => {}
+                AdminUserBlock(_, _) => {}
+                StatsSection(_) => {}
+                SupportFilter(_) => {}
+                AdminPromos => {}
+                ClientNoteAsk(_) => {}
                 Unknown => {}
             }
         }

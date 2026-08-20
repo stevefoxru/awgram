@@ -61,6 +61,9 @@ pub enum State {
     AwaitingPaymentProof {
         id: i64,
     },
+    AwaitingPaymentReject {
+        id: i64,
+    },
     AwaitingClientOwner {
         name: String,
     },
@@ -72,21 +75,43 @@ pub enum State {
     },
     AwaitingTopupAmount,
     AwaitingPaymentInstructions,
-    AwaitingSupportMessage,
+    AwaitingSupportMessage {
+        category: String,
+    },
     AwaitingSupportReply {
         ticket_id: i64,
         user_id: i64,
     },
-    AwaitingBroadcast,
+    AwaitingBroadcast {
+        audience: String,
+    },
     AwaitingBroadcastConfirm {
         source_chat_id: i64,
         source_message_id: i32,
+        audience: String,
     },
     AwaitingAdminSearch,
     AwaitingStaffRole,
     AwaitingBulkManage {
         operation: String,
     },
+    AwaitingBulkConfirm {
+        operation: String,
+        prefix: String,
+        names: Vec<String>,
+        seconds: Option<i64>,
+    },
+    AwaitingUserBalance {
+        user_id: i64,
+    },
+    AwaitingUserNote {
+        user_id: i64,
+    },
+    AwaitingClientNote {
+        name: String,
+    },
+    AwaitingPromoCode,
+    AwaitingCustomerPromo,
 }
 
 #[cfg(test)]

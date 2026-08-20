@@ -13,7 +13,10 @@ mod groups;
 mod settings;
 mod stats;
 
-pub use commerce::{FinanceSummary, PaymentRequest, PaymentStatus, SupportTicket, UserRow};
+pub use commerce::{
+    AdminUserProfile, AdminUserStats, FinanceSummary, PaymentRequest, PaymentStatus, PromoCode,
+    SupportTicket, UserRow,
+};
 pub use events::{EventKind, EventRow};
 pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
@@ -224,6 +227,42 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         checked_at INTEGER NOT NULL
     );
     "#,
+    // v9: CRM-карточки, расширенные подписки, поддержка, промокоды и рассылки.
+    r#"
+    ALTER TABLE users ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN admin_note TEXT;
+    ALTER TABLE users ADD COLUMN promo_discount INTEGER;
+    ALTER TABLE clients ADD COLUMN admin_note TEXT;
+    ALTER TABLE payment_requests ADD COLUMN reject_reason TEXT;
+    ALTER TABLE client_subscriptions ADD COLUMN grace_until INTEGER;
+    ALTER TABLE client_subscriptions ADD COLUMN frozen_until INTEGER;
+    ALTER TABLE support_tickets ADD COLUMN category TEXT NOT NULL DEFAULT 'general';
+    ALTER TABLE support_tickets ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';
+    ALTER TABLE support_tickets ADD COLUMN rating INTEGER;
+    ALTER TABLE broadcasts ADD COLUMN audience TEXT NOT NULL DEFAULT 'all';
+    ALTER TABLE broadcasts ADD COLUMN scheduled_at INTEGER;
+    ALTER TABLE broadcasts ADD COLUMN button_text TEXT;
+    ALTER TABLE broadcasts ADD COLUMN button_url TEXT;
+    CREATE TABLE promo_codes(
+        code TEXT PRIMARY KEY COLLATE NOCASE,
+        discount_percent INTEGER NOT NULL CHECK(discount_percent BETWEEN 1 AND 100),
+        max_uses INTEGER,
+        used_count INTEGER NOT NULL DEFAULT 0,
+        expires_at INTEGER,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_by INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE promo_uses(
+        code TEXT NOT NULL REFERENCES promo_codes(code),
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        payment_id INTEGER REFERENCES payment_requests(id),
+        used_at INTEGER NOT NULL,
+        PRIMARY KEY(code,user_id)
+    );
+    CREATE INDEX idx_users_created ON users(created_at);
+    CREATE INDEX idx_subscriptions_grace ON client_subscriptions(grace_until);
+    "#,
 ];
 
 pub struct Store {
@@ -311,7 +350,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 8);
+        assert_eq!(store.schema_version(), 9);
     }
 
     #[test]
@@ -320,12 +359,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 8);
+        assert_eq!(store.schema_version(), 9);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 8);
+        assert_eq!(store.schema_version(), 9);
     }
 }
