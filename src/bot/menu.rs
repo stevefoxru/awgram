@@ -836,17 +836,8 @@ mod tests {
     fn main_menu_has_expected_actions() {
         let data = all_callback_data(&main_menu(Lang::Ru));
         for expected in [
-            "list",
-            "add",
-            "addbulk",
-            "stats",
-            "backup",
-            "check",
-            "diagnose",
-            "restart",
-            "repair",
+            "list", "add", "addbulk", "stats", "backup", "check", "diagnose", "restart", "repair",
             "settings",
-            "admin:help",
         ] {
             assert!(data.contains(&expected.to_string()), "missing {expected}");
         }
@@ -1489,7 +1480,7 @@ mod tests {
         assert!(data_on.contains(&"set:psk:off".to_string()));
         assert!(data_on.contains(&"set:lang:ru".to_string()));
         assert!(data_on.contains(&"set:lang:en".to_string()));
-        assert!(data_on.contains(&"menu".to_string()));
+        assert!(data_on.contains(&"admin:dashboard".to_string()));
     }
 
     #[test]
@@ -1538,6 +1529,7 @@ mod tests {
             "check",
             "backup",
             "settings",
+            "admin:help",
         ] {
             assert!(
                 data.iter().any(|value| value == expected),
