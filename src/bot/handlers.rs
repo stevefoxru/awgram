@@ -535,6 +535,20 @@ fn tariff(months: i64) -> Option<(i64, &'static str)> {
     }
 }
 
+fn is_customer_navigation(text: &str) -> bool {
+    text.starts_with("/start")
+        || matches!(
+            text,
+            "🏠 Кабинет"
+                | "🔑 Мои ключи"
+                | "➕ Купить ключ"
+                | "➕ Пополнить"
+                | "📖 Инструкция"
+                | "🆘 Поддержка"
+                | "🎟 Промокод"
+        )
+}
+
 fn duration_seconds(value: &str) -> Option<i64> {
     let split = value.len().checked_sub(1)?;
     let amount = value[..split].parse::<i64>().ok()?;
@@ -2005,21 +2019,25 @@ async fn message_handler(
         return Ok(());
     }
     if matches!(&state, State::AwaitingCustomerPromo) {
-        let code = msg.text().unwrap_or_default().trim();
-        match settings.activate_promo(uid, code, now_epoch()) {
-            Some(discount) => {
-                bot.send_message(msg.chat.id,format!("✅ Промокод активирован. Скидка {discount}% применится к следующей покупке или продлению.")).reply_markup(menu::customer_keyboard()).await?;
-                dialogue.update(State::Idle).await?;
+        let text = msg.text().unwrap_or_default().trim();
+        let navigation = is_customer_navigation(text);
+        dialogue.update(State::Idle).await?;
+        if !navigation {
+            match settings.activate_promo(uid, text, now_epoch()) {
+                Some(discount) => {
+                    bot.send_message(msg.chat.id,format!("✅ Промокод активирован. Скидка {discount}% применится к следующей покупке или продлению.")).reply_markup(menu::customer_keyboard()).await?;
+                }
+                None => {
+                    bot.send_message(
+                        msg.chat.id,
+                        "Промокод не найден, истёк, исчерпан или уже использован вами. Попробуйте снова через кнопку «🎟 Промокод».",
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                }
             }
-            None => {
-                bot.send_message(
-                    msg.chat.id,
-                    "Промокод не найден, истёк, исчерпан или уже использован вами.",
-                )
-                .await?;
-            }
+            return Ok(());
         }
-        return Ok(());
     }
     if matches!(&state, State::AwaitingPromoCode) {
         if !role.is_owner() {
@@ -5192,6 +5210,24 @@ pub fn schema() -> teloxide::dispatching::UpdateHandler<Box<dyn std::error::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn customer_navigation_cancels_promo_input() {
+        for text in [
+            "/start",
+            "/start ref_42",
+            "🏠 Кабинет",
+            "🔑 Мои ключи",
+            "➕ Купить ключ",
+            "➕ Пополнить",
+            "📖 Инструкция",
+            "🆘 Поддержка",
+            "🎟 Промокод",
+        ] {
+            assert!(is_customer_navigation(text), "{text}");
+        }
+        assert!(!is_customer_navigation("FRIEND25"));
+    }
 
     #[test]
     fn group_for_new_client_recreate_preserves_binding() {
