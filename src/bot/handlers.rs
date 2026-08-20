@@ -16,6 +16,12 @@ use crate::vpn::Vpn;
 
 #[derive(Debug, PartialEq)]
 pub enum Action {
+    AdminDashboard,
+    AdminOwners,
+    AdminFinance,
+    AdminSupport,
+    AdminBroadcast,
+    AdminHelp,
     Menu,
     List,
     Add,
@@ -118,6 +124,12 @@ pub enum Action {
 
 fn parse_callback(data: &str) -> Action {
     match data {
+        "admin:dashboard" => Action::AdminDashboard,
+        "admin:owners" => Action::AdminOwners,
+        "admin:finance" => Action::AdminFinance,
+        "admin:support" => Action::AdminSupport,
+        "admin:broadcast" => Action::AdminBroadcast,
+        "admin:help" => Action::AdminHelp,
         "menu" => Action::Menu,
         "list" => Action::List,
         "add" => Action::Add,
@@ -536,6 +548,83 @@ async fn customer_dashboard(
     Ok(())
 }
 
+async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -> HandlerResult {
+    let now = now_epoch();
+    let clients = vpn.list().await.unwrap_or_default();
+    let disabled = clients
+        .iter()
+        .filter(|c| vpn.client_disabled(&c.name))
+        .count();
+    let expiring = clients
+        .iter()
+        .filter(|c| {
+            vpn.client_expiry(&c.name)
+                .is_some_and(|e| e > now && e - now <= 7 * 86_400)
+        })
+        .count();
+    let month = settings.finance_summary(now - 30 * 86_400);
+    bot.send_message(chat,format!(
+        "🏠 Админ-панель\n\n👤 Пользователей: {}\n🔑 Ключей на сервере: {}\n⏸ Отключено: {disabled}\n⏳ Истекают за 7 дней: {expiring}\n🆘 Активных обращений: {}\n💳 Заявок ожидает: {}\n💰 Выручка за 30 дней: {:.2} ₽\n\nВыберите раздел:",
+        settings.all_user_ids().len(),clients.len(),settings.open_support_count(),month.pending,month.revenue_kopecks as f64/100.0))
+        .reply_markup(menu::admin_dashboard_menu()).await?;
+    Ok(())
+}
+
+async fn owners_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let lines = settings
+        .all_user_ids()
+        .into_iter()
+        .filter_map(|id| {
+            let keys = settings.user_client_names(id);
+            (!keys.is_empty()).then(|| {
+                let user = settings.user(id);
+                let label = user
+                    .and_then(|u| u.username.map(|v| format!("@{v}")))
+                    .unwrap_or_else(|| id.to_string());
+                format!("• {label}: {}", keys.join(", "))
+            })
+        })
+        .collect::<Vec<_>>();
+    bot.send_message(
+        chat,
+        format!(
+            "🔗 Владельцы ключей\n\n{}",
+            if lines.is_empty() {
+                "Привязок нет".into()
+            } else {
+                lines.join("\n")
+            }
+        ),
+    )
+    .reply_markup(menu::admin_dashboard_menu())
+    .await?;
+    Ok(())
+}
+
+async fn support_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let mut tickets = settings.support_tickets("open", 25);
+    tickets.extend(settings.support_tickets("in_progress", 25));
+    let mut req = bot.send_message(
+        chat,
+        format!("🆘 Поддержка\nАктивных обращений: {}", tickets.len()),
+    );
+    if !tickets.is_empty() {
+        req = req.reply_markup(menu::support_tickets_menu(&tickets));
+    } else {
+        req = req.reply_markup(menu::admin_dashboard_menu());
+    }
+    req.await?;
+    Ok(())
+}
+
+async fn finance_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let now = now_epoch();
+    let day = settings.finance_summary(now - 86_400);
+    let month = settings.finance_summary(now - 30 * 86_400);
+    bot.send_message(chat,format!("💳 Финансы\n\nСегодня: {} продаж · {:.2} ₽\n30 дней: {} продаж · {:.2} ₽\nПополнения: {:.2} ₽\nВозвраты: {:.2} ₽\nОжидают решения: {}",day.approved_sales,day.revenue_kopecks as f64/100.0,month.approved_sales,month.revenue_kopecks as f64/100.0,month.topups_kopecks as f64/100.0,month.refunds_kopecks as f64/100.0,month.pending)).reply_markup(menu::finance_menu()).await?;
+    Ok(())
+}
+
 async fn maybe_issue_trial(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store, uid: i64) {
     let claimed_at = now_epoch();
     if !settings.claim_trial(uid, claimed_at) {
@@ -815,6 +904,12 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | SupportReply(_)
         | SupportClose(_)
         | FinanceExport
+        | AdminDashboard
+        | AdminOwners
+        | AdminFinance
+        | AdminSupport
+        | AdminBroadcast
+        | AdminHelp
         | PaymentInstructionsAsk => role.is_owner(),
     }
 }
@@ -1286,8 +1381,7 @@ async fn message_handler(
         }
         match msg.text().unwrap_or_default() {
             "/start" | "🏠 Админ-панель" => {
-                bot.send_message(msg.chat.id, format!("🏠 Админ-панель\n\nПользователей: {}\nОткрытых обращений: {}\nВыручка: {:.2} ₽", settings.all_user_ids().len(), settings.open_support_count(), settings.approved_revenue_kopecks() as f64 / 100.0))
-                    .reply_markup(menu::admin_keyboard()).await?;
+                admin_dashboard(&bot, msg.chat.id, &vpn, &settings).await?;
                 return Ok(());
             }
             "👥 Клиенты" => {
@@ -1297,64 +1391,11 @@ async fn message_handler(
                 return Ok(());
             }
             "💳 Финансы" => {
-                let now = now_epoch();
-                let day = settings.finance_summary(now - 86_400);
-                let month = settings.finance_summary(now - 30 * 86_400);
-                let rows = settings.recent_payments(15);
-                let details = rows
-                    .iter()
-                    .map(|p| {
-                        format!(
-                            "#{} · user {} · {} ₽ · {} · {:?}",
-                            p.id,
-                            p.user_id,
-                            p.amount_kopecks / 100,
-                            p.method,
-                            p.status
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                bot.send_message(
-                    msg.chat.id,
-                    format!(
-                        "💳 Финансы\n\nСегодня: {} продаж · {:.2} ₽\n30 дней: {} продаж · {:.2} ₽\nПополнения: {:.2} ₽\nВозвраты: {:.2} ₽\nОжидают решения: {}\n\nПоследние операции:\n{}",
-                        day.approved_sales, day.revenue_kopecks as f64/100.0,
-                        month.approved_sales, month.revenue_kopecks as f64/100.0,
-                        month.topups_kopecks as f64/100.0, month.refunds_kopecks as f64/100.0, month.pending,
-                        if details.is_empty() {
-                            "Операций нет"
-                        } else {
-                            &details
-                        }
-                    ),
-                )
-                .reply_markup(menu::finance_menu())
-                .await?;
+                finance_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
             "🔗 Владельцы" => {
-                let lines = settings
-                    .all_user_ids()
-                    .into_iter()
-                    .filter_map(|id| {
-                        let keys = settings.user_client_names(id);
-                        (!keys.is_empty()).then(|| format!("{id}: {}", keys.join(", ")))
-                    })
-                    .collect::<Vec<_>>();
-                bot.send_message(
-                    msg.chat.id,
-                    format!(
-                        "🔗 Владельцы ключей\n\n{}",
-                        if lines.is_empty() {
-                            "Привязок нет".to_string()
-                        } else {
-                            lines.join("\n")
-                        }
-                    ),
-                )
-                .reply_markup(menu::admin_keyboard())
-                .await?;
+                owners_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
             "📣 Рассылка" => {
@@ -1367,16 +1408,7 @@ async fn message_handler(
                 return Ok(());
             }
             "🆘 Обращения" => {
-                let mut tickets = settings.support_tickets("open", 25);
-                tickets.extend(settings.support_tickets("in_progress", 25));
-                let mut req = bot.send_message(
-                    msg.chat.id,
-                    format!("🆘 Активных обращений: {}", tickets.len()),
-                );
-                if !tickets.is_empty() {
-                    req = req.reply_markup(menu::support_tickets_menu(&tickets));
-                }
-                req.await?;
+                support_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
             "⚙️ Настройки" => {
@@ -1564,12 +1596,6 @@ async fn message_handler(
         match msg.text().unwrap_or_default() {
             text if text.starts_with("/start") || matches!(text, "🏠 Меню" | "🏠 Кабинет") =>
             {
-                bot.send_message(
-                    msg.chat.id,
-                    "Добро пожаловать! Здесь можно приобрести и управлять VPN-ключами.",
-                )
-                .reply_markup(menu::customer_keyboard())
-                .await?;
                 maybe_issue_trial(&bot, msg.chat.id, &vpn, &settings, uid).await;
                 customer_dashboard(&bot, msg.chat.id, uid, &vpn, &settings).await?;
             }
@@ -1581,13 +1607,18 @@ async fn message_handler(
             "🔑 Мои ключи" => {
                 let names = settings.user_client_names(uid);
                 let text = if names.is_empty() {
-                    "У вас пока нет ключей.".to_string()
+                    "🔑 У вас пока нет ключей. Вы можете приобрести ключ или обратиться в поддержку.".to_string()
                 } else {
                     format!(
-                        "🔑 Ваши ключи:\n{}",
+                        "🔑 Ваши ключи\n\n{}\n\nНажмите на ключ для получения конфигурации; 📅 — продление; ✏️ — название устройства.",
                         names
                             .iter()
-                            .map(|n| format!("• {n}"))
+                            .map(|n| {
+                                let label=settings.device_label(n).unwrap_or_else(||"устройство не указано".into());
+                                let status=if vpn.client_disabled(n){"⏸"}else{"✅"};
+                                let expiry=crate::vpn::model::format_expiry(settings.lang(uid),now_epoch(),vpn.client_expiry(n));
+                                format!("{status} {label} · {n} · {expiry}")
+                            })
                             .collect::<Vec<_>>()
                             .join("\n")
                     )
@@ -2549,6 +2580,29 @@ async fn callback_handler(
         return Ok(());
     }
     match action {
+        Action::AdminDashboard => {
+            admin_dashboard(&bot, chat, &vpn, &settings).await?;
+        }
+        Action::AdminOwners => {
+            owners_screen(&bot, chat, &settings).await?;
+        }
+        Action::AdminFinance => {
+            finance_screen(&bot, chat, &settings).await?;
+        }
+        Action::AdminSupport => {
+            support_screen(&bot, chat, &settings).await?;
+        }
+        Action::AdminBroadcast => {
+            bot.send_message(
+                chat,
+                "Отправьте сообщение для рассылки. После него бот запросит подтверждение.",
+            )
+            .await?;
+            dialogue.update(State::AwaitingBroadcast).await?;
+        }
+        Action::AdminHelp => {
+            bot.send_message(chat,"ℹ️ Команды владельца\n\n/find QUERY — поиск ключа или владельца\n/role ID technical|support|finance|remove — роли сотрудников\n/bulk_disable PREFIX — отключить группу ключей\n/bulk_enable PREFIX — включить\n/bulk_extend PREFIX 30d — продлить\n\nОсновные повседневные действия доступны кнопками панели.").reply_markup(menu::admin_dashboard_menu()).await?;
+        }
         Action::Buy => {
             bot.send_message(chat, "Выберите срок подписки:")
                 .reply_markup(menu::buy_terms_menu())
@@ -3118,6 +3172,16 @@ async fn callback_handler(
                         show_group_select(&bot, chat, msg_id, lang, &settings, groups).await;
                     }
                 },
+                Role::Owner => {
+                    edit_or_send(
+                        &bot,
+                        chat,
+                        msg_id,
+                        "🏠 Админ-панель",
+                        menu::admin_dashboard_menu(),
+                    )
+                    .await;
+                }
                 _ => {
                     edit_or_send(
                         &bot,
@@ -5016,6 +5080,12 @@ mod tests {
                 SupportReply(_) => {}
                 SupportClose(_) => {}
                 FinanceExport => {}
+                AdminDashboard => {}
+                AdminOwners => {}
+                AdminFinance => {}
+                AdminSupport => {}
+                AdminBroadcast => {}
+                AdminHelp => {}
                 Unknown => {}
             }
         }

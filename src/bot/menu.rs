@@ -47,6 +47,29 @@ pub fn admin_keyboard() -> KeyboardMarkup {
     .persistent()
 }
 
+pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("👥 Клиенты", "list"), cb("🔗 Владельцы", "admin:owners")],
+        vec![
+            cb("💳 Финансы", "admin:finance"),
+            cb("🆘 Поддержка", "admin:support"),
+        ],
+        vec![
+            cb("🗂 Группы", "groups"),
+            cb("📣 Рассылка", "admin:broadcast"),
+        ],
+        vec![
+            cb("🩺 Состояние сервера", "check"),
+            cb("💾 Резервные копии", "backup"),
+        ],
+        vec![
+            cb("⚙️ Настройки", "settings"),
+            cb("🔄 Обновить", "admin:dashboard"),
+        ],
+        vec![cb("ℹ️ Команды и роли", "admin:help")],
+    ])
+}
+
 pub fn buy_terms_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
@@ -101,7 +124,10 @@ pub fn support_ticket_menu(id: i64) -> InlineKeyboardMarkup {
 }
 
 pub fn finance_menu() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![cb("📥 Скачать CSV", "finance:export")]])
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("📥 Скачать CSV", "finance:export")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
 }
 
 pub fn customer_keys_menu(names: &[String]) -> InlineKeyboardMarkup {
@@ -376,7 +402,7 @@ pub fn settings_menu(
             },
         )],
         vec![cb("💳 Реквизиты оплаты", "set:payment")],
-        vec![cb(&i18n::btn_back(lang), "menu")],
+        vec![cb(&i18n::btn_back(lang), "admin:dashboard")],
     ])
 }
 
@@ -810,8 +836,17 @@ mod tests {
     fn main_menu_has_expected_actions() {
         let data = all_callback_data(&main_menu(Lang::Ru));
         for expected in [
-            "list", "add", "addbulk", "stats", "backup", "check", "diagnose", "restart", "repair",
+            "list",
+            "add",
+            "addbulk",
+            "stats",
+            "backup",
+            "check",
+            "diagnose",
+            "restart",
+            "repair",
             "settings",
+            "admin:help",
         ] {
             assert!(data.contains(&expected.to_string()), "missing {expected}");
         }
@@ -1488,6 +1523,32 @@ mod tests {
         assert!(!data.contains(&"set:conf:on".to_string()));
         assert!(data.contains(&"set:qr:on".to_string())); // off → эмитит on
         assert!(data.contains(&"set:link:off".to_string())); // on → эмитит off
+    }
+
+    #[test]
+    fn admin_dashboard_reaches_every_primary_section() {
+        let data = all_callback_data(&admin_dashboard_menu());
+        for expected in [
+            "list",
+            "admin:owners",
+            "admin:finance",
+            "admin:support",
+            "groups",
+            "admin:broadcast",
+            "check",
+            "backup",
+            "settings",
+        ] {
+            assert!(
+                data.iter().any(|value| value == expected),
+                "missing {expected}"
+            );
+        }
+        assert!(all_callback_data(&finance_menu()).contains(&"admin:dashboard".to_string()));
+        assert!(
+            all_callback_data(&settings_menu(Lang::Ru, false, false, true, true, true))
+                .contains(&"admin:dashboard".to_string())
+        );
     }
 
     #[test]
