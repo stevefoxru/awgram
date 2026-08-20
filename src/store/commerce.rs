@@ -59,7 +59,82 @@ pub struct SupportTicket {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct FinanceSummary {
+    pub approved_sales: i64,
+    pub revenue_kopecks: i64,
+    pub topups_kopecks: i64,
+    pub refunds_kopecks: i64,
+    pub pending: i64,
+}
+
 impl Store {
+    pub fn staff_role(&self, user_id: i64) -> Option<String> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT role FROM staff_roles WHERE user_id=?1",
+                [user_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_staff_role(
+        &self,
+        user_id: i64,
+        role: Option<&str>,
+        granted_by: i64,
+        now: i64,
+    ) -> bool {
+        if let Some(role) = role {
+            if !matches!(role, "technical" | "support" | "finance") {
+                return false;
+            }
+            self.with_conn(|c|c.execute("INSERT INTO staff_roles(user_id,role,granted_by,granted_at) VALUES(?1,?2,?3,?4) ON CONFLICT(user_id) DO UPDATE SET role=?2,granted_by=?3,granted_at=?4",rusqlite::params![user_id,role,granted_by,now])).map(|n|n==1).unwrap_or(false)
+        } else {
+            self.with_conn(|c| c.execute("DELETE FROM staff_roles WHERE user_id=?1", [user_id]))
+                .map(|n| n == 1)
+                .unwrap_or(false)
+        }
+    }
+    pub fn finance_summary(&self, since: i64) -> FinanceSummary {
+        self.with_conn(|c| {
+            let (approved_sales,revenue,pending):(i64,i64,i64)=c.query_row(
+                "SELECT COALESCE(SUM(CASE WHEN status='approved' AND months>0 THEN 1 ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN status='approved' AND months>0 THEN amount_kopecks ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0)
+                 FROM payment_requests WHERE created_at>=?1",[since],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            let (topups,refunds):(i64,i64)=c.query_row(
+                "SELECT COALESCE(SUM(CASE WHEN kind='topup' THEN amount_kopecks ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN kind='refund' THEN amount_kopecks ELSE 0 END),0)
+                 FROM balance_ledger WHERE created_at>=?1",[since],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            Ok(FinanceSummary{approved_sales,revenue_kopecks:revenue,topups_kopecks:topups,refunds_kopecks:refunds,pending})
+        }).unwrap_or_default()
+    }
+
+    pub fn payments_csv(&self) -> String {
+        let rows = self.recent_payments(100_000);
+        let mut out =
+            "id,user_id,months,amount_rub,method,status,client_name,created_at\n".to_string();
+        for p in rows {
+            let client = p.client_name.unwrap_or_default().replace('"', "\"\"");
+            out.push_str(&format!(
+                "{},{},{},{:.2},\"{}\",{:?},\"{}\",{}\n",
+                p.id,
+                p.user_id,
+                p.months,
+                p.amount_kopecks as f64 / 100.0,
+                p.method.replace('"', "\"\""),
+                p.status,
+                client,
+                p.created_at
+            ));
+        }
+        out
+    }
     pub fn set_device_label(&self, name: &str, user_id: i64, label: &str) -> bool {
         let label = label.trim();
         if label.is_empty()

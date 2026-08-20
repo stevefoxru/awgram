@@ -13,7 +13,7 @@ mod groups;
 mod settings;
 mod stats;
 
-pub use commerce::{PaymentRequest, PaymentStatus, SupportTicket, UserRow};
+pub use commerce::{FinanceSummary, PaymentRequest, PaymentStatus, SupportTicket, UserRow};
 pub use events::{EventKind, EventRow};
 pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
@@ -205,6 +205,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_support_messages_ticket ON support_messages(ticket_id,created_at);
     "#,
+    // v7: ограниченные роли сотрудников.
+    r#"
+    CREATE TABLE staff_roles(
+        user_id INTEGER PRIMARY KEY,
+        role TEXT NOT NULL CHECK(role IN ('technical','support','finance')),
+        granted_by INTEGER NOT NULL,
+        granted_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub struct Store {
@@ -292,7 +301,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 6);
+        assert_eq!(store.schema_version(), 7);
     }
 
     #[test]
@@ -301,12 +310,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 6);
+        assert_eq!(store.schema_version(), 7);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 6);
+        assert_eq!(store.schema_version(), 7);
     }
 }

@@ -10,6 +10,7 @@ pub enum Role {
     Owner,
     /// CRUD клиентов только внутри перечисленных групп (id, сортировка по имени).
     GroupAdmin(Vec<i64>),
+    Staff(String),
     /// Не владелец и не групповой админ.
     Denied,
 }
@@ -25,6 +26,7 @@ impl Role {
         match self {
             Role::Owner => true,
             Role::GroupAdmin(groups) => group.is_some_and(|g| groups.contains(&g)),
+            Role::Staff(role) => role == "technical",
             Role::Denied => false,
         }
     }
@@ -33,6 +35,9 @@ impl Role {
 pub fn resolve_role(user_id: i64, admin_ids: &[i64], store: &Store) -> Role {
     if admin_ids.contains(&user_id) {
         return Role::Owner;
+    }
+    if let Some(role) = store.staff_role(user_id) {
+        return Role::Staff(role);
     }
     let groups = store.admin_group_ids(user_id);
     if groups.is_empty() {

@@ -100,6 +100,10 @@ pub fn support_ticket_menu(id: i64) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn finance_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![cb("📥 Скачать CSV", "finance:export")]])
+}
+
 pub fn customer_keys_menu(names: &[String]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(names.iter().map(|name| {
         vec![

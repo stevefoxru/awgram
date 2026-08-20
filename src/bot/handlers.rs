@@ -112,6 +112,7 @@ pub enum Action {
     SupportTake(i64),
     SupportReply(i64),
     SupportClose(i64),
+    FinanceExport,
     Unknown,
 }
 
@@ -143,6 +144,7 @@ fn parse_callback(data: &str) -> Action {
         "profile" => Action::Profile,
         "balance" => Action::Balance,
         "set:payment" => Action::PaymentInstructionsAsk,
+        "finance:export" => Action::FinanceExport,
         _ => {
             if let Some(v) = data.strip_prefix("buy:term:") {
                 v.parse().map(Action::BuyTerm).unwrap_or(Action::Unknown)
@@ -664,6 +666,7 @@ async fn edit_or_send(
 pub fn home_menu(role: &Role, lang: Lang) -> InlineKeyboardMarkup {
     match role {
         Role::GroupAdmin(groups) => menu::ga_main_menu(lang, groups.len() > 1),
+        Role::Staff(_) => menu::main_menu(lang),
         _ => menu::main_menu(lang),
     }
 }
@@ -691,6 +694,35 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
     use Action::*;
     if *role == Role::Denied {
         return false;
+    }
+    if let Role::Staff(staff_role) = role {
+        return match staff_role.as_str() {
+            "support" => matches!(
+                action,
+                SupportTicket(_) | SupportTake(_) | SupportReply(_) | SupportClose(_) | Menu
+            ),
+            "finance" => matches!(
+                action,
+                FinanceExport | PaymentApprove(_) | PaymentReject(_) | Menu
+            ),
+            "technical" => matches!(
+                action,
+                Menu | List
+                    | Stats
+                    | Page(_)
+                    | ShowClient(_)
+                    | ClientHistory(_)
+                    | SendConf(_)
+                    | SendQr(_)
+                    | SendLink(_)
+                    | SendAll(_)
+                    | Modify(_)
+                    | ModifyParam(_, _)
+                    | Regen(_)
+                    | SetClientEnabled(_, _)
+            ),
+            _ => false,
+        };
     }
     match action {
         // Доступно всем аутентифицированным ролям.
@@ -782,6 +814,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | SupportTake(_)
         | SupportReply(_)
         | SupportClose(_)
+        | FinanceExport
         | PaymentInstructionsAsk => role.is_owner(),
     }
 }
@@ -809,6 +842,7 @@ fn group_for_new_client(
             _ => None,
         }),
         Role::Denied => Some(None),
+        Role::Staff(_) => Some(None),
     }
 }
 
@@ -823,6 +857,7 @@ fn add_needs_quota_rollback(recreate: bool, outcome: &crate::store::QuotaAssign)
 fn scope_for(role: &Role, settings: &Store, uid: i64) -> Option<ListScope> {
     match role {
         Role::GroupAdmin(groups) => current_ga_group(settings, uid, groups).map(ListScope::Group),
+        Role::Staff(_) => Some(ListScope::All),
         _ => Some(settings.owner_scope(uid)),
     }
 }
@@ -1097,6 +1132,34 @@ async fn message_handler(
         return Ok(());
     }
     if role.is_owner() {
+        if let Some(args) = msg.text().and_then(|v| v.strip_prefix("/role ")) {
+            let parts: Vec<_> = args.split_whitespace().collect();
+            if let (Some(user_id), Some(value)) = (
+                parts.first().and_then(|v| v.parse::<i64>().ok()),
+                parts.get(1),
+            ) {
+                let selected = if *value == "remove" {
+                    None
+                } else {
+                    Some(*value)
+                };
+                if settings.set_staff_role(user_id, selected, uid, now_epoch()) {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("✅ Роль пользователя {user_id}: {value}"),
+                    )
+                    .reply_markup(menu::admin_keyboard())
+                    .await?;
+                } else {
+                    bot.send_message(
+                        msg.chat.id,
+                        "Использование: /role TELEGRAM_ID technical|support|finance|remove",
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+        }
         if let Some(target) = msg
             .text()
             .and_then(|v| v.strip_prefix("/reply_"))
@@ -1135,6 +1198,9 @@ async fn message_handler(
                 return Ok(());
             }
             "💳 Финансы" => {
+                let now = now_epoch();
+                let day = settings.finance_summary(now - 86_400);
+                let month = settings.finance_summary(now - 30 * 86_400);
                 let rows = settings.recent_payments(15);
                 let details = rows
                     .iter()
@@ -1153,8 +1219,10 @@ async fn message_handler(
                 bot.send_message(
                     msg.chat.id,
                     format!(
-                        "💳 Финансы\nВыручка по одобренным покупкам: {:.2} ₽\n\n{}",
-                        settings.approved_revenue_kopecks() as f64 / 100.0,
+                        "💳 Финансы\n\nСегодня: {} продаж · {:.2} ₽\n30 дней: {} продаж · {:.2} ₽\nПополнения: {:.2} ₽\nВозвраты: {:.2} ₽\nОжидают решения: {}\n\nПоследние операции:\n{}",
+                        day.approved_sales, day.revenue_kopecks as f64/100.0,
+                        month.approved_sales, month.revenue_kopecks as f64/100.0,
+                        month.topups_kopecks as f64/100.0, month.refunds_kopecks as f64/100.0, month.pending,
                         if details.is_empty() {
                             "Операций нет"
                         } else {
@@ -1162,7 +1230,7 @@ async fn message_handler(
                         }
                     ),
                 )
-                .reply_markup(menu::admin_keyboard())
+                .reply_markup(menu::finance_menu())
                 .await?;
                 return Ok(());
             }
@@ -1236,6 +1304,31 @@ async fn message_handler(
                 return Ok(());
             }
             _ => {}
+        }
+    }
+    if let Role::Staff(staff_role) = &role {
+        if matches!(msg.text(), Some("/start") | Some("🏠 Админ-панель")) {
+            match staff_role.as_str() {
+                "support" => {
+                    let mut tickets = settings.support_tickets("open", 25);
+                    tickets.extend(settings.support_tickets("in_progress", 25));
+                    bot.send_message(msg.chat.id, "🆘 Рабочее место поддержки")
+                        .reply_markup(menu::support_tickets_menu(&tickets))
+                        .await?;
+                }
+                "finance" => {
+                    bot.send_message(msg.chat.id, "💳 Финансовый сотрудник")
+                        .reply_markup(menu::finance_menu())
+                        .await?;
+                }
+                "technical" => {
+                    bot.send_message(msg.chat.id, i18n::menu_title(settings.lang(uid)))
+                        .reply_markup(menu::main_menu(settings.lang(uid)))
+                        .await?;
+                }
+                _ => {}
+            }
+            return Ok(());
         }
     }
     if let State::AwaitingPaymentProof { id } = state.clone() {
@@ -2844,6 +2937,15 @@ async fn callback_handler(
                 }
             }
         }
+        Action::FinanceExport => {
+            let bytes = settings.payments_csv().into_bytes();
+            bot.send_document(
+                chat,
+                InputFile::memory(bytes).file_name("awgram-payments.csv"),
+            )
+            .caption("Финансовая выгрузка CSV")
+            .await?;
+        }
         Action::PaymentInstructionsAsk => {
             bot.send_message(
                 chat,
@@ -3492,6 +3594,7 @@ async fn callback_handler(
                         _ => None,
                     },
                     Role::Denied => None,
+                    Role::Staff(_) => None,
                 },
             )
             .await;
@@ -4806,6 +4909,7 @@ mod tests {
                 SupportTake(_) => {}
                 SupportReply(_) => {}
                 SupportClose(_) => {}
+                FinanceExport => {}
                 Unknown => {}
             }
         }
