@@ -140,6 +140,38 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_payments_status ON payment_requests(status, created_at);
     "#,
+    // v4: пробный доступ, напоминания об окончании и обращения в поддержку.
+    r#"
+    ALTER TABLE users ADD COLUMN trial_claimed_at INTEGER;
+    CREATE TABLE expiry_notifications(
+        client_name TEXT NOT NULL,
+        owner_user_id INTEGER NOT NULL REFERENCES users(user_id),
+        expires_at INTEGER NOT NULL,
+        threshold_days INTEGER NOT NULL,
+        sent_at INTEGER NOT NULL,
+        PRIMARY KEY(client_name, expires_at, threshold_days)
+    );
+    CREATE TABLE support_tickets(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        status TEXT NOT NULL DEFAULT 'open',
+        subject TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        closed_at INTEGER,
+        closed_by INTEGER
+    );
+    CREATE INDEX idx_support_status ON support_tickets(status, updated_at);
+    CREATE TABLE broadcasts(
+        id INTEGER PRIMARY KEY,
+        admin_id INTEGER NOT NULL,
+        source_chat_id INTEGER NOT NULL,
+        source_message_id INTEGER NOT NULL,
+        delivered INTEGER NOT NULL DEFAULT 0,
+        failed INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub struct Store {
@@ -227,7 +259,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 3);
+        assert_eq!(store.schema_version(), 4);
     }
 
     #[test]
@@ -236,12 +268,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 3);
+        assert_eq!(store.schema_version(), 4);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 3);
+        assert_eq!(store.schema_version(), 4);
     }
 }

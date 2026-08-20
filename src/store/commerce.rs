@@ -49,6 +49,139 @@ pub struct PaymentRequest {
 }
 
 impl Store {
+    /// Атомарно резервирует единственный пробный период для Telegram ID.
+    pub fn claim_trial(&self, user_id: i64, now: i64) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE users SET trial_claimed_at=?2
+                 WHERE user_id=?1 AND trial_claimed_at IS NULL
+                   AND NOT EXISTS(SELECT 1 FROM clients WHERE owner_user_id=?1)",
+                rusqlite::params![user_id, now],
+            )
+        })
+        .map(|n| n == 1)
+        .unwrap_or(false)
+    }
+
+    pub fn release_trial_claim(&self, user_id: i64, claimed_at: i64) {
+        let _ = self.with_conn(|c| {
+            c.execute(
+                "UPDATE users SET trial_claimed_at=NULL
+                 WHERE user_id=?1 AND trial_claimed_at=?2
+                   AND NOT EXISTS(SELECT 1 FROM clients WHERE owner_user_id=?1)",
+                rusqlite::params![user_id, claimed_at],
+            )
+        });
+    }
+
+    pub fn referral_count(&self, user_id: i64) -> i64 {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM users WHERE referrer_id=?1",
+                [user_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap_or(0)
+    }
+
+    pub fn all_user_ids(&self) -> Vec<i64> {
+        self.with_conn(|c| {
+            let mut stmt = c.prepare("SELECT user_id FROM users ORDER BY user_id")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Возвращает true только для ещё не отправленного порога данного срока.
+    pub fn mark_expiry_notification(
+        &self,
+        client_name: &str,
+        owner_user_id: i64,
+        expires_at: i64,
+        threshold_days: i64,
+        sent_at: i64,
+    ) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO expiry_notifications
+                 (client_name,owner_user_id,expires_at,threshold_days,sent_at)
+                 VALUES(?1,?2,?3,?4,?5)",
+                rusqlite::params![
+                    client_name,
+                    owner_user_id,
+                    expires_at,
+                    threshold_days,
+                    sent_at
+                ],
+            )
+        })
+        .map(|n| n == 1)
+        .unwrap_or(false)
+    }
+
+    pub fn unmark_expiry_notification(
+        &self,
+        client_name: &str,
+        expires_at: i64,
+        threshold_days: i64,
+    ) {
+        let _ = self.with_conn(|c| {
+            c.execute(
+                "DELETE FROM expiry_notifications
+                 WHERE client_name=?1 AND expires_at=?2 AND threshold_days=?3",
+                rusqlite::params![client_name, expires_at, threshold_days],
+            )
+        });
+    }
+
+    pub fn open_support_ticket(&self, user_id: i64, subject: &str, now: i64) -> Option<i64> {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO support_tickets(user_id,subject,created_at,updated_at)
+                 VALUES(?1,?2,?3,?3)",
+                rusqlite::params![user_id, subject, now],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .ok()
+    }
+
+    pub fn open_support_count(&self) -> i64 {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM support_tickets WHERE status='open'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap_or(0)
+    }
+
+    pub fn recent_payments(&self, limit: usize) -> Vec<PaymentRequest> {
+        self.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at
+                 FROM payment_requests ORDER BY created_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit as i64], payment_from_row)?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn approved_revenue_kopecks(&self) -> i64 {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT COALESCE(SUM(amount_kopecks),0) FROM payment_requests
+             WHERE status='approved' AND months>0",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap_or(0)
+    }
     /// Регистрирует пользователя и обновляет изменяемые поля Telegram.
     /// Referrer записывается только один раз и не может быть самим пользователем.
     pub fn upsert_user(
@@ -339,5 +472,25 @@ mod tests {
             s.payment_request(id).unwrap().status,
             PaymentStatus::Approved
         );
+    }
+
+    #[test]
+    fn trial_is_one_shot_and_referrals_are_counted() {
+        let s = Store::open_in_memory();
+        s.upsert_user(1, Some("alice"), "Alice", None, 10);
+        s.upsert_user(2, Some("bob"), "Bob", Some(1), 11);
+        assert_eq!(s.referral_count(1), 1);
+        assert!(s.claim_trial(2, 12));
+        assert!(!s.claim_trial(2, 13));
+    }
+
+    #[test]
+    fn expiry_notification_is_idempotent_per_expiry_and_threshold() {
+        let s = Store::open_in_memory();
+        s.upsert_user(1, None, "Alice", None, 10);
+        assert!(s.mark_expiry_notification("alice_01", 1, 1000, 7, 20));
+        assert!(!s.mark_expiry_notification("alice_01", 1, 1000, 7, 21));
+        assert!(s.mark_expiry_notification("alice_01", 1, 1000, 3, 22));
+        assert!(s.mark_expiry_notification("alice_01", 1, 2000, 7, 23));
     }
 }

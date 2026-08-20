@@ -424,6 +424,78 @@ async fn provision_customer_key(
     Ok(result)
 }
 
+async fn customer_dashboard(
+    bot: &Bot,
+    chat: ChatId,
+    uid: i64,
+    vpn: &Vpn,
+    settings: &Store,
+) -> HandlerResult {
+    let me = bot.get_me().await?;
+    let username = me.username.clone().unwrap_or_default();
+    let now = now_epoch();
+    let keys = settings
+        .user_client_names(uid)
+        .iter()
+        .filter(|name| vpn.client_expiry(name).is_none_or(|expiry| expiry > now))
+        .count();
+    bot.send_message(
+        chat,
+        format!(
+            "🏠 Личный кабинет\n\nTelegram ID: {uid}\n💰 Баланс: {:.2} ₽\n🔑 Активных ключей: {keys}\n👥 Приглашено друзей: {}\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
+            settings.balance_kopecks(uid) as f64 / 100.0,
+            settings.referral_count(uid),
+        ),
+    )
+    .reply_markup(menu::customer_keyboard())
+    .await?;
+    Ok(())
+}
+
+async fn maybe_issue_trial(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store, uid: i64) {
+    let claimed_at = now_epoch();
+    if !settings.claim_trial(uid, claimed_at) {
+        return;
+    }
+    let Some(user) = settings.user(uid) else {
+        settings.release_trial_claim(uid, claimed_at);
+        return;
+    };
+    let result = async {
+        let existing = vpn.list().await?.into_iter().map(|c| c.name).collect();
+        let name = crate::vpn::validate::gen_available_names(
+            &format!("{}_trial", customer_base_name(&user)),
+            1,
+            &existing,
+        )
+        .map_err(|e| crate::error::Error::Parse(e.to_string()))?
+        .remove(0);
+        let result = vpn.add(&name, Some("1d"), settings.psk_default()).await?;
+        settings.assign_client_group(&name, None, claimed_at);
+        settings.assign_client_owner(&name, Some(uid));
+        Ok::<_, crate::error::Error>(result)
+    }
+    .await;
+    match result {
+        Ok(result) => {
+            let _ = bot
+                .send_message(chat, "🎁 Вам выдан бесплатный тестовый ключ на 24 часа.")
+                .await;
+            let _ = render::send_client_files(bot, chat, settings.lang(uid), &result).await;
+        }
+        Err(error) => {
+            settings.release_trial_claim(uid, claimed_at);
+            tracing::error!(%error, user_id = uid, "не удалось выдать пробный ключ");
+            let _ = bot
+                .send_message(
+                    chat,
+                    "Не удалось автоматически выдать тестовый ключ. Напишите в поддержку.",
+                )
+                .await;
+        }
+    }
+}
+
 /// Обрезает вывод скрипта до лимита Telegram-сообщения (3500 байт, с запасом
 /// на HTML-обёртку), округляя вниз до границы UTF-8-символа — байтовый индекс
 /// может попасть внутрь многобайтового символа (кириллица в выводе скрипта).
@@ -835,6 +907,209 @@ async fn message_handler(
 
     let role = resolve_role(uid, &cfg.admin_ids, &settings);
     let state = dialogue.get().await?.unwrap_or_default();
+    if matches!(&state, State::AwaitingSupportMessage) {
+        let subject = msg.text().unwrap_or("Вложение");
+        let ticket = settings
+            .open_support_ticket(uid, subject, now_epoch())
+            .unwrap_or(0);
+        for owner in &cfg.admin_ids {
+            let _ = bot.send_message(ChatId(*owner), format!("🆘 Обращение #{ticket} от пользователя {uid}\nОтветьте на пересланное сообщение командой /reply_{uid} и затем отправьте ответ.")).await;
+            let _ = bot
+                .forward_message(ChatId(*owner), msg.chat.id, msg.id)
+                .await;
+        }
+        bot.send_message(
+            msg.chat.id,
+            format!("✅ Обращение #{ticket} передано. Администратор ответит в этом чате."),
+        )
+        .reply_markup(menu::customer_keyboard())
+        .await?;
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if let State::AwaitingSupportReply { user_id } = state.clone() {
+        bot.copy_message(ChatId(user_id), msg.chat.id, msg.id)
+            .await?;
+        bot.send_message(msg.chat.id, "✅ Ответ отправлен пользователю.")
+            .reply_markup(menu::admin_keyboard())
+            .await?;
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingBroadcast) {
+        bot.send_message(
+            msg.chat.id,
+            "Проверьте сообщение выше. Для отправки всем пользователям напишите: ОТПРАВИТЬ",
+        )
+        .reply_markup(menu::admin_keyboard())
+        .await?;
+        dialogue
+            .update(State::AwaitingBroadcastConfirm {
+                source_chat_id: msg.chat.id.0,
+                source_message_id: msg.id.0,
+            })
+            .await?;
+        return Ok(());
+    }
+    if let State::AwaitingBroadcastConfirm {
+        source_chat_id,
+        source_message_id,
+    } = state.clone()
+    {
+        if msg.text().is_some_and(|v| v.trim() == "ОТПРАВИТЬ") {
+            let mut delivered = 0;
+            let mut failed = 0;
+            for user_id in settings.all_user_ids() {
+                match bot
+                    .copy_message(
+                        ChatId(user_id),
+                        ChatId(source_chat_id),
+                        MessageId(source_message_id),
+                    )
+                    .await
+                {
+                    Ok(_) => delivered += 1,
+                    Err(_) => failed += 1,
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            }
+            bot.send_message(
+                msg.chat.id,
+                format!("✅ Рассылка завершена: доставлено {delivered}, ошибок {failed}."),
+            )
+            .reply_markup(menu::admin_keyboard())
+            .await?;
+        } else {
+            bot.send_message(msg.chat.id, "Рассылка отменена.")
+                .reply_markup(menu::admin_keyboard())
+                .await?;
+        }
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if role.is_owner() {
+        if let Some(target) = msg
+            .text()
+            .and_then(|v| v.strip_prefix("/reply_"))
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            bot.send_message(
+                msg.chat.id,
+                format!("Отправьте ответ пользователю {target}:"),
+            )
+            .await?;
+            dialogue
+                .update(State::AwaitingSupportReply { user_id: target })
+                .await?;
+            return Ok(());
+        }
+        match msg.text().unwrap_or_default() {
+            "/start" | "🏠 Админ-панель" => {
+                bot.send_message(msg.chat.id, format!("🏠 Админ-панель\n\nПользователей: {}\nОткрытых обращений: {}\nВыручка: {:.2} ₽", settings.all_user_ids().len(), settings.open_support_count(), settings.approved_revenue_kopecks() as f64 / 100.0))
+                    .reply_markup(menu::admin_keyboard()).await?;
+                return Ok(());
+            }
+            "👥 Клиенты" => {
+                bot.send_message(msg.chat.id, i18n::menu_title(settings.lang(uid)))
+                    .reply_markup(menu::main_menu(settings.lang(uid)))
+                    .await?;
+                return Ok(());
+            }
+            "💳 Финансы" => {
+                let rows = settings.recent_payments(15);
+                let details = rows
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "#{} · user {} · {} ₽ · {} · {:?}",
+                            p.id,
+                            p.user_id,
+                            p.amount_kopecks / 100,
+                            p.method,
+                            p.status
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "💳 Финансы\nВыручка по одобренным покупкам: {:.2} ₽\n\n{}",
+                        settings.approved_revenue_kopecks() as f64 / 100.0,
+                        if details.is_empty() {
+                            "Операций нет"
+                        } else {
+                            &details
+                        }
+                    ),
+                )
+                .reply_markup(menu::admin_keyboard())
+                .await?;
+                return Ok(());
+            }
+            "🔗 Владельцы" => {
+                let lines = settings
+                    .all_user_ids()
+                    .into_iter()
+                    .filter_map(|id| {
+                        let keys = settings.user_client_names(id);
+                        (!keys.is_empty()).then(|| format!("{id}: {}", keys.join(", ")))
+                    })
+                    .collect::<Vec<_>>();
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "🔗 Владельцы ключей\n\n{}",
+                        if lines.is_empty() {
+                            "Привязок нет".to_string()
+                        } else {
+                            lines.join("\n")
+                        }
+                    ),
+                )
+                .reply_markup(menu::admin_keyboard())
+                .await?;
+                return Ok(());
+            }
+            "📣 Рассылка" => {
+                bot.send_message(
+                    msg.chat.id,
+                    "Отправьте сообщение для рассылки. Поддерживаются текст, фото и документы.",
+                )
+                .await?;
+                dialogue.update(State::AwaitingBroadcast).await?;
+                return Ok(());
+            }
+            "🆘 Обращения" => {
+                bot.send_message(msg.chat.id, format!("Открытых обращений: {}. Новые обращения пересылаются администраторам автоматически.", settings.open_support_count())).reply_markup(menu::admin_keyboard()).await?;
+                return Ok(());
+            }
+            "⚙️ Настройки" => {
+                bot.send_message(
+                    msg.chat.id,
+                    i18n::settings_title(
+                        settings.lang(uid),
+                        settings.psk_default(),
+                        settings.name_slug(),
+                        settings.deliver_conf(),
+                        settings.deliver_qr(),
+                        settings.deliver_link(),
+                    ),
+                )
+                .reply_markup(menu::settings_menu(
+                    settings.lang(uid),
+                    settings.psk_default(),
+                    settings.name_slug(),
+                    settings.deliver_conf(),
+                    settings.deliver_qr(),
+                    settings.deliver_link(),
+                ))
+                .await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     if let State::AwaitingPaymentProof { id } = state.clone() {
         let proof = msg.text().unwrap_or("Подтверждение отправлено");
         if settings.set_payment_proof(id, uid, proof) {
@@ -907,13 +1182,16 @@ async fn message_handler(
     }
     if role == Role::Denied {
         match msg.text().unwrap_or_default() {
-            "/start" | "🏠 Меню" => {
+            text if text.starts_with("/start") || matches!(text, "🏠 Меню" | "🏠 Кабинет") =>
+            {
                 bot.send_message(
                     msg.chat.id,
                     "Добро пожаловать! Здесь можно приобрести и управлять VPN-ключами.",
                 )
                 .reply_markup(menu::customer_keyboard())
                 .await?;
+                maybe_issue_trial(&bot, msg.chat.id, &vpn, &settings, uid).await;
+                customer_dashboard(&bot, msg.chat.id, uid, &vpn, &settings).await?;
             }
             "➕ Купить ключ" => {
                 bot.send_message(msg.chat.id, "Выберите срок подписки:")
@@ -940,17 +1218,6 @@ async fn message_handler(
                 }
                 request.await?;
             }
-            "💰 Баланс" => {
-                bot.send_message(
-                    msg.chat.id,
-                    format!(
-                        "💰 Баланс: {:.2} ₽",
-                        settings.balance_kopecks(uid) as f64 / 100.0
-                    ),
-                )
-                .reply_markup(menu::customer_keyboard())
-                .await?;
-            }
             "➕ Пополнить" => {
                 bot.send_message(
                     msg.chat.id,
@@ -959,13 +1226,16 @@ async fn message_handler(
                 .await?;
                 dialogue.update(State::AwaitingTopupAmount).await?;
             }
-            "👤 Профиль" => {
-                let count = settings.user_client_names(uid).len();
-                let me = bot.get_me().await?;
-                let username = me.username.clone().unwrap_or_default();
-                bot.send_message(msg.chat.id, format!("👤 Telegram ID: {uid}\nАктивных ключей: {count}\nРеферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}"))
-                    .reply_markup(menu::customer_keyboard())
-                    .await?;
+            "📖 Инструкция" => {
+                bot.send_message(msg.chat.id, "📖 Как подключить ключ\n\nAmneziaVPN:\n1. Откройте приложение и нажмите «+».\n2. Выберите импорт из файла или строки.\n3. Загрузите присланный .conf либо вставьте VPN-ссылку.\n4. Сохраните подключение и включите его.\n\nAmneziaWG:\n1. Нажмите «+» → импорт из файла.\n2. Выберите присланный .conf.\n3. Включите созданный туннель.\n\nОдин ключ используйте на одном устройстве одновременно.").reply_markup(menu::customer_keyboard()).await?;
+            }
+            "🆘 Поддержка" => {
+                bot.send_message(
+                    msg.chat.id,
+                    "Опишите проблему одним сообщением. Можно приложить скриншот или документ.",
+                )
+                .await?;
+                dialogue.update(State::AwaitingSupportMessage).await?;
             }
             _ => {
                 bot.send_message(msg.chat.id, "Используйте кнопки меню ниже.")

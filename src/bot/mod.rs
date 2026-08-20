@@ -66,6 +66,15 @@ pub enum State {
     },
     AwaitingTopupAmount,
     AwaitingPaymentInstructions,
+    AwaitingSupportMessage,
+    AwaitingSupportReply {
+        user_id: i64,
+    },
+    AwaitingBroadcast,
+    AwaitingBroadcastConfirm {
+        source_chat_id: i64,
+        source_message_id: i32,
+    },
 }
 
 #[cfg(test)]

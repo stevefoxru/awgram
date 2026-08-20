@@ -43,6 +43,11 @@ async fn main() {
     store.migrate_state_json(&cfg.state_file);
 
     tokio::spawn(awgram::collector::run(vpn.clone(), store.clone()));
+    tokio::spawn(awgram::subscriptions::run(
+        bot.clone(),
+        vpn.clone(),
+        store.clone(),
+    ));
 
     tracing::info!("запуск long polling");
     Dispatcher::builder(bot, handlers::schema())

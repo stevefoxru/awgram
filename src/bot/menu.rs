@@ -11,14 +11,37 @@ fn cb(text: &str, data: &str) -> InlineKeyboardButton {
 pub fn customer_keyboard() -> KeyboardMarkup {
     KeyboardMarkup::new(vec![
         vec![
+            KeyboardButton::new("🏠 Кабинет"),
             KeyboardButton::new("🔑 Мои ключи"),
-            KeyboardButton::new("➕ Купить ключ"),
         ],
         vec![
-            KeyboardButton::new("💰 Баланс"),
+            KeyboardButton::new("➕ Купить ключ"),
             KeyboardButton::new("➕ Пополнить"),
-            KeyboardButton::new("👤 Профиль"),
         ],
+        vec![
+            KeyboardButton::new("📖 Инструкция"),
+            KeyboardButton::new("🆘 Поддержка"),
+        ],
+    ])
+    .resize_keyboard()
+    .persistent()
+}
+
+pub fn admin_keyboard() -> KeyboardMarkup {
+    KeyboardMarkup::new(vec![
+        vec![
+            KeyboardButton::new("🏠 Админ-панель"),
+            KeyboardButton::new("👥 Клиенты"),
+        ],
+        vec![
+            KeyboardButton::new("💳 Финансы"),
+            KeyboardButton::new("🔗 Владельцы"),
+        ],
+        vec![
+            KeyboardButton::new("📣 Рассылка"),
+            KeyboardButton::new("🆘 Обращения"),
+        ],
+        vec![KeyboardButton::new("⚙️ Настройки")],
     ])
     .resize_keyboard()
     .persistent()
