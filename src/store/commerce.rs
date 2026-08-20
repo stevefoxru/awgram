@@ -89,7 +89,7 @@ impl Store {
         details: Option<&str>,
         now: i64,
     ) -> bool {
-        self.with_conn(|c| { let old:Option<String>=c.query_row("SELECT status FROM monitor_state WHERE component=?1",[component],|r|r.get(0)).optional()?; c.execute("INSERT INTO monitor_state(component,status,details,changed_at,checked_at) VALUES(?1,?2,?3,?4,?4) ON CONFLICT(component) DO UPDATE SET status=?2,details=?3,changed_at=CASE WHEN status<>?2 THEN ?4 ELSE changed_at END,checked_at=?4",rusqlite::params![component,status,details,now])?; Ok(old.as_deref()!=Some(status)) }).unwrap_or(false)
+        self.with_conn(|c| { let old:Option<String>=c.query_row("SELECT status FROM monitor_state WHERE component=?1",[component],|r|r.get(0)).optional()?; c.execute("INSERT INTO monitor_state(component,status,details,changed_at,checked_at) VALUES(?1,?2,?3,?4,?4) ON CONFLICT(component) DO UPDATE SET status=?2,details=?3,changed_at=CASE WHEN status<>?2 THEN ?4 ELSE changed_at END,checked_at=?4",rusqlite::params![component,status,details,now])?; Ok(old.as_deref()!=Some(status) && (old.is_some() || status!="ok")) }).unwrap_or(false)
     }
 
     pub fn backup_database(&self, path: &std::path::Path) -> rusqlite::Result<()> {
@@ -742,5 +742,29 @@ mod tests {
         assert!(!s.mark_expiry_notification("alice_01", 1, 1000, 7, 21));
         assert!(s.mark_expiry_notification("alice_01", 1, 1000, 3, 22));
         assert!(s.mark_expiry_notification("alice_01", 1, 2000, 7, 23));
+    }
+
+    #[test]
+    fn staff_roles_and_monitor_transitions_are_persistent() {
+        let s = Store::open_in_memory();
+        assert!(s.set_staff_role(42, Some("support"), 1, 10));
+        assert_eq!(s.staff_role(42).as_deref(), Some("support"));
+        assert!(!s.update_monitor_state("vpn", "ok", None, 11));
+        assert!(s.update_monitor_state("vpn", "error", Some("down"), 12));
+        assert!(!s.update_monitor_state("vpn", "error", Some("still down"), 13));
+        assert!(s.update_monitor_state("vpn", "ok", None, 14));
+        assert!(s.set_staff_role(42, None, 1, 15));
+        assert_eq!(s.staff_role(42), None);
+    }
+
+    #[test]
+    fn database_backup_creates_readable_copy() {
+        let s = Store::open_in_memory();
+        s.upsert_user(7, None, "User", None, 1);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup.db");
+        s.backup_database(&path).unwrap();
+        let backup = Store::open(&path).unwrap();
+        assert!(backup.user(7).is_some());
     }
 }

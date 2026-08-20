@@ -79,6 +79,22 @@ tangible on budget VPS hosts.
 - 💰 Internal balance with top-ups and an append-only transaction ledger.
 - 🎁 Referral rewards of 25% after subscription activation.
 - 🔗 Assignment of existing keys by Telegram ID or `@username`.
+- 🎁 One-time 24-hour trial key for a new user.
+- 📅 Manual and automatic renewal of a selected key, with an automatic refund
+  on technical failures.
+- ⏳ 7/3/1-day reminders. Expired peers are disabled while preserving their
+  config, restored after renewal, and deleted after seven days.
+- 📱 Device labels and key cards with status and expiry information.
+- 🆘 Support tickets with assignment, replies, history, and closure.
+
+### Administration & operations
+
+- 💳 Daily/30-day financial analytics and CSV payment export.
+- 🧑‍💼 Restricted `technical`, `support`, and `finance` staff roles.
+- 🔎 `/find QUERY` search and `/bulk_disable`, `/bulk_enable`, and
+  `/bulk_extend` owner commands.
+- 💾 Daily SQLite backups, five-minute VPN health monitoring, broadcasts,
+  recovery alerts, and an administrative audit trail.
 
 ## Quick start
 
