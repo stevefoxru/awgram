@@ -48,6 +48,12 @@ async fn main() {
         vpn.clone(),
         store.clone(),
     ));
+    tokio::spawn(awgram::operations::run(
+        bot.clone(),
+        cfg.clone(),
+        vpn.clone(),
+        store.clone(),
+    ));
 
     tracing::info!("запуск long polling");
     Dispatcher::builder(bot, handlers::schema())

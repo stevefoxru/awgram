@@ -28,6 +28,11 @@ pub enum EventKind {
     InviteCreate,
     InviteUse,
     InviteRevoke,
+    Payment,
+    Subscription,
+    Support,
+    Broadcast,
+    RoleChange,
 }
 
 impl EventKind {
@@ -51,6 +56,11 @@ impl EventKind {
             EventKind::InviteCreate => "invite_create",
             EventKind::InviteUse => "invite_use",
             EventKind::InviteRevoke => "invite_revoke",
+            EventKind::Payment => "payment",
+            EventKind::Subscription => "subscription",
+            EventKind::Support => "support",
+            EventKind::Broadcast => "broadcast",
+            EventKind::RoleChange => "role_change",
         }
     }
 }

@@ -214,6 +214,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         granted_at INTEGER NOT NULL
     );
     "#,
+    // v8: состояние эксплуатационного мониторинга.
+    r#"
+    CREATE TABLE monitor_state(
+        component TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        details TEXT,
+        changed_at INTEGER NOT NULL,
+        checked_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub struct Store {
@@ -301,7 +311,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 7);
+        assert_eq!(store.schema_version(), 8);
     }
 
     #[test]
@@ -310,12 +320,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 7);
+        assert_eq!(store.schema_version(), 8);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 7);
+        assert_eq!(store.schema_version(), 8);
     }
 }

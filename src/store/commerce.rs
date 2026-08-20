@@ -69,6 +69,36 @@ pub struct FinanceSummary {
 }
 
 impl Store {
+    pub fn search_clients(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(String, Option<i64>, Option<String>)> {
+        let like = format!("%{}%", query.trim().replace('%', "\\%").replace('_', "\\_"));
+        self.with_conn(|c| { let mut s=c.prepare(
+            "SELECT c.name,c.owner_user_id,c.device_label FROM clients c LEFT JOIN users u ON u.user_id=c.owner_user_id
+             WHERE c.removed_at IS NULL AND (c.name LIKE ?1 ESCAPE '\\' OR c.device_label LIKE ?1 ESCAPE '\\' OR u.username LIKE ?1 ESCAPE '\\' OR CAST(c.owner_user_id AS TEXT)=?2)
+             ORDER BY c.name LIMIT ?3")?; let rows=s.query_map(rusqlite::params![like,query.trim(),limit as i64],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?; rows.collect() }).unwrap_or_default()
+    }
+
+    /// Возвращает true, только если состояние компонента изменилось.
+    pub fn update_monitor_state(
+        &self,
+        component: &str,
+        status: &str,
+        details: Option<&str>,
+        now: i64,
+    ) -> bool {
+        self.with_conn(|c| { let old:Option<String>=c.query_row("SELECT status FROM monitor_state WHERE component=?1",[component],|r|r.get(0)).optional()?; c.execute("INSERT INTO monitor_state(component,status,details,changed_at,checked_at) VALUES(?1,?2,?3,?4,?4) ON CONFLICT(component) DO UPDATE SET status=?2,details=?3,changed_at=CASE WHEN status<>?2 THEN ?4 ELSE changed_at END,checked_at=?4",rusqlite::params![component,status,details,now])?; Ok(old.as_deref()!=Some(status)) }).unwrap_or(false)
+    }
+
+    pub fn backup_database(&self, path: &std::path::Path) -> rusqlite::Result<()> {
+        let value = path.to_string_lossy().into_owned();
+        self.with_conn(|c| {
+            c.execute("VACUUM INTO ?1", [value])?;
+            Ok(())
+        })
+    }
     pub fn staff_role(&self, user_id: i64) -> Option<String> {
         self.with_conn(|c| {
             c.query_row(

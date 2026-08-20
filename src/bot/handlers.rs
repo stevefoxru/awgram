@@ -1035,6 +1035,91 @@ async fn message_handler(
 
     let role = resolve_role(uid, &cfg.admin_ids, &settings);
     let state = dialogue.get().await?.unwrap_or_default();
+    if (role.is_owner() || matches!(&role,Role::Staff(v) if v=="technical"))
+        && msg.text().is_some_and(|v| v.starts_with("/find "))
+    {
+        let query = msg
+            .text()
+            .unwrap_or_default()
+            .trim_start_matches("/find ")
+            .trim();
+        let rows = settings.search_clients(query, 30);
+        let text = if rows.is_empty() {
+            "Ничего не найдено.".into()
+        } else {
+            rows.into_iter()
+                .map(|(name, owner, label)| {
+                    format!(
+                        "• {name} · {} · {}",
+                        label.unwrap_or_else(|| "без устройства".into()),
+                        owner
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "без владельца".into())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        bot.send_message(msg.chat.id, format!("🔎 Поиск «{query}»\n\n{text}"))
+            .await?;
+        return Ok(());
+    }
+    if role.is_owner() {
+        if let Some(raw) = msg.text().and_then(|v| v.strip_prefix("/bulk_")) {
+            let parts: Vec<_> = raw.split_whitespace().collect();
+            if let (Some(command), Some(prefix)) = (parts.first(), parts.get(1)) {
+                let names = vpn
+                    .list()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| c.name)
+                    .filter(|n| n.starts_with(prefix))
+                    .take(100)
+                    .collect::<Vec<_>>();
+                let mut ok = 0usize;
+                for name in &names {
+                    let result = match *command {
+                        "disable" => vpn.disable_client(name).await,
+                        "enable" => vpn.enable_client(name).await,
+                        "extend" => {
+                            if let Some(seconds) = parts.get(2).and_then(|v| duration_seconds(v)) {
+                                vpn.extend_client(name, seconds, now_epoch())
+                                    .await
+                                    .map(|_| ())
+                            } else {
+                                Err(crate::error::Error::Parse(
+                                    "нужен срок, например 30d".into(),
+                                ))
+                            }
+                        }
+                        _ => Err(crate::error::Error::Parse(
+                            "команда не поддерживается".into(),
+                        )),
+                    };
+                    if result.is_ok() {
+                        ok += 1;
+                        settings.log_event(
+                            now_epoch(),
+                            EventKind::Modify,
+                            Some(name),
+                            Some(uid),
+                            Some(&format!("bulk_{command}")),
+                        );
+                    }
+                }
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "✅ Массовая операция завершена: {ok}/{} ключей.",
+                        names.len()
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
     if matches!(&state, State::AwaitingSupportMessage) {
         let subject = msg.text().unwrap_or("Вложение");
         let ticket = settings
@@ -1144,6 +1229,13 @@ async fn message_handler(
                     Some(*value)
                 };
                 if settings.set_staff_role(user_id, selected, uid, now_epoch()) {
+                    settings.log_event(
+                        now_epoch(),
+                        EventKind::RoleChange,
+                        None,
+                        Some(uid),
+                        Some(&format!("user={user_id} role={value}")),
+                    );
                     bot.send_message(
                         msg.chat.id,
                         format!("✅ Роль пользователя {user_id}: {value}"),
@@ -1256,6 +1348,13 @@ async fn message_handler(
                 )
                 .reply_markup(menu::admin_keyboard())
                 .await?;
+                settings.log_event(
+                    now_epoch(),
+                    EventKind::Broadcast,
+                    None,
+                    Some(uid),
+                    Some(&format!("delivered={delivered} failed={failed}")),
+                );
                 return Ok(());
             }
             "📣 Рассылка" => {
@@ -2931,6 +3030,13 @@ async fn callback_handler(
         Action::SupportClose(id) => {
             if let Some(t) = settings.support_ticket(id) {
                 if settings.close_support_ticket(id, uid, now_epoch()) {
+                    settings.log_event(
+                        now_epoch(),
+                        EventKind::Support,
+                        None,
+                        Some(uid),
+                        Some(&format!("closed ticket={id}")),
+                    );
                     let _=bot.send_message(ChatId(t.user_id),format!("✅ Обращение #{id} закрыто. Если помощь ещё нужна, создайте новое обращение.")).await;
                     bot.send_message(chat, format!("✅ Обращение #{id} закрыто."))
                         .await?;
