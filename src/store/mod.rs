@@ -172,6 +172,23 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL
     );
     "#,
+    // v5: настройки подписок и защита автоматического продления от дублей.
+    r#"
+    CREATE TABLE client_subscriptions(
+        client_name TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        months INTEGER NOT NULL DEFAULT 1,
+        auto_renew INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE renewal_attempts(
+        client_name TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(client_name, expires_at)
+    );
+    "#,
 ];
 
 pub struct Store {
@@ -259,7 +276,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 4);
+        assert_eq!(store.schema_version(), 5);
     }
 
     #[test]
@@ -268,12 +285,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 4);
+        assert_eq!(store.schema_version(), 5);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 4);
+        assert_eq!(store.schema_version(), 5);
     }
 }

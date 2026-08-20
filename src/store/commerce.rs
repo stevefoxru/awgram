@@ -49,6 +49,56 @@ pub struct PaymentRequest {
 }
 
 impl Store {
+    pub fn set_auto_renew(
+        &self,
+        client_name: &str,
+        user_id: i64,
+        months: i64,
+        enabled: bool,
+        now: i64,
+    ) -> bool {
+        if !matches!(months, 1 | 3 | 6 | 12) || self.client_owner(client_name) != Some(user_id) {
+            return false;
+        }
+        self.with_conn(|c| c.execute(
+            "INSERT INTO client_subscriptions(client_name,user_id,months,auto_renew,updated_at)
+             VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(client_name) DO UPDATE SET user_id=?2,months=?3,auto_renew=?4,updated_at=?5",
+            rusqlite::params![client_name,user_id,months,if enabled { 1_i64 } else { 0_i64 },now]
+        )).map(|n| n == 1).unwrap_or(false)
+    }
+
+    pub fn auto_renew(&self, client_name: &str, user_id: i64) -> Option<(i64, bool)> {
+        self.with_conn(|c| c.query_row(
+            "SELECT months,auto_renew FROM client_subscriptions WHERE client_name=?1 AND user_id=?2",
+            rusqlite::params![client_name,user_id], |r| Ok((r.get(0)?, r.get::<_,i64>(1)? != 0)))
+            .optional()).ok().flatten()
+    }
+
+    pub fn auto_renew_clients(&self) -> Vec<(String, i64, i64)> {
+        self.with_conn(|c| {
+            let mut s = c.prepare(
+                "SELECT client_name,user_id,months FROM client_subscriptions WHERE auto_renew=1",
+            )?;
+            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn claim_renewal_attempt(&self, client_name: &str, expires_at: i64, now: i64) -> bool {
+        self.with_conn(|c| c.execute("INSERT OR IGNORE INTO renewal_attempts(client_name,expires_at,status,created_at) VALUES(?1,?2,'processing',?3)", rusqlite::params![client_name,expires_at,now]))
+            .map(|n| n==1).unwrap_or(false)
+    }
+
+    pub fn finish_renewal_attempt(&self, client_name: &str, expires_at: i64, status: &str) {
+        let _ = self.with_conn(|c| {
+            c.execute(
+                "UPDATE renewal_attempts SET status=?3 WHERE client_name=?1 AND expires_at=?2",
+                rusqlite::params![client_name, expires_at, status],
+            )
+        });
+    }
     /// Атомарно резервирует единственный пробный период для Telegram ID.
     pub fn claim_trial(&self, user_id: i64, now: i64) -> bool {
         self.with_conn(|c| {
@@ -325,6 +375,24 @@ impl Store {
             Ok(c.last_insert_rowid())
         })
         .ok()
+    }
+
+    pub fn create_renewal_request(
+        &self,
+        user_id: i64,
+        client_name: &str,
+        months: i64,
+        amount_kopecks: i64,
+        now: i64,
+    ) -> Option<i64> {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO payment_requests(user_id,months,amount_kopecks,method,client_name,created_at)
+                 VALUES(?1,?2,?3,'manual',?4,?5)",
+                rusqlite::params![user_id, months, amount_kopecks, client_name, now],
+            )?;
+            Ok(c.last_insert_rowid())
+        }).ok()
     }
 
     pub fn set_payment_proof(&self, id: i64, user_id: i64, proof: &str) -> bool {

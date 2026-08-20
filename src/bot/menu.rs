@@ -82,11 +82,55 @@ pub fn payment_admin_menu(id: i64) -> InlineKeyboardMarkup {
 }
 
 pub fn customer_keys_menu(names: &[String]) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(
-        names
-            .iter()
-            .map(|name| vec![cb(&format!("🔑 {name}"), &format!("mykey:{name}"))]),
-    )
+    InlineKeyboardMarkup::new(names.iter().map(|name| {
+        vec![
+            cb(&format!("🔑 {name}"), &format!("mykey:{name}")),
+            cb("📅 Продлить", &format!("renew:{name}")),
+        ]
+    }))
+}
+
+pub fn renew_terms_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("1 месяц — 200 ₽", &format!("renew:term:{name}:1")),
+            cb("3 месяца — 600 ₽", &format!("renew:term:{name}:3")),
+        ],
+        vec![
+            cb("6 месяцев — 1000 ₽", &format!("renew:term:{name}:6")),
+            cb("12 месяцев — 2000 ₽", &format!("renew:term:{name}:12")),
+        ],
+    ])
+}
+
+pub fn auto_renew_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("✅ Авто: 1 месяц", &format!("autorenew:{name}:1:on")),
+            cb("✅ Авто: 3 месяца", &format!("autorenew:{name}:3:on")),
+        ],
+        vec![
+            cb("✅ Авто: 6 месяцев", &format!("autorenew:{name}:6:on")),
+            cb("✅ Авто: 12 месяцев", &format!("autorenew:{name}:12:on")),
+        ],
+        vec![cb(
+            "❌ Выключить автопродление",
+            &format!("autorenew:{name}:1:off"),
+        )],
+    ])
+}
+
+pub fn renew_method_menu(name: &str, months: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "💳 Перевод",
+            &format!("renew:method:{name}:{months}:manual"),
+        )],
+        vec![cb(
+            "💰 Внутренний баланс",
+            &format!("renew:method:{name}:{months}:balance"),
+        )],
+    ])
 }
 
 pub fn main_menu(lang: Lang) -> InlineKeyboardMarkup {
@@ -589,6 +633,10 @@ pub fn client_card(lang: Lang, name: &str, is_owner: bool) -> InlineKeyboardMark
         rows.push(vec![cb(
             "👤 Назначить владельца",
             &format!("owner:assign:{name}"),
+        )]);
+        rows.push(vec![cb(
+            "📅 Изменить срок действия",
+            &format!("owner:expiry:{name}"),
         )]);
         util_row.push(cb(&i18n::btn_modify(lang), &format!("mod:{name}")));
     }

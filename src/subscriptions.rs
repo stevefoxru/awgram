@@ -25,6 +25,60 @@ fn threshold_days(left: i64) -> Option<i64> {
 }
 
 pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
+    for (name, user_id, months) in store.auto_renew_clients() {
+        let Some(expires_at) = vpn.client_expiry(&name) else {
+            continue;
+        };
+        let left = expires_at.saturating_sub(now);
+        if left <= 0 || left > 86_400 || !store.claim_renewal_attempt(&name, expires_at, now) {
+            continue;
+        }
+        let (amount, seconds) = match months {
+            1 => (20_000, 30 * 86_400),
+            3 => (60_000, 90 * 86_400),
+            6 => (100_000, 180 * 86_400),
+            12 => (200_000, 365 * 86_400),
+            _ => {
+                store.finish_renewal_attempt(&name, expires_at, "invalid_tariff");
+                continue;
+            }
+        };
+        let reference = format!("autorenew:{name}:{expires_at}");
+        if !store.spend_balance(user_id, amount, &reference, now) {
+            store.finish_renewal_attempt(&name, expires_at, "insufficient_balance");
+            let _ = bot.send_message(ChatId(user_id), format!("⚠️ Автопродление ключа «{name}» не выполнено: недостаточно средств. Пополните баланс до истечения срока.")).await;
+            continue;
+        }
+        match vpn.extend_client(&name, seconds, now).await {
+            Ok(new_expiry) => {
+                store.finish_renewal_attempt(&name, expires_at, "done");
+                if let Some(referrer) = store.user(user_id).and_then(|u| u.referrer_id) {
+                    let reward = amount * i64::from(store.referral_percent()) / 100;
+                    store.add_ledger_entry(
+                        referrer,
+                        reward,
+                        "referral",
+                        &format!("referral:{reference}"),
+                        Some(&format!("autorenew user={user_id}")),
+                        now,
+                    );
+                }
+                let _ = bot.send_message(ChatId(user_id), format!("✅ Ключ «{name}» автоматически продлён на {months} мес. С баланса списано {} ₽. Новый срок (Unix): {new_expiry}", amount / 100)).await;
+            }
+            Err(error) => {
+                store.add_ledger_entry(
+                    user_id,
+                    amount,
+                    "refund",
+                    &format!("refund:{reference}"),
+                    Some("autorenew failed"),
+                    now,
+                );
+                store.finish_renewal_attempt(&name, expires_at, "failed");
+                tracing::error!(%error, client=%name, "ошибка автопродления");
+            }
+        }
+    }
     for user_id in store.all_user_ids() {
         for name in store.user_client_names(user_id) {
             let Some(expires_at) = vpn.client_expiry(&name) else {

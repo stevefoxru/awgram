@@ -16,6 +16,7 @@ ENV_FILE="$CFG_DIR/env"
 SETUP_CONF="$CFG_DIR/setup.conf"
 UNIT_FILE="/etc/systemd/system/awgram.service"
 SUDOERS_FILE="/etc/sudoers.d/awgram"
+CLIENTCTL_PATH="/usr/local/libexec/awgram-clientctl"
 SVC_USER="awgram"
 
 UI_LANG=""; MODE=""; TOKEN=""; ADMINS=""; MANAGE_SCRIPT=""; CLIENTS_DIR=""
@@ -416,6 +417,31 @@ EOF
   chmod 640 "$CFG_FILE"
 }
 
+install_clientctl() {
+  install -d -m 755 "$(dirname "$CLIENTCTL_PATH")"
+  cat > "$CLIENTCTL_PATH" <<'AWGRAM_CLIENTCTL'
+#!/usr/bin/env bash
+set -euo pipefail
+cmd="${1:-}"; clients_dir="${2:-}"; name="${3:-}"; value="${4:-}"
+[[ "$clients_dir" = /* ]] || { echo 'clients_dir must be absolute' >&2; exit 2; }
+[[ "$name" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]] || { echo 'invalid client name' >&2; exit 2; }
+[[ -f "$clients_dir/$name.conf" ]] || { echo 'client not found' >&2; exit 3; }
+expiry_dir="$clients_dir/expiry"; mkdir -p -m 700 "$expiry_dir"
+case "$cmd" in
+  set-expiry)
+    [[ "$value" =~ ^[0-9]{9,12}$ ]] || { echo 'invalid epoch' >&2; exit 2; }
+    tmp="$expiry_dir/.${name}.$$"
+    printf '%s\n' "$value" > "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$expiry_dir/$name"
+    ;;
+  clear-expiry) rm -f -- "$expiry_dir/$name" ;;
+  *) echo 'usage: awgram-clientctl set-expiry CLIENTS_DIR NAME EPOCH | clear-expiry CLIENTS_DIR NAME' >&2; exit 2 ;;
+esac
+printf '{"ok":true,"client":"%s"}\n' "$name"
+AWGRAM_CLIENTCTL
+  chmod 755 "$CLIENTCTL_PATH"
+  chown root:root "$CLIENTCTL_PATH"
+}
+
 install_unit() {
   local user_line=""
   [ "$MODE" = "hardened" ] && user_line="User=$SVC_USER"
@@ -561,6 +587,7 @@ cmd_install() {
   TMPD="$(mktemp -d)"
   staged="$(fetch_binary "$tag")"
   install_binary "$staged"
+  install_clientctl
   # конфигурация и запуск
   write_config
   [ -z "$TOKEN" ] || write_env_token
@@ -670,7 +697,7 @@ cmd_help() {
 # ---------- hardened mode setup ----------
 write_sudoers() {
   local tmp; tmp="$(mktemp)"
-  printf '%s ALL=(root) NOPASSWD: %s\n' "$SVC_USER" "$MANAGE_SCRIPT" > "$tmp"
+  printf '%s ALL=(root) NOPASSWD: %s, %s\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" > "$tmp"
   chmod 440 "$tmp"
   visudo -c -f "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die err_sudoers; }
   mv -f "$tmp" "$SUDOERS_FILE"
@@ -735,6 +762,8 @@ cmd_update() {
   TMPD="$(mktemp -d)"
   staged="$(fetch_binary "$tag")"
   install_binary "$staged"
+  install_clientctl
+  if [ "$MODE" = "hardened" ]; then write_sudoers; fi
   if is_systemd; then
     systemctl restart awgram 2>/dev/null || true
     if ! wait_active; then

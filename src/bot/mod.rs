@@ -64,6 +64,9 @@ pub enum State {
     AwaitingClientOwner {
         name: String,
     },
+    AwaitingAdminExpiry {
+        name: String,
+    },
     AwaitingTopupAmount,
     AwaitingPaymentInstructions,
     AwaitingSupportMessage,

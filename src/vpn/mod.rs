@@ -363,6 +363,52 @@ impl Vpn {
         raw.trim().parse::<i64>().ok()
     }
 
+    /// Атомарно меняет срок существующего клиента через root-helper,
+    /// устанавливаемый awgram-setup. Конфигурация и ключи не меняются.
+    pub async fn set_client_expiry(&self, name: &str, expires_at: Option<i64>) -> Result<()> {
+        let name =
+            validate::validate_name(name).map_err(|e| crate::error::Error::Parse(e.to_string()))?;
+        let helper = std::path::Path::new("/usr/local/libexec/awgram-clientctl");
+        let spec = RunSpec {
+            script: helper,
+            sudo_prefix: &self.sudo_prefix,
+            timeout_secs: self.timeout_secs,
+            extra_env: &[],
+        };
+        let clients_dir = self.clients_dir.to_string_lossy().into_owned();
+        let value;
+        let args: Vec<&str> = if let Some(epoch) = expires_at {
+            if epoch <= 0 {
+                return Err(crate::error::Error::Parse("некорректный срок".into()));
+            }
+            value = epoch.to_string();
+            vec!["set-expiry", &clients_dir, &name, &value]
+        } else {
+            vec!["clear-expiry", &clients_dir, &name]
+        };
+        let (out, code) = run(&spec, &args).await?;
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(crate::error::Error::ScriptFailed {
+                code: Some(code),
+                stderr: out,
+            })
+        }
+    }
+
+    pub async fn extend_client(&self, name: &str, seconds: i64, now: i64) -> Result<i64> {
+        if seconds <= 0 {
+            return Err(crate::error::Error::Parse(
+                "срок должен быть положительным".into(),
+            ));
+        }
+        let base = self.client_expiry(name).unwrap_or(now).max(now);
+        let expires_at = base.saturating_add(seconds);
+        self.set_client_expiry(name, Some(expires_at)).await?;
+        Ok(expires_at)
+    }
+
     /// Свободные адреса в подсети сервера для превентивной проверки массовой
     /// генерации. `total` = usable-хостов v4-подсети (минус network+broadcast),
     /// `free` = total − 1 (сервер) − existing. Берёт первый IPv4 из

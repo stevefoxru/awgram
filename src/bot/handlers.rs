@@ -99,8 +99,13 @@ pub enum Action {
     PaymentApprove(i64),
     PaymentReject(i64),
     AssignOwnerAsk(String),
+    AdminExpiryAsk(String),
     PaymentInstructionsAsk,
     CustomerKey(String),
+    Renew(String),
+    RenewTerm(String, i64),
+    RenewMethod(String, i64, String),
+    AutoRenew(String, i64, bool),
     Unknown,
 }
 
@@ -153,8 +158,42 @@ fn parse_callback(data: &str) -> Action {
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("owner:assign:") {
                 Action::AssignOwnerAsk(v.to_string())
+            } else if let Some(v) = data.strip_prefix("owner:expiry:") {
+                Action::AdminExpiryAsk(v.to_string())
             } else if let Some(v) = data.strip_prefix("mykey:") {
                 Action::CustomerKey(v.to_string())
+            } else if let Some(v) = data.strip_prefix("renew:term:") {
+                let mut parts = v.rsplitn(2, ':');
+                match (parts.next().and_then(|p| p.parse().ok()), parts.next()) {
+                    (Some(months), Some(name)) => Action::RenewTerm(name.to_string(), months),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("renew:method:") {
+                let parts: Vec<_> = v.rsplitn(3, ':').collect();
+                match (
+                    parts.first(),
+                    parts.get(1).and_then(|p| p.parse().ok()),
+                    parts.get(2),
+                ) {
+                    (Some(method), Some(months), Some(name)) => {
+                        Action::RenewMethod((*name).to_string(), months, (*method).to_string())
+                    }
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("renew:") {
+                Action::Renew(v.to_string())
+            } else if let Some(v) = data.strip_prefix("autorenew:") {
+                let parts: Vec<_> = v.rsplitn(3, ':').collect();
+                match (
+                    parts.first(),
+                    parts.get(1).and_then(|p| p.parse().ok()),
+                    parts.get(2),
+                ) {
+                    (Some(flag), Some(months), Some(name)) => {
+                        Action::AutoRenew((*name).to_string(), months, *flag == "on")
+                    }
+                    _ => Action::Unknown,
+                }
             } else if let Some(v) = data.strip_prefix("g:card:") {
                 v.parse().map(Action::GroupCard).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("g:ren:") {
@@ -379,6 +418,21 @@ fn tariff(months: i64) -> Option<(i64, &'static str)> {
         12 => Some((200_000, "365d")),
         _ => None,
     }
+}
+
+fn duration_seconds(value: &str) -> Option<i64> {
+    let split = value.len().checked_sub(1)?;
+    let amount = value[..split].parse::<i64>().ok()?;
+    let unit = &value[split..];
+    let multiplier = match unit {
+        "h" => 3_600,
+        "d" => 86_400,
+        "w" => 604_800,
+        "m" => 2_592_000,
+        "y" => 31_536_000,
+        _ => return None,
+    };
+    amount.checked_mul(multiplier).filter(|v| *v > 0)
 }
 
 fn customer_base_name(user: &crate::store::UserRow) -> String {
@@ -633,6 +687,10 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | Profile
         | Balance
         | CustomerKey(_)
+        | Renew(_)
+        | RenewTerm(_, _)
+        | RenewMethod(_, _, _)
+        | AutoRenew(_, _, _)
         | Unknown => true,
         // Экран/установка текущей группы: только GA, группа — только своя.
         GroupSelectMenu => matches!(role, Role::GroupAdmin(_)),
@@ -689,6 +747,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | PaymentApprove(_)
         | PaymentReject(_)
         | AssignOwnerAsk(_)
+        | AdminExpiryAsk(_)
         | PaymentInstructionsAsk => role.is_owner(),
     }
 }
@@ -1178,6 +1237,48 @@ async fn message_handler(
             bot.send_message(msg.chat.id, "Введите текст длиной от 1 до 1000 символов.")
                 .await?;
         }
+        return Ok(());
+    }
+    if let State::AwaitingAdminExpiry { name } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let raw = msg.text().unwrap_or_default().trim().to_ascii_lowercase();
+        let result = if matches!(raw.as_str(), "none" | "без срока" | "бессрочно")
+        {
+            vpn.set_client_expiry(&name, None).await.map(|_| None)
+        } else {
+            match duration_seconds(&raw).filter(|v| *v <= 10 * 31_536_000) {
+                Some(seconds) => vpn
+                    .extend_client(&name, seconds, now_epoch())
+                    .await
+                    .map(Some),
+                None => Err(crate::error::Error::Parse(
+                    "используйте 12h, 7d, 30d, 6m, 1y или none".into(),
+                )),
+            }
+        };
+        match result {
+            Ok(Some(epoch)) => {
+                bot.send_message(
+                    msg.chat.id,
+                    format!("✅ Срок ключа {name} изменён. Новая дата (Unix): {epoch}"),
+                )
+                .reply_markup(menu::admin_keyboard())
+                .await?;
+            }
+            Ok(None) => {
+                bot.send_message(msg.chat.id, format!("✅ Ключ {name} теперь бессрочный."))
+                    .reply_markup(menu::admin_keyboard())
+                    .await?;
+            }
+            Err(error) => {
+                bot.send_message(msg.chat.id, i18n::error_text(settings.lang(uid), &error))
+                    .await?;
+            }
+        }
+        dialogue.update(State::Idle).await?;
         return Ok(());
     }
     if role == Role::Denied {
@@ -2152,6 +2253,10 @@ async fn callback_handler(
             | Action::Profile
             | Action::Balance
             | Action::CustomerKey(_)
+            | Action::Renew(_)
+            | Action::RenewTerm(_, _)
+            | Action::RenewMethod(_, _, _)
+            | Action::AutoRenew(_, _, _)
     );
     if role == Role::Denied && !customer_action {
         tracing::warn!(user_id = uid, "отклонён доступ (callback)");
@@ -2286,6 +2391,98 @@ async fn callback_handler(
             .reply_markup(menu::customer_keyboard())
             .await?;
         }
+        Action::Renew(name) => {
+            if settings.client_owner(&name) == Some(uid) && vpn.exists(&name).await.unwrap_or(false)
+            {
+                bot.send_message(chat, format!("Выберите срок продления ключа {name}:"))
+                    .reply_markup(menu::renew_terms_menu(&name))
+                    .await?;
+                let auto = settings
+                    .auto_renew(&name, uid)
+                    .map(|(m, on)| {
+                        if on {
+                            format!("Сейчас включено: {m} мес.")
+                        } else {
+                            "Сейчас выключено".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "Сейчас выключено".to_string());
+                bot.send_message(chat, format!("🔁 Автопродление\n{auto}"))
+                    .reply_markup(menu::auto_renew_menu(&name))
+                    .await?;
+            } else {
+                bot.send_message(chat, "Ключ уже удалён после истечения. Обратитесь в поддержку для восстановления или приобретите новый ключ.").await?;
+            }
+        }
+        Action::RenewTerm(name, months) => {
+            if settings.client_owner(&name) == Some(uid) && tariff(months).is_some() {
+                bot.send_message(chat, "Выберите способ оплаты продления:")
+                    .reply_markup(menu::renew_method_menu(&name, months))
+                    .await?;
+            }
+        }
+        Action::RenewMethod(name, months, method) => {
+            if settings.client_owner(&name) != Some(uid)
+                || !vpn.exists(&name).await.unwrap_or(false)
+            {
+                return Ok(());
+            }
+            let Some((amount, expiry)) = tariff(months) else {
+                return Ok(());
+            };
+            let seconds = duration_seconds(expiry).unwrap_or(0);
+            if method == "balance" {
+                let reference = format!("renew:{uid}:{name}:{}", now_epoch());
+                if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
+                    bot.send_message(chat, "Недостаточно средств на внутреннем балансе.")
+                        .await?;
+                    return Ok(());
+                }
+                match vpn.extend_client(&name, seconds, now_epoch()).await {
+                    Ok(epoch) => {
+                        bot.send_message(
+                            chat,
+                            format!("✅ Ключ {name} продлён. Новый срок (Unix): {epoch}"),
+                        )
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    }
+                    Err(error) => {
+                        settings.add_ledger_entry(
+                            uid,
+                            amount,
+                            "refund",
+                            &format!("refund:{reference}"),
+                            Some("renew failed"),
+                            now_epoch(),
+                        );
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
+                }
+            } else if method == "manual" {
+                if let Some(id) =
+                    settings.create_renewal_request(uid, &name, months, amount, now_epoch())
+                {
+                    bot.send_message(chat, format!("Заявка #{id} на продление ключа {name}\nСрок: {months} мес.\nСумма: {} ₽\n\n{}", amount / 100, settings.payment_instructions()))
+                        .reply_markup(menu::payment_paid_menu(id)).await?;
+                }
+            }
+        }
+        Action::AutoRenew(name, months, enabled) => {
+            if settings.set_auto_renew(&name, uid, months, enabled, now_epoch()) {
+                bot.send_message(
+                    chat,
+                    if enabled {
+                        format!("✅ Автопродление ключа {name} включено на тариф {months} мес.")
+                    } else {
+                        format!("Автопродление ключа {name} выключено.")
+                    },
+                )
+                .reply_markup(menu::customer_keyboard())
+                .await?;
+            }
+        }
         Action::Profile => {
             let me = bot.get_me().await?;
             let username = me.username.clone().unwrap_or_default();
@@ -2346,6 +2543,58 @@ async fn callback_handler(
                         .await;
                     bot.send_message(chat, format!("✅ Пополнение #{id} одобрено."))
                         .await?;
+                }
+                return Ok(());
+            }
+            if let Some(name) = req.client_name.clone() {
+                if settings.client_owner(&name) != Some(req.user_id) {
+                    bot.send_message(
+                        chat,
+                        "Владелец ключа изменился — заявка не может быть одобрена.",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let seconds = tariff(req.months)
+                    .and_then(|(_, expiry)| duration_seconds(expiry))
+                    .unwrap_or(0);
+                match vpn.extend_client(&name, seconds, now_epoch()).await {
+                    Ok(epoch) => {
+                        if settings.decide_payment(
+                            id,
+                            crate::store::PaymentStatus::Approved,
+                            uid,
+                            Some(&name),
+                            now_epoch(),
+                        ) {
+                            if let Some(referrer) =
+                                settings.user(req.user_id).and_then(|u| u.referrer_id)
+                            {
+                                let reward = req.amount_kopecks
+                                    * i64::from(settings.referral_percent())
+                                    / 100;
+                                settings.add_ledger_entry(
+                                    referrer,
+                                    reward,
+                                    "referral",
+                                    &format!("referral:payment:{id}"),
+                                    Some(&format!("renew user={}", req.user_id)),
+                                    now_epoch(),
+                                );
+                            }
+                            bot.send_message(ChatId(req.user_id), format!("✅ Оплата подтверждена. Ключ {name} продлён. Новый срок (Unix): {epoch}"))
+                                .reply_markup(menu::customer_keyboard()).await?;
+                            bot.send_message(
+                                chat,
+                                format!("✅ Продление по заявке #{id} выполнено."),
+                            )
+                            .await?;
+                        }
+                    }
+                    Err(error) => {
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
                 }
                 return Ok(());
             }
@@ -2421,6 +2670,18 @@ async fn callback_handler(
             )
             .await?;
             dialogue.update(State::AwaitingClientOwner { name }).await?;
+        }
+        Action::AdminExpiryAsk(name) => {
+            if !vpn.exists(&name).await.unwrap_or(false) {
+                bot.send_message(
+                    chat,
+                    "Ключ уже удалён или не существует. Его можно только создать заново.",
+                )
+                .await?;
+                return Ok(());
+            }
+            bot.send_message(chat, format!("Текущий срок ключа {name}: {:?}\n\nВведите, на сколько продлить: 12h, 7d, 30d, 6m, 1y. Для бессрочного ключа — none. Новый период добавляется к оставшемуся сроку.", vpn.client_expiry(&name))).await?;
+            dialogue.update(State::AwaitingAdminExpiry { name }).await?;
         }
         Action::PaymentInstructionsAsk => {
             bot.send_message(
@@ -4350,8 +4611,13 @@ mod tests {
                 PaymentApprove(_) => {}
                 PaymentReject(_) => {}
                 AssignOwnerAsk(_) => {}
+                AdminExpiryAsk(_) => {}
                 PaymentInstructionsAsk => {}
                 CustomerKey(_) => {}
+                Renew(_) => {}
+                RenewTerm(_, _) => {}
+                RenewMethod(_, _, _) => {}
+                AutoRenew(_, _, _) => {}
                 Unknown => {}
             }
         }
