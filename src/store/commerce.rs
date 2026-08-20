@@ -80,8 +80,8 @@ impl Store {
             let mut s = c.prepare(
                 "SELECT client_name,user_id,months FROM client_subscriptions WHERE auto_renew=1",
             )?;
-            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect()
+            let rows = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect()
         })
         .unwrap_or_default()
     }
