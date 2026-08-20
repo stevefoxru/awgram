@@ -13,7 +13,7 @@ mod groups;
 mod settings;
 mod stats;
 
-pub use commerce::{PaymentRequest, PaymentStatus, UserRow};
+pub use commerce::{PaymentRequest, PaymentStatus, SupportTicket, UserRow};
 pub use events::{EventKind, EventRow};
 pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
@@ -189,6 +189,22 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(client_name, expires_at)
     );
     "#,
+    // v6: понятные названия устройств и управляемые тикеты поддержки.
+    r#"
+    ALTER TABLE clients ADD COLUMN device_label TEXT;
+    ALTER TABLE support_tickets ADD COLUMN assigned_to INTEGER;
+    CREATE TABLE support_messages(
+        id INTEGER PRIMARY KEY,
+        ticket_id INTEGER NOT NULL REFERENCES support_tickets(id),
+        sender_user_id INTEGER NOT NULL,
+        is_admin INTEGER NOT NULL,
+        telegram_chat_id INTEGER NOT NULL,
+        telegram_message_id INTEGER NOT NULL,
+        text TEXT,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_support_messages_ticket ON support_messages(ticket_id,created_at);
+    "#,
 ];
 
 pub struct Store {
@@ -276,7 +292,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 5);
+        assert_eq!(store.schema_version(), 6);
     }
 
     #[test]
@@ -285,12 +301,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 5);
+        assert_eq!(store.schema_version(), 6);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 5);
+        assert_eq!(store.schema_version(), 6);
     }
 }

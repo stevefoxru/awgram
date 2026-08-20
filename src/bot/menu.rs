@@ -81,11 +81,31 @@ pub fn payment_admin_menu(id: i64) -> InlineKeyboardMarkup {
     ]])
 }
 
+pub fn support_tickets_menu(tickets: &[crate::store::SupportTicket]) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(tickets.iter().map(|t| {
+        vec![cb(
+            &format!("#{} · user {} · {}", t.id, t.user_id, t.status),
+            &format!("support:ticket:{}", t.id),
+        )]
+    }))
+}
+
+pub fn support_ticket_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🙋 Взять в работу", &format!("support:take:{id}"))],
+        vec![
+            cb("✉️ Ответить", &format!("support:reply:{id}")),
+            cb("✅ Закрыть", &format!("support:close:{id}")),
+        ],
+    ])
+}
+
 pub fn customer_keys_menu(names: &[String]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(names.iter().map(|name| {
         vec![
             cb(&format!("🔑 {name}"), &format!("mykey:{name}")),
             cb("📅 Продлить", &format!("renew:{name}")),
+            cb("✏️", &format!("device:label:{name}")),
         ]
     }))
 }

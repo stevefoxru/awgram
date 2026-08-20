@@ -48,7 +48,72 @@ pub struct PaymentRequest {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SupportTicket {
+    pub id: i64,
+    pub user_id: i64,
+    pub status: String,
+    pub subject: String,
+    pub assigned_to: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 impl Store {
+    pub fn set_device_label(&self, name: &str, user_id: i64, label: &str) -> bool {
+        let label = label.trim();
+        if label.is_empty()
+            || label.chars().count() > 40
+            || self.client_owner(name) != Some(user_id)
+        {
+            return false;
+        }
+        self.with_conn(|c| c.execute("UPDATE clients SET device_label=?3 WHERE name=?1 AND owner_user_id=?2 AND removed_at IS NULL", rusqlite::params![name,user_id,label]))
+            .map(|n| n==1).unwrap_or(false)
+    }
+
+    pub fn device_label(&self, name: &str) -> Option<String> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT device_label FROM clients WHERE name=?1 AND removed_at IS NULL",
+                [name],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .flatten()
+    }
+
+    pub fn support_tickets(&self, status: &str, limit: usize) -> Vec<SupportTicket> {
+        self.with_conn(|c| { let mut s=c.prepare("SELECT id,user_id,status,subject,assigned_to,created_at,updated_at FROM support_tickets WHERE status=?1 ORDER BY updated_at DESC LIMIT ?2")?; let rows=s.query_map(rusqlite::params![status,limit as i64], ticket_from_row)?; rows.collect() }).unwrap_or_default()
+    }
+
+    pub fn support_ticket(&self, id: i64) -> Option<SupportTicket> {
+        self.with_conn(|c| c.query_row("SELECT id,user_id,status,subject,assigned_to,created_at,updated_at FROM support_tickets WHERE id=?1",[id],ticket_from_row).optional()).ok().flatten()
+    }
+
+    pub fn assign_support_ticket(&self, id: i64, admin_id: i64, now: i64) -> bool {
+        self.with_conn(|c| c.execute("UPDATE support_tickets SET status='in_progress',assigned_to=?2,updated_at=?3 WHERE id=?1 AND status!='closed'",rusqlite::params![id,admin_id,now])).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn close_support_ticket(&self, id: i64, admin_id: i64, now: i64) -> bool {
+        self.with_conn(|c| c.execute("UPDATE support_tickets SET status='closed',closed_at=?3,closed_by=?2,updated_at=?3 WHERE id=?1 AND status!='closed'",rusqlite::params![id,admin_id,now])).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn add_support_message(
+        &self,
+        ticket_id: i64,
+        sender: i64,
+        is_admin: bool,
+        chat: i64,
+        message: i32,
+        text: Option<&str>,
+        now: i64,
+    ) {
+        let _=self.with_conn(|c| c.execute("INSERT INTO support_messages(ticket_id,sender_user_id,is_admin,telegram_chat_id,telegram_message_id,text,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![ticket_id,sender,if is_admin {1}else{0},chat,message,text,now]));
+    }
     pub fn set_auto_renew(
         &self,
         client_name: &str,
@@ -492,6 +557,18 @@ impl Store {
         })
         .unwrap_or_default()
     }
+}
+
+fn ticket_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SupportTicket> {
+    Ok(SupportTicket {
+        id: r.get(0)?,
+        user_id: r.get(1)?,
+        status: r.get(2)?,
+        subject: r.get(3)?,
+        assigned_to: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
+    })
 }
 
 fn payment_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentRequest> {

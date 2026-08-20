@@ -107,6 +107,11 @@ pub enum Action {
     RenewTerm(String, i64),
     RenewMethod(String, i64, String),
     AutoRenew(String, i64, bool),
+    DeviceLabelAsk(String),
+    SupportTicket(i64),
+    SupportTake(i64),
+    SupportReply(i64),
+    SupportClose(i64),
     Unknown,
 }
 
@@ -167,6 +172,24 @@ fn parse_callback(data: &str) -> Action {
                 Action::SetClientEnabled(v.to_string(), false)
             } else if let Some(v) = data.strip_prefix("mykey:") {
                 Action::CustomerKey(v.to_string())
+            } else if let Some(v) = data.strip_prefix("device:label:") {
+                Action::DeviceLabelAsk(v.to_string())
+            } else if let Some(v) = data.strip_prefix("support:take:") {
+                v.parse()
+                    .map(Action::SupportTake)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("support:reply:") {
+                v.parse()
+                    .map(Action::SupportReply)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("support:close:") {
+                v.parse()
+                    .map(Action::SupportClose)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("support:ticket:") {
+                v.parse()
+                    .map(Action::SupportTicket)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("renew:term:") {
                 let mut parts = v.rsplitn(2, ':');
                 match (parts.next().and_then(|p| p.parse().ok()), parts.next()) {
@@ -696,6 +719,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | RenewTerm(_, _)
         | RenewMethod(_, _, _)
         | AutoRenew(_, _, _)
+        | DeviceLabelAsk(_)
         | Unknown => true,
         // Экран/установка текущей группы: только GA, группа — только своя.
         GroupSelectMenu => matches!(role, Role::GroupAdmin(_)),
@@ -754,6 +778,10 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AssignOwnerAsk(_)
         | AdminExpiryAsk(_)
         | SetClientEnabled(_, _)
+        | SupportTicket(_)
+        | SupportTake(_)
+        | SupportReply(_)
+        | SupportClose(_)
         | PaymentInstructionsAsk => role.is_owner(),
     }
 }
@@ -977,6 +1005,15 @@ async fn message_handler(
         let ticket = settings
             .open_support_ticket(uid, subject, now_epoch())
             .unwrap_or(0);
+        settings.add_support_message(
+            ticket,
+            uid,
+            false,
+            msg.chat.id.0,
+            msg.id.0,
+            msg.text(),
+            now_epoch(),
+        );
         for owner in &cfg.admin_ids {
             let _ = bot.send_message(ChatId(*owner), format!("🆘 Обращение #{ticket} от пользователя {uid}\nОтветьте на пересланное сообщение командой /reply_{uid} и затем отправьте ответ.")).await;
             let _ = bot
@@ -992,9 +1029,18 @@ async fn message_handler(
         dialogue.update(State::Idle).await?;
         return Ok(());
     }
-    if let State::AwaitingSupportReply { user_id } = state.clone() {
+    if let State::AwaitingSupportReply { ticket_id, user_id } = state.clone() {
         bot.copy_message(ChatId(user_id), msg.chat.id, msg.id)
             .await?;
+        settings.add_support_message(
+            ticket_id,
+            uid,
+            true,
+            msg.chat.id.0,
+            msg.id.0,
+            msg.text(),
+            now_epoch(),
+        );
         bot.send_message(msg.chat.id, "✅ Ответ отправлен пользователю.")
             .reply_markup(menu::admin_keyboard())
             .await?;
@@ -1063,8 +1109,18 @@ async fn message_handler(
                 format!("Отправьте ответ пользователю {target}:"),
             )
             .await?;
+            let ticket_id = settings
+                .support_tickets("open", 100)
+                .into_iter()
+                .chain(settings.support_tickets("in_progress", 100))
+                .find(|t| t.user_id == target)
+                .map(|t| t.id)
+                .unwrap_or(0);
             dialogue
-                .update(State::AwaitingSupportReply { user_id: target })
+                .update(State::AwaitingSupportReply {
+                    ticket_id,
+                    user_id: target,
+                })
                 .await?;
             return Ok(());
         }
@@ -1146,7 +1202,16 @@ async fn message_handler(
                 return Ok(());
             }
             "🆘 Обращения" => {
-                bot.send_message(msg.chat.id, format!("Открытых обращений: {}. Новые обращения пересылаются администраторам автоматически.", settings.open_support_count())).reply_markup(menu::admin_keyboard()).await?;
+                let mut tickets = settings.support_tickets("open", 25);
+                tickets.extend(settings.support_tickets("in_progress", 25));
+                let mut req = bot.send_message(
+                    msg.chat.id,
+                    format!("🆘 Активных обращений: {}", tickets.len()),
+                );
+                if !tickets.is_empty() {
+                    req = req.reply_markup(menu::support_tickets_menu(&tickets));
+                }
+                req.await?;
                 return Ok(());
             }
             "⚙️ Настройки" => {
@@ -1283,6 +1348,24 @@ async fn message_handler(
                 bot.send_message(msg.chat.id, i18n::error_text(settings.lang(uid), &error))
                     .await?;
             }
+        }
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if let State::AwaitingDeviceLabel { name } = state.clone() {
+        if settings.set_device_label(&name, uid, msg.text().unwrap_or_default()) {
+            bot.send_message(
+                msg.chat.id,
+                format!("✅ Название устройства для ключа {name} сохранено."),
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Название должно содержать от 1 до 40 символов, а ключ должен принадлежать вам.",
+            )
+            .await?;
         }
         dialogue.update(State::Idle).await?;
         return Ok(());
@@ -2263,6 +2346,7 @@ async fn callback_handler(
             | Action::RenewTerm(_, _)
             | Action::RenewMethod(_, _, _)
             | Action::AutoRenew(_, _, _)
+            | Action::DeviceLabelAsk(_)
     );
     if role == Role::Denied && !customer_action {
         tracing::warn!(user_id = uid, "отклонён доступ (callback)");
@@ -2716,6 +2800,52 @@ async fn callback_handler(
                 }
             };
         }
+        Action::SupportTicket(id) => {
+            if let Some(t) = settings.support_ticket(id) {
+                bot.send_message(
+                    chat,
+                    format!(
+                        "🆘 Обращение #{}\nПользователь: {}\nСтатус: {}\nОтветственный: {}\n\n{}",
+                        t.id,
+                        t.user_id,
+                        t.status,
+                        t.assigned_to
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "не назначен".into()),
+                        t.subject
+                    ),
+                )
+                .reply_markup(menu::support_ticket_menu(id))
+                .await?;
+            }
+        }
+        Action::SupportTake(id) => {
+            settings.assign_support_ticket(id, uid, now_epoch());
+            bot.send_message(chat, format!("✅ Обращение #{id} назначено вам."))
+                .await?;
+        }
+        Action::SupportReply(id) => {
+            if let Some(t) = settings.support_ticket(id) {
+                settings.assign_support_ticket(id, uid, now_epoch());
+                bot.send_message(chat, format!("Отправьте ответ пользователю {}:", t.user_id))
+                    .await?;
+                dialogue
+                    .update(State::AwaitingSupportReply {
+                        ticket_id: id,
+                        user_id: t.user_id,
+                    })
+                    .await?;
+            }
+        }
+        Action::SupportClose(id) => {
+            if let Some(t) = settings.support_ticket(id) {
+                if settings.close_support_ticket(id, uid, now_epoch()) {
+                    let _=bot.send_message(ChatId(t.user_id),format!("✅ Обращение #{id} закрыто. Если помощь ещё нужна, создайте новое обращение.")).await;
+                    bot.send_message(chat, format!("✅ Обращение #{id} закрыто."))
+                        .await?;
+                }
+            }
+        }
         Action::PaymentInstructionsAsk => {
             bot.send_message(
                 chat,
@@ -2731,6 +2861,21 @@ async fn callback_handler(
             if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
             }
+            let label = settings
+                .device_label(&name)
+                .unwrap_or_else(|| "не указано".into());
+            let expiry =
+                crate::vpn::model::format_expiry(lang, now_epoch(), vpn.client_expiry(&name));
+            let status = if vpn.client_disabled(&name) {
+                "отключён"
+            } else {
+                "активен"
+            };
+            bot.send_message(
+                chat,
+                format!("🔑 {name}\n📱 Устройство: {label}\nСтатус: {status}\nСрок: {expiry}"),
+            )
+            .await?;
             match vpn.existing_files(&name) {
                 Ok(res) => {
                     if let Err(e) = render::send_client_files(&bot, chat, lang, &res).await {
@@ -2740,6 +2885,12 @@ async fn callback_handler(
                 Err(e) => {
                     bot.send_message(chat, i18n::error_text(lang, &e)).await?;
                 }
+            }
+        }
+        Action::DeviceLabelAsk(name) => {
+            if settings.client_owner(&name) == Some(uid) {
+                bot.send_message(chat, format!("Введите название устройства для ключа {name}, например «iPhone» или «Ноутбук»:" )).await?;
+                dialogue.update(State::AwaitingDeviceLabel { name }).await?;
             }
         }
         Action::Menu => {
@@ -4652,6 +4803,11 @@ mod tests {
                 RenewTerm(_, _) => {}
                 RenewMethod(_, _, _) => {}
                 AutoRenew(_, _, _) => {}
+                DeviceLabelAsk(_) => {}
+                SupportTicket(_) => {}
+                SupportTake(_) => {}
+                SupportReply(_) => {}
+                SupportClose(_) => {}
                 Unknown => {}
             }
         }

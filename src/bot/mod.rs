@@ -67,10 +67,14 @@ pub enum State {
     AwaitingAdminExpiry {
         name: String,
     },
+    AwaitingDeviceLabel {
+        name: String,
+    },
     AwaitingTopupAmount,
     AwaitingPaymentInstructions,
     AwaitingSupportMessage,
     AwaitingSupportReply {
+        ticket_id: i64,
         user_id: i64,
     },
     AwaitingBroadcast,
