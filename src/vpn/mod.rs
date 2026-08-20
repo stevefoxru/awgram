@@ -406,7 +406,46 @@ impl Vpn {
         let base = self.client_expiry(name).unwrap_or(now).max(now);
         let expires_at = base.saturating_add(seconds);
         self.set_client_expiry(name, Some(expires_at)).await?;
+        if self.client_disabled(name) {
+            self.enable_client(name).await?;
+        }
         Ok(expires_at)
+    }
+
+    async fn clientctl(&self, command: &str, name: &str) -> Result<()> {
+        let name =
+            validate::validate_name(name).map_err(|e| crate::error::Error::Parse(e.to_string()))?;
+        let helper = std::path::Path::new("/usr/local/libexec/awgram-clientctl");
+        let spec = RunSpec {
+            script: helper,
+            sudo_prefix: &self.sudo_prefix,
+            timeout_secs: self.timeout_secs,
+            extra_env: &[],
+        };
+        let clients_dir = self.clients_dir.to_string_lossy().into_owned();
+        let (out, code) = run(&spec, &[command, &clients_dir, &name]).await?;
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(crate::error::Error::ScriptFailed {
+                code: Some(code),
+                stderr: out,
+            })
+        }
+    }
+
+    pub async fn disable_client(&self, name: &str) -> Result<()> {
+        self.clientctl("disable", name).await
+    }
+
+    pub async fn enable_client(&self, name: &str) -> Result<()> {
+        self.clientctl("enable", name).await
+    }
+
+    pub fn client_disabled(&self, name: &str) -> bool {
+        validate::validate_name(name)
+            .ok()
+            .is_some_and(|name| self.clients_dir.join("disabled").join(name).is_file())
     }
 
     /// Свободные адреса в подсети сервера для превентивной проверки массовой

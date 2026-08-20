@@ -638,6 +638,10 @@ pub fn client_card(lang: Lang, name: &str, is_owner: bool) -> InlineKeyboardMark
             "📅 Изменить срок действия",
             &format!("owner:expiry:{name}"),
         )]);
+        rows.push(vec![
+            cb("⏸ Отключить", &format!("owner:disable:{name}")),
+            cb("▶️ Включить", &format!("owner:enable:{name}")),
+        ]);
         util_row.push(cb(&i18n::btn_modify(lang), &format!("mod:{name}")));
     }
     util_row.push(cb(&i18n::btn_history(lang), &format!("history:{name}")));

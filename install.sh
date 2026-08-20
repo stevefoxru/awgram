@@ -424,22 +424,75 @@ install_clientctl() {
 set -euo pipefail
 cmd="${1:-}"; clients_dir="${2:-}"; name="${3:-}"; value="${4:-}"
 [[ "$clients_dir" = /* ]] || { echo 'clients_dir must be absolute' >&2; exit 2; }
-[[ "$name" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]] || { echo 'invalid client name' >&2; exit 2; }
-[[ -f "$clients_dir/$name.conf" ]] || { echo 'client not found' >&2; exit 3; }
-expiry_dir="$clients_dir/expiry"; mkdir -p -m 700 "$expiry_dir"
+expiry_dir="$clients_dir/expiry"; disabled_dir="$clients_dir/disabled"
+mkdir -p -m 700 "$expiry_dir" "$disabled_dir"
+server_conf="${AWGRAM_SERVER_CONF:-/etc/amnezia/amneziawg/awg0.conf}"
+iface="${AWGRAM_INTERFACE:-awg0}"
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]]; }
+public_key() {
+  awk -v wanted="$1" '
+    /^\[Peer\]/{inpeer=1; found=0; next}
+    /^\[/{inpeer=0; found=0}
+    inpeer && $0 ~ "^#_Name[[:space:]]*=[[:space:]]*" wanted "[[:space:]]*$" {found=1}
+    inpeer && found && /^PublicKey[[:space:]]*=/ {sub(/^[^=]*=[[:space:]]*/,""); print; exit}
+  ' "$server_conf"
+}
+disable_one() {
+  local n="$1" key
+  valid_name "$n" || return 2
+  [[ -f "$clients_dir/$n.conf" ]] || return 3
+  [[ -f "$disabled_dir/$n" ]] && return 0
+  key="$(public_key "$n")"; [[ -n "$key" ]] || return 4
+  awg set "$iface" peer "$key" remove
+  printf '%s\n' "$(date +%s)" > "$disabled_dir/$n"
+}
+enable_one() {
+  local n="$1"
+  valid_name "$n" || return 2
+  rm -f -- "$disabled_dir/$n"
+  awg syncconf "$iface" <(awg-quick strip "$server_conf")
+  for f in "$disabled_dir"/*; do
+    [[ -f "$f" ]] || continue; key="$(public_key "${f##*/}")"
+    [[ -n "$key" ]] && awg set "$iface" peer "$key" remove || true
+  done
+}
 case "$cmd" in
   set-expiry)
+    valid_name "$name" && [[ -f "$clients_dir/$name.conf" ]] || exit 3
     [[ "$value" =~ ^[0-9]{9,12}$ ]] || { echo 'invalid epoch' >&2; exit 2; }
     tmp="$expiry_dir/.${name}.$$"
     printf '%s\n' "$value" > "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$expiry_dir/$name"
     ;;
-  clear-expiry) rm -f -- "$expiry_dir/$name" ;;
-  *) echo 'usage: awgram-clientctl set-expiry CLIENTS_DIR NAME EPOCH | clear-expiry CLIENTS_DIR NAME' >&2; exit 2 ;;
+  clear-expiry) valid_name "$name" || exit 2; rm -f -- "$expiry_dir/$name" ;;
+  disable) disable_one "$name" ;;
+  enable) enable_one "$name" ;;
+  is-disabled) [[ -f "$disabled_dir/$name" ]] ;;
+  enforce)
+    now="$(date +%s)"
+    for f in "$expiry_dir"/*; do
+      [[ -f "$f" ]] || continue; n="${f##*/}"; exp="$(tr -dc 0-9 < "$f")"
+      [[ -n "$exp" && "$exp" -le "$now" ]] && disable_one "$n" || true
+    done
+    for f in "$disabled_dir"/*; do
+      [[ -f "$f" ]] || continue; n="${f##*/}"; disabled="$(tr -dc 0-9 < "$f")"
+      if [[ -n "$disabled" && $((now-disabled)) -ge 604800 ]]; then
+        "${AWGRAM_MANAGE_SCRIPT:-/root/awg/manage_amneziawg.sh}" remove "$n" --json --yes >/dev/null
+        rm -f -- "$f" "$expiry_dir/$n"
+      else
+        key="$(public_key "$n")"; [[ -n "$key" ]] && awg set "$iface" peer "$key" remove || true
+      fi
+    done
+    ;;
+  *) echo 'usage: awgram-clientctl set-expiry|clear-expiry|disable|enable|is-disabled|enforce ...' >&2; exit 2 ;;
 esac
 printf '{"ok":true,"client":"%s"}\n' "$name"
 AWGRAM_CLIENTCTL
   chmod 755 "$CLIENTCTL_PATH"
   chown root:root "$CLIENTCTL_PATH"
+  cat > /etc/cron.d/awg-expiry <<EOF
+*/5 * * * * root AWGRAM_MANAGE_SCRIPT="$MANAGE_SCRIPT" "$CLIENTCTL_PATH" enforce "$CLIENTS_DIR" _ >/dev/null 2>&1
+EOF
+  chmod 644 /etc/cron.d/awg-expiry
 }
 
 install_unit() {

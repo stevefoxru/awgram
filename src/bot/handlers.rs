@@ -100,6 +100,7 @@ pub enum Action {
     PaymentReject(i64),
     AssignOwnerAsk(String),
     AdminExpiryAsk(String),
+    SetClientEnabled(String, bool),
     PaymentInstructionsAsk,
     CustomerKey(String),
     Renew(String),
@@ -160,6 +161,10 @@ fn parse_callback(data: &str) -> Action {
                 Action::AssignOwnerAsk(v.to_string())
             } else if let Some(v) = data.strip_prefix("owner:expiry:") {
                 Action::AdminExpiryAsk(v.to_string())
+            } else if let Some(v) = data.strip_prefix("owner:enable:") {
+                Action::SetClientEnabled(v.to_string(), true)
+            } else if let Some(v) = data.strip_prefix("owner:disable:") {
+                Action::SetClientEnabled(v.to_string(), false)
             } else if let Some(v) = data.strip_prefix("mykey:") {
                 Action::CustomerKey(v.to_string())
             } else if let Some(v) = data.strip_prefix("renew:term:") {
@@ -748,6 +753,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | PaymentReject(_)
         | AssignOwnerAsk(_)
         | AdminExpiryAsk(_)
+        | SetClientEnabled(_, _)
         | PaymentInstructionsAsk => role.is_owner(),
     }
 }
@@ -2683,6 +2689,33 @@ async fn callback_handler(
             bot.send_message(chat, format!("Текущий срок ключа {name}: {:?}\n\nВведите, на сколько продлить: 12h, 7d, 30d, 6m, 1y. Для бессрочного ключа — none. Новый период добавляется к оставшемуся сроку.", vpn.client_expiry(&name))).await?;
             dialogue.update(State::AwaitingAdminExpiry { name }).await?;
         }
+        Action::SetClientEnabled(name, enabled) => {
+            let result = if enabled {
+                vpn.enable_client(&name).await
+            } else {
+                vpn.disable_client(&name).await
+            };
+            match result {
+                Ok(()) => {
+                    bot.send_message(
+                        chat,
+                        format!(
+                            "✅ Ключ {name} {}.",
+                            if enabled {
+                                "включён"
+                            } else {
+                                "отключён"
+                            }
+                        ),
+                    )
+                    .await?
+                }
+                Err(error) => {
+                    bot.send_message(chat, i18n::error_text(lang, &error))
+                        .await?
+                }
+            };
+        }
         Action::PaymentInstructionsAsk => {
             bot.send_message(
                 chat,
@@ -4612,6 +4645,7 @@ mod tests {
                 PaymentReject(_) => {}
                 AssignOwnerAsk(_) => {}
                 AdminExpiryAsk(_) => {}
+                SetClientEnabled(_, _) => {}
                 PaymentInstructionsAsk => {}
                 CustomerKey(_) => {}
                 Renew(_) => {}
