@@ -1208,6 +1208,13 @@ async fn message_handler(
             )
             .reply_markup(menu::admin_keyboard())
             .await?;
+            settings.log_event(
+                now_epoch(),
+                EventKind::Broadcast,
+                None,
+                Some(uid),
+                Some(&format!("delivered={delivered} failed={failed}")),
+            );
         } else {
             bot.send_message(msg.chat.id, "Рассылка отменена.")
                 .reply_markup(menu::admin_keyboard())
@@ -1348,13 +1355,6 @@ async fn message_handler(
                 )
                 .reply_markup(menu::admin_keyboard())
                 .await?;
-                settings.log_event(
-                    now_epoch(),
-                    EventKind::Broadcast,
-                    None,
-                    Some(uid),
-                    Some(&format!("delivered={delivered} failed={failed}")),
-                );
                 return Ok(());
             }
             "📣 Рассылка" => {
