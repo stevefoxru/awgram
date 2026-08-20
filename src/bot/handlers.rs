@@ -1009,8 +1009,7 @@ async fn message_handler(
             ticket,
             uid,
             false,
-            msg.chat.id.0,
-            msg.id.0,
+            (msg.chat.id.0, msg.id.0),
             msg.text(),
             now_epoch(),
         );
@@ -1036,8 +1035,7 @@ async fn message_handler(
             ticket_id,
             uid,
             true,
-            msg.chat.id.0,
-            msg.id.0,
+            (msg.chat.id.0, msg.id.0),
             msg.text(),
             now_epoch(),
         );

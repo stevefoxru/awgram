@@ -107,11 +107,11 @@ impl Store {
         ticket_id: i64,
         sender: i64,
         is_admin: bool,
-        chat: i64,
-        message: i32,
+        telegram_message: (i64, i32),
         text: Option<&str>,
         now: i64,
     ) {
+        let (chat, message) = telegram_message;
         let _=self.with_conn(|c| c.execute("INSERT INTO support_messages(ticket_id,sender_user_id,is_admin,telegram_chat_id,telegram_message_id,text,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![ticket_id,sender,if is_admin {1}else{0},chat,message,text,now]));
     }
     pub fn set_auto_renew(
