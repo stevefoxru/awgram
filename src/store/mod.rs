@@ -14,8 +14,8 @@ mod settings;
 mod stats;
 
 pub use commerce::{
-    AdminUserProfile, AdminUserStats, FinanceSummary, PaymentRequest, PaymentStatus, PromoCode,
-    SupportTicket, UserRow,
+    AdminUserProfile, AdminUserStats, FinanceSummary, LegacyRequest, PaymentRequest, PaymentStatus,
+    PromoCode, SupportTicket, UserRow,
 };
 pub use events::{EventKind, EventRow};
 pub use groups::{
@@ -263,6 +263,36 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_users_created ON users(created_at);
     CREATE INDEX idx_subscriptions_grace ON client_subscriptions(grace_until);
     "#,
+    // v10: бесплатное восстановление legacy-ключей и отдельное ежегодное
+    // продление до конца следующего календарного года.
+    r#"
+    ALTER TABLE promo_codes ADD COLUMN kind TEXT NOT NULL DEFAULT 'discount';
+    ALTER TABLE client_subscriptions ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE legacy_entitlements(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        promo_code TEXT NOT NULL REFERENCES promo_codes(code),
+        activated_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_client TEXT,
+        used_at INTEGER,
+        UNIQUE(user_id,promo_code)
+    );
+    CREATE TABLE legacy_requests(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        requested_name TEXT NOT NULL,
+        comment TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER,
+        decided_by INTEGER,
+        client_name TEXT,
+        reject_reason TEXT
+    );
+    CREATE INDEX idx_legacy_requests_status ON legacy_requests(status,created_at);
+    CREATE INDEX idx_subscriptions_legacy ON client_subscriptions(legacy,user_id);
+    "#,
 ];
 
 pub struct Store {
@@ -350,7 +380,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 9);
+        assert_eq!(store.schema_version(), 10);
     }
 
     #[test]
@@ -359,12 +389,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 9);
+        assert_eq!(store.schema_version(), 10);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 9);
+        assert_eq!(store.schema_version(), 10);
     }
 }

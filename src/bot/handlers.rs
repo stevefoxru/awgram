@@ -17,6 +17,7 @@ use crate::vpn::Vpn;
 #[derive(Debug, PartialEq)]
 pub enum Action {
     AdminDashboard,
+    AdminCreate,
     AdminOwners,
     AdminFinance,
     AdminSupport,
@@ -25,6 +26,7 @@ pub enum Action {
     AdminHelp,
     AdminSearch,
     AdminRoles,
+    AdminRoleAction(String),
     AdminBulk(String),
     AdminBulkConfirm,
     AdminUser(i64),
@@ -36,7 +38,16 @@ pub enum Action {
     StatsSection(String),
     SupportFilter(String),
     AdminPromos,
+    AdminPromoAction(String),
     ClientNoteAsk(String),
+    LegacyRenew(String),
+    LegacyRenewMethod(String, String),
+    LegacyRestore,
+    LegacyRequestNew,
+    LegacyRequestApprove(i64),
+    LegacyRequestReject(i64),
+    PromoInput,
+    LegacyPriceAsk,
     Menu,
     List,
     Add,
@@ -143,6 +154,7 @@ pub enum Action {
 fn parse_callback(data: &str) -> Action {
     match data {
         "admin:dashboard" => Action::AdminDashboard,
+        "admin:create" => Action::AdminCreate,
         "admin:owners" => Action::AdminOwners,
         "admin:finance" => Action::AdminFinance,
         "admin:support" => Action::AdminSupport,
@@ -179,6 +191,10 @@ fn parse_callback(data: &str) -> Action {
         "set:payment" => Action::PaymentInstructionsAsk,
         "finance:export" => Action::FinanceExport,
         "admin:promos" => Action::AdminPromos,
+        "admin:legacy" => Action::LegacyRestore,
+        "legacy:request:new" => Action::LegacyRequestNew,
+        "legacy:promo" => Action::PromoInput,
+        "legacy:price" => Action::LegacyPriceAsk,
         _ => {
             if let Some(v) = data.strip_prefix("buy:term:") {
                 v.parse().map(Action::BuyTerm).unwrap_or(Action::Unknown)
@@ -249,6 +265,10 @@ fn parse_callback(data: &str) -> Action {
                 Action::ClientNoteAsk(v.to_string())
             } else if let Some(v) = data.strip_prefix("admin:bulk:") {
                 Action::AdminBulk(v.to_string())
+            } else if let Some(v) = data.strip_prefix("admin:role:") {
+                Action::AdminRoleAction(v.to_string())
+            } else if let Some(v) = data.strip_prefix("admin:promo:") {
+                Action::AdminPromoAction(v.to_string())
             } else if let Some(v) = data.strip_prefix("broadcast:audience:") {
                 Action::BroadcastAudience(v.to_string())
             } else if let Some(v) = data.strip_prefix("admin:userblock:") {
@@ -283,6 +303,24 @@ fn parse_callback(data: &str) -> Action {
                     (Some(months), Some(name)) => Action::RenewTerm(name.to_string(), months),
                     _ => Action::Unknown,
                 }
+            } else if let Some(v) = data.strip_prefix("legacy:renew:method:") {
+                let mut parts = v.rsplitn(2, ':');
+                match (parts.next(), parts.next()) {
+                    (Some(method), Some(name)) => {
+                        Action::LegacyRenewMethod(name.into(), method.into())
+                    }
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("legacy:renew:") {
+                Action::LegacyRenew(v.to_string())
+            } else if let Some(v) = data.strip_prefix("legacy:req:ok:") {
+                v.parse()
+                    .map(Action::LegacyRequestApprove)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("legacy:req:no:") {
+                v.parse()
+                    .map(Action::LegacyRequestReject)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("renew:method:") {
                 let parts: Vec<_> = v.rsplitn(3, ':').collect();
                 match (
@@ -546,6 +584,7 @@ fn is_customer_navigation(text: &str) -> bool {
                 | "📖 Инструкция"
                 | "🆘 Поддержка"
                 | "🎟 Промокод"
+                | "♻️ Восстановить ключи"
         )
 }
 
@@ -737,6 +776,30 @@ async fn finance_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
     let month = settings.finance_summary(now - 30 * 86_400);
     let pending = settings.pending_payments();
     bot.send_message(chat,format!("💳 Финансы\n\nСегодня: {} продаж · {:.2} ₽\n30 дней: {} продаж · {:.2} ₽\nПополнения: {:.2} ₽\nВозвраты: {:.2} ₽\nОжидают решения: {}",day.approved_sales,day.revenue_kopecks as f64/100.0,month.approved_sales,month.revenue_kopecks as f64/100.0,month.topups_kopecks as f64/100.0,month.refunds_kopecks as f64/100.0,month.pending)).reply_markup(menu::finance_dashboard_menu(&pending)).await?;
+    Ok(())
+}
+
+async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let requests = settings.legacy_requests("pending", 100);
+    let price = settings.legacy_renewal_price_kopecks();
+    let details = requests
+        .iter()
+        .map(|r| {
+            let user = settings.user(r.user_id);
+            let username = user
+                .and_then(|u| u.username.map(|v| format!("@{v}")))
+                .unwrap_or_else(|| "без username".into());
+            format!(
+                "#{} · {} · ID {} · имя: {} · {}",
+                r.id,
+                username,
+                r.user_id,
+                r.requested_name,
+                r.comment.as_deref().unwrap_or("без комментария")
+            )
+        })
+        .collect::<Vec<_>>();
+    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nЦена ежегодного продления: {:.2} ₽\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
     Ok(())
 }
 
@@ -962,6 +1025,10 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | Renew(_)
         | RenewTerm(_, _)
         | RenewMethod(_, _, _)
+        | LegacyRenew(_)
+        | LegacyRenewMethod(_, _)
+        | LegacyRequestNew
+        | PromoInput
         | AutoRenew(_, _, _)
         | DeviceLabelAsk(_)
         | SupportRate(_, _)
@@ -1031,6 +1098,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | SupportPriority(_, _)
         | FinanceExport
         | AdminDashboard
+        | AdminCreate
         | AdminOwners
         | AdminFinance
         | AdminSupport
@@ -1039,6 +1107,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminHelp
         | AdminSearch
         | AdminRoles
+        | AdminRoleAction(_)
         | AdminBulk(_)
         | AdminBulkConfirm
         | AdminUser(_)
@@ -1050,6 +1119,11 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | StatsSection(_)
         | SupportFilter(_)
         | AdminPromos
+        | AdminPromoAction(_)
+        | LegacyRestore
+        | LegacyRequestApprove(_)
+        | LegacyRequestReject(_)
+        | LegacyPriceAsk
         | ClientNoteAsk(_)
         | PaymentInstructionsAsk => role.is_owner(),
     }
@@ -1814,7 +1888,7 @@ async fn message_handler(
         dialogue.update(State::Idle).await?;
         return Ok(());
     }
-    if matches!(&state, State::AwaitingStaffRole) {
+    if let State::AwaitingStaffRole { operation } = state.clone() {
         if !role.is_owner() {
             dialogue.update(State::Idle).await?;
             return Ok(());
@@ -1825,13 +1899,16 @@ async fn message_handler(
             .split_whitespace()
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let selected = match (
-            parts.first().and_then(|v| v.parse::<i64>().ok()),
-            parts.get(1).map(String::as_str),
-        ) {
-            (Some(user_id), Some(value)) => Some((user_id, value)),
-            _ => None,
-        };
+        let selected = parts
+            .first()
+            .and_then(|v| v.parse::<i64>().ok())
+            .and_then(|user_id| {
+                if operation == "remove" {
+                    Some((user_id, "remove"))
+                } else {
+                    parts.get(1).map(|v| (user_id, v.as_str()))
+                }
+            });
         let result = selected.is_some_and(|(user_id, value)| {
             let changed = settings.set_staff_role(
                 user_id,
@@ -1855,7 +1932,7 @@ async fn message_handler(
             if result {
                 "✅ Роль обновлена."
             } else {
-                "Не удалось изменить роль. Формат: TELEGRAM_ID technical|support|finance|remove"
+                "Не удалось изменить роль. Для добавления: TELEGRAM_ID technical|support|finance; для удаления достаточно Telegram ID."
             },
         )
         .reply_markup(menu::admin_dashboard_menu())
@@ -2023,6 +2100,12 @@ async fn message_handler(
         let navigation = is_customer_navigation(text);
         dialogue.update(State::Idle).await?;
         if !navigation {
+            if settings.activate_legacy_promo(uid, text, now_epoch())
+                || settings.has_pending_legacy_entitlement(uid, text, now_epoch())
+            {
+                bot.send_message(msg.chat.id,"✅ Право на восстановление подтверждено. Откройте раздел «♻️ Восстановить ключи» внизу. Там можно отправлять заявки на необходимое количество ранее купленных у администратора ключей.").reply_markup(menu::customer_keyboard()).await?;
+                return Ok(());
+            }
             match settings.activate_promo(uid, text, now_epoch()) {
                 Some(discount) => {
                     bot.send_message(msg.chat.id,format!("✅ Промокод активирован. Скидка {discount}% применится к следующей покупке или продлению.")).reply_markup(menu::customer_keyboard()).await?;
@@ -2039,7 +2122,34 @@ async fn message_handler(
             return Ok(());
         }
     }
-    if matches!(&state, State::AwaitingPromoCode) {
+    if matches!(&state, State::AwaitingLegacyRequest) {
+        let text = msg.text().unwrap_or_default().trim();
+        if is_customer_navigation(text) {
+            dialogue.update(State::Idle).await?;
+        } else {
+            let now = now_epoch();
+            let mut parts = text.splitn(2, char::is_whitespace);
+            let requested = parts.next().unwrap_or_default();
+            let comment = parts.next().map(str::trim).filter(|v| !v.is_empty());
+            if let Some(id) = settings.create_legacy_request(uid, requested, comment, now) {
+                let user = settings.user(uid);
+                let username = user
+                    .as_ref()
+                    .and_then(|u| u.username.as_deref())
+                    .map(|v| format!("@{v}"))
+                    .unwrap_or_else(|| "без username".into());
+                for owner in &cfg.admin_ids {
+                    let _=bot.send_message(ChatId(*owner),format!("♻️ Новая заявка на восстановление #{id}\nПользователь: {username}\nTelegram ID: {uid}\nЖелаемое имя: {requested}\nКомментарий: {}",comment.unwrap_or("—"))).reply_markup(menu::legacy_request_admin_menu(id)).await;
+                }
+                bot.send_message(msg.chat.id,format!("✅ Заявка #{id} отправлена на ручную проверку. После подтверждения новый ключ появится в этом чате. Вы можете отправить ещё одну заявку через раздел восстановления.")).reply_markup(menu::customer_keyboard()).await?;
+                dialogue.update(State::Idle).await?;
+            } else {
+                bot.send_message(msg.chat.id,"Не удалось создать заявку. Проверьте название, активируйте технический промокод или убедитесь, что срок подачи ещё не завершён.").reply_markup(menu::customer_keyboard()).await?;
+            }
+            return Ok(());
+        }
+    }
+    if let State::AwaitingPromoCode { kind } = state.clone() {
         if !role.is_owner() {
             dialogue.update(State::Idle).await?;
             return Ok(());
@@ -2049,22 +2159,100 @@ async fn message_handler(
             .unwrap_or_default()
             .split_whitespace()
             .collect::<Vec<_>>();
-        let code = p.first().copied().unwrap_or_default();
-        let percent = p.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-        let max_uses = p.get(2).and_then(|v| v.parse().ok());
-        let changed = settings.create_promo(code, percent, max_uses, None, uid, now_epoch());
+        let changed = if kind == "legacy" {
+            settings.create_legacy_promo(
+                p.first().copied().unwrap_or_default(),
+                p.get(1).and_then(|v| v.parse().ok()),
+                uid,
+                now_epoch(),
+            )
+        } else {
+            settings.create_promo(
+                p.first().copied().unwrap_or_default(),
+                p.get(1).and_then(|v| v.parse().ok()).unwrap_or(0),
+                p.get(2).and_then(|v| v.parse().ok()),
+                None,
+                uid,
+                now_epoch(),
+            )
+        };
         bot.send_message(
             msg.chat.id,
             if changed {
                 "✅ Промокод создан."
             } else {
-                "Формат: CODE PERCENT [MAX_USES]. Процент 1–100."
+                "Неверный формат. Скидочный: CODE PERCENT [MAX_USES]. Legacy: CODE [MAX_USES]."
             },
         )
         .reply_markup(menu::admin_dashboard_menu())
         .await?;
         if changed {
             dialogue.update(State::Idle).await?;
+        }
+        return Ok(());
+    }
+    if let State::AwaitingLegacyReject { id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let reason = msg.text().unwrap_or_default().trim();
+        let request = settings.legacy_request(id);
+        if !reason.is_empty()
+            && reason.chars().count() <= 500
+            && settings.decide_legacy_request(id, uid, None, Some(reason), now_epoch())
+        {
+            if let Some(request) = request {
+                let _ = bot
+                    .send_message(
+                        ChatId(request.user_id),
+                        format!("❌ Заявка на восстановление #{id} отклонена.\nПричина: {reason}"),
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await;
+            }
+            bot.send_message(msg.chat.id, "✅ Заявка отклонена.")
+                .reply_markup(menu::admin_dashboard_menu())
+                .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Введите причину отказа длиной до 500 символов.",
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingLegacyPrice) {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let value = msg
+            .text()
+            .unwrap_or_default()
+            .trim()
+            .replace(',', ".")
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 100.0).round() as i64)
+            .filter(|v| *v >= 0);
+        if let Some(value) = value {
+            settings.set_legacy_renewal_price_kopecks(value);
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "✅ Цена технического продления: {:.2} ₽",
+                    value as f64 / 100.0
+                ),
+            )
+            .reply_markup(menu::admin_dashboard_menu())
+            .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(msg.chat.id, "Введите цену в рублях, например 1000.")
+                .await?;
         }
         return Ok(());
     }
@@ -2134,6 +2322,11 @@ async fn message_handler(
             "🎟 Промокод" => {
                 bot.send_message(msg.chat.id, "Введите промокод:").await?;
                 dialogue.update(State::AwaitingCustomerPromo).await?;
+            }
+            "♻️ Восстановить ключи" if crate::calendar::legacy_requests_open(now_epoch()) =>
+            {
+                let eligible = settings.legacy_user_eligible(uid, now_epoch());
+                bot.send_message(msg.chat.id,"♻️ Восстановление ранее приобретённых ключей\n\nЕсли вы покупали ключи лично у администратора, здесь можно запросить создание такого же количества новых ключей. Восстановление бесплатно, но каждая заявка проверяется вручную. Администратор видит ваш @username и Telegram ID.\n\nЗаявки принимаются до 30.11.2026 включительно. Новый ключ действует до конца 2026 года; дальнейшее ежегодное продление оплачивается по отдельному техническому тарифу.").reply_markup(menu::legacy_restore_menu(eligible)).await?;
             }
             _ => {
                 bot.send_message(msg.chat.id, "Используйте кнопки меню ниже.")
@@ -3053,6 +3246,10 @@ async fn callback_handler(
             | Action::Renew(_)
             | Action::RenewTerm(_, _)
             | Action::RenewMethod(_, _, _)
+            | Action::LegacyRenew(_)
+            | Action::LegacyRenewMethod(_, _)
+            | Action::LegacyRequestNew
+            | Action::PromoInput
             | Action::AutoRenew(_, _, _)
             | Action::DeviceLabelAsk(_)
             | Action::SupportNewCategory(_)
@@ -3086,6 +3283,9 @@ async fn callback_handler(
         Action::AdminDashboard => {
             admin_dashboard(&bot, chat, &vpn, &settings).await?;
         }
+        Action::AdminCreate => {
+            bot.send_message(chat,"➕ Создание ключей\n\nВыберите одиночное создание или пакет. После создания ключ можно привязать к пользователю и группе из его карточки.").reply_markup(menu::admin_create_menu()).await?;
+        }
         Action::AdminOwners => {
             owners_screen(&bot, chat, &settings).await?;
         }
@@ -3117,12 +3317,107 @@ async fn callback_handler(
             bot.send_message(chat,"ℹ️ Навигация\n\n➕ Создать ключ — один новый клиент\n📦 Создать оптом — пакет последовательных ключей\n📊 Статистика — трафик, активность, лидеры и подразделы\n🔎 Поиск — ключи и владельцы\n🧰 Массовое управление — включение, отключение и продление по префиксу\n🧑‍💼 Роли — назначение сотрудников\n\nВсе основные действия выполняются кнопками; текстовые команды оставлены только для совместимости.").reply_markup(menu::admin_dashboard_menu()).await?;
         }
         Action::AdminPromos => {
-            bot.send_message(
-                chat,
-                "🎟 Создание промокода\nВведите: CODE PERCENT [MAX_USES]\nНапример: FRIEND25 25 100",
-            )
-            .await?;
-            dialogue.update(State::AwaitingPromoCode).await?;
+            bot.send_message(chat,"🎟 Управление промокодами\n\nСкидочный код уменьшает цену одной следующей покупки. Legacy-код подтверждает право пользователя подавать неограниченное количество заявок на ранее купленные лично у администратора ключи до 01.12.2026.").reply_markup(menu::admin_promos_menu()).await?;
+        }
+        Action::LegacyRestore => {
+            legacy_admin_screen(&bot, chat, &settings).await?;
+        }
+        Action::LegacyPriceAsk => {
+            bot.send_message(chat,format!("Текущая цена ежегодного legacy-продления: {:.2} ₽\nВведите новую цену в рублях:",settings.legacy_renewal_price_kopecks() as f64/100.0)).await?;
+            dialogue.update(State::AwaitingLegacyPrice).await?;
+        }
+        Action::PromoInput => {
+            bot.send_message(chat, "Введите технический промокод:")
+                .await?;
+            dialogue.update(State::AwaitingCustomerPromo).await?;
+        }
+        Action::LegacyRequestNew => {
+            if crate::calendar::legacy_requests_open(now_epoch())
+                && settings.legacy_user_eligible(uid, now_epoch())
+            {
+                bot.send_message(chat,"Введите желаемое имя нового ключа. После пробела можно добавить комментарий.\nПример: phone Второй ранее купленный ключ").await?;
+                dialogue.update(State::AwaitingLegacyRequest).await?;
+            } else {
+                bot.send_message(
+                    chat,
+                    "Сначала активируйте Legacy-промокод. Приём заявок закрывается 01.12.2026.",
+                )
+                .reply_markup(menu::legacy_restore_menu(false))
+                .await?;
+            }
+        }
+        Action::LegacyRequestApprove(id) => {
+            let Some(request) = settings
+                .legacy_request(id)
+                .filter(|r| r.status == "pending")
+            else {
+                return Ok(());
+            };
+            let fallback = format!("legacy_{}", request.user_id);
+            let base = crate::vpn::validate::normalize_name(&request.requested_name, None)
+                .unwrap_or(fallback);
+            let existing = vpn
+                .list()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| c.name)
+                .collect::<std::collections::HashSet<_>>();
+            let name = crate::vpn::validate::gen_available_names(&base, 1, &existing)
+                .map_err(|e| crate::error::Error::Parse(e.to_string()))?
+                .remove(0);
+            match vpn.add(&name, None, settings.psk_default()).await {
+                Ok(result) => {
+                    vpn.set_client_expiry(&name, Some(crate::calendar::LEGACY_RESTORE_DEADLINE))
+                        .await?;
+                    settings.assign_client_group(&name, None, now_epoch());
+                    settings.assign_client_owner(&name, Some(request.user_id));
+                    settings.mark_legacy_subscription(&name, request.user_id, now_epoch());
+                    if settings.decide_legacy_request(id, uid, Some(&name), None, now_epoch()) {
+                        let user = settings.user(request.user_id);
+                        let username = user
+                            .and_then(|u| u.username.map(|v| format!("@{v}")))
+                            .unwrap_or_else(|| "без username".into());
+                        bot.send_message(ChatId(request.user_id),format!("✅ Заявка #{id} одобрена. Новый технический ключ «{name}» создан бесплатно до 31.12.2026.")).await?;
+                        render::send_client_files(
+                            &bot,
+                            ChatId(request.user_id),
+                            settings.lang(request.user_id),
+                            &result,
+                        )
+                        .await?;
+                        bot.send_message(
+                            chat,
+                            format!(
+                                "✅ Создан ключ «{name}» для {username}, Telegram ID {}.",
+                                request.user_id
+                            ),
+                        )
+                        .reply_markup(menu::admin_dashboard_menu())
+                        .await?;
+                    }
+                }
+                Err(error) => {
+                    bot.send_message(chat, i18n::error_text(lang, &error))
+                        .await?;
+                }
+            }
+        }
+        Action::LegacyRequestReject(id) => {
+            bot.send_message(chat, format!("Введите причину отказа по заявке #{id}:"))
+                .await?;
+            dialogue.update(State::AwaitingLegacyReject { id }).await?;
+        }
+        Action::AdminPromoAction(kind) => {
+            if matches!(kind.as_str(), "discount" | "legacy") {
+                let prompt = if kind == "legacy" {
+                    "Введите CODE [MAX_USES].\nПример: RESTORE2026 50"
+                } else {
+                    "Введите CODE PERCENT [MAX_USES].\nПример: FRIEND25 25 100"
+                };
+                bot.send_message(chat, prompt).await?;
+                dialogue.update(State::AwaitingPromoCode { kind }).await?;
+            }
         }
         Action::AdminSearch => {
             bot.send_message(
@@ -3133,8 +3428,22 @@ async fn callback_handler(
             dialogue.update(State::AwaitingAdminSearch).await?;
         }
         Action::AdminRoles => {
-            bot.send_message(chat,"Введите Telegram ID и роль через пробел.\nНапример: 123456789 support\n\nРоли: technical, support, finance. Для отзыва: 123456789 remove").await?;
-            dialogue.update(State::AwaitingStaffRole).await?;
+            bot.send_message(chat, "🧑‍💼 Управление ролями\nВыберите действие:")
+                .reply_markup(menu::admin_roles_menu())
+                .await?;
+        }
+        Action::AdminRoleAction(operation) => {
+            if matches!(operation.as_str(), "add" | "remove") {
+                let prompt = if operation == "add" {
+                    "Введите Telegram ID и роль: technical, support или finance.\nПример: 123456789 support"
+                } else {
+                    "Введите Telegram ID сотрудника, у которого нужно убрать роль."
+                };
+                bot.send_message(chat, prompt).await?;
+                dialogue
+                    .update(State::AwaitingStaffRole { operation })
+                    .await?;
+            }
         }
         Action::AdminBulk(operation) => {
             if operation == "menu" {
@@ -3461,6 +3770,15 @@ async fn callback_handler(
         Action::Renew(name) => {
             if settings.client_owner(&name) == Some(uid) && vpn.exists(&name).await.unwrap_or(false)
             {
+                if settings.is_legacy_client(&name, uid) {
+                    let price = settings.legacy_renewal_price_kopecks();
+                    let target = crate::calendar::legacy_renewal_target(
+                        now_epoch(),
+                        vpn.client_expiry(&name),
+                    );
+                    bot.send_message(chat,format!("🔧 Технический тариф\n\nКлюч: {name}\nПродление: {:.2} ₽\nНовый срок: 31.12.{}",price as f64 / 100.0,crate::calendar::year_at(target))).reply_markup(menu::legacy_renew_menu(&name, price)).await?;
+                    return Ok(());
+                }
                 bot.send_message(chat, format!("Выберите срок продления ключа {name}:"))
                     .reply_markup(menu::renew_terms_menu(&name))
                     .await?;
@@ -3479,6 +3797,78 @@ async fn callback_handler(
                     .await?;
             } else {
                 bot.send_message(chat, "Ключ уже удалён после истечения. Обратитесь в поддержку для восстановления или приобретите новый ключ.").await?;
+            }
+        }
+        Action::LegacyRenew(name) => {
+            if settings.client_owner(&name) == Some(uid)
+                && settings.is_legacy_client(&name, uid)
+                && vpn.exists(&name).await.unwrap_or(false)
+            {
+                let target =
+                    crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
+                let price = settings.legacy_renewal_price_kopecks();
+                bot.send_message(chat,format!("Продление ключа «{name}» до 31.12.{} стоит {:.2} ₽. Выберите способ оплаты:",crate::calendar::year_at(target),price as f64 / 100.0)).reply_markup(menu::legacy_renew_method_menu(&name)).await?;
+            }
+        }
+        Action::LegacyRenewMethod(name, method) => {
+            if settings.client_owner(&name) != Some(uid)
+                || !settings.is_legacy_client(&name, uid)
+                || !vpn.exists(&name).await.unwrap_or(false)
+            {
+                return Ok(());
+            }
+            let amount = settings.legacy_renewal_price_kopecks();
+            let target =
+                crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
+            if method == "balance" {
+                let reference = format!("legacy-renew:{uid}:{name}:{target}");
+                if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
+                    bot.send_message(chat, "Недостаточно средств на внутреннем балансе.")
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    return Ok(());
+                }
+                match vpn.set_client_expiry(&name, Some(target)).await {
+                    Ok(()) => {
+                        if vpn.client_disabled(&name) {
+                            vpn.enable_client(&name).await?;
+                        }
+                        bot.send_message(
+                            chat,
+                            format!(
+                                "✅ Ключ «{name}» продлён до 31.12.{}.",
+                                crate::calendar::year_at(target)
+                            ),
+                        )
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    }
+                    Err(error) => {
+                        settings.add_ledger_entry(
+                            uid,
+                            amount,
+                            "refund",
+                            &format!("refund:{reference}"),
+                            Some("legacy renewal failed"),
+                            now_epoch(),
+                        );
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
+                }
+            } else if method == "manual" {
+                if let Some(id) =
+                    settings.create_legacy_renewal_request(uid, &name, amount, now_epoch())
+                {
+                    bot.send_message(chat,format!("Заявка #{id} на техническое продление ключа «{name}» до 31.12.{}\nСумма: {:.2} ₽\n\n{}",crate::calendar::year_at(target),amount as f64 / 100.0,settings.payment_instructions())).reply_markup(menu::payment_paid_menu(id)).await?;
+                } else {
+                    bot.send_message(
+                        chat,
+                        "По этому ключу уже есть заявка, ожидающая решения администратора.",
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                }
             }
         }
         Action::RenewTerm(name, months) => {
@@ -3608,6 +3998,44 @@ async fn callback_handler(
                         "Владелец ключа изменился — заявка не может быть одобрена.",
                     )
                     .await?;
+                    return Ok(());
+                }
+                if req.method == "legacy_manual" {
+                    if !settings.is_legacy_client(&name, req.user_id) {
+                        bot.send_message(chat, "Ключ больше не относится к техническому тарифу.")
+                            .await?;
+                        return Ok(());
+                    }
+                    let target = crate::calendar::legacy_renewal_target(
+                        now_epoch(),
+                        vpn.client_expiry(&name),
+                    );
+                    match vpn.set_client_expiry(&name, Some(target)).await {
+                        Ok(()) => {
+                            if vpn.client_disabled(&name) {
+                                vpn.enable_client(&name).await?;
+                            }
+                            if settings.decide_payment(
+                                id,
+                                crate::store::PaymentStatus::Approved,
+                                uid,
+                                Some(&name),
+                                now_epoch(),
+                            ) {
+                                let year = crate::calendar::year_at(target);
+                                bot.send_message(ChatId(req.user_id),format!("✅ Оплата подтверждена. Технический ключ «{name}» продлён до 31.12.{year}.")).reply_markup(menu::customer_keyboard()).await?;
+                                bot.send_message(
+                                    chat,
+                                    format!("✅ Техническое продление по заявке #{id} выполнено."),
+                                )
+                                .await?;
+                            }
+                        }
+                        Err(error) => {
+                            bot.send_message(chat, i18n::error_text(lang, &error))
+                                .await?;
+                        }
+                    }
                     return Ok(());
                 }
                 let seconds = tariff(req.months)
@@ -5645,6 +6073,9 @@ mod tests {
         let keyboards = vec![
             menu::main_menu(Lang::Ru),
             menu::admin_dashboard_menu(),
+            menu::admin_create_menu(),
+            menu::admin_roles_menu(),
+            menu::admin_promos_menu(),
             menu::bulk_manage_menu(),
             menu::statistics_menu(),
             menu::admin_user_menu(42, false),
@@ -5653,6 +6084,12 @@ mod tests {
             menu::support_category_menu(),
             menu::support_ticket_menu(1),
             menu::support_rating_menu(1),
+            menu::legacy_renew_menu("old_alice", 100_000),
+            menu::legacy_renew_method_menu("old_alice"),
+            menu::legacy_restore_menu(false),
+            menu::legacy_restore_menu(true),
+            menu::legacy_request_admin_menu(1),
+            menu::legacy_admin_menu(&[]),
             menu::expiry_menu(Lang::Ru),
             menu::client_card(Lang::Ru, "alice", true),
             menu::confirm_delete(Lang::Ru, "bob"),
@@ -5712,6 +6149,38 @@ mod tests {
     fn coverage_samples() -> Vec<Action> {
         use Action::*;
         let samples = vec![
+            AdminDashboard,
+            AdminCreate,
+            AdminOwners,
+            AdminFinance,
+            AdminSupport,
+            AdminBroadcast,
+            BroadcastAudience("all".into()),
+            AdminHelp,
+            AdminSearch,
+            AdminRoles,
+            AdminRoleAction("add".into()),
+            AdminBulk("menu".into()),
+            AdminBulkConfirm,
+            AdminUser(1),
+            AdminUserKeys(1),
+            AdminUserPayments(1),
+            AdminUserBalance(1),
+            AdminUserNote(1),
+            AdminUserBlock(1, true),
+            StatsSection("vpn".into()),
+            SupportFilter("open".into()),
+            AdminPromos,
+            AdminPromoAction("discount".into()),
+            ClientNoteAsk("key".into()),
+            LegacyRenew("key".into()),
+            LegacyRenewMethod("key".into(), "manual".into()),
+            LegacyRestore,
+            LegacyRequestNew,
+            LegacyRequestApprove(1),
+            LegacyRequestReject(1),
+            PromoInput,
+            LegacyPriceAsk,
             Menu,
             List,
             Add,
@@ -5789,6 +6258,38 @@ mod tests {
         // значит, и напоминание дописать для него строку в authorize_table).
         for sample in &samples {
             match sample {
+                AdminDashboard => {}
+                AdminCreate => {}
+                AdminOwners => {}
+                AdminFinance => {}
+                AdminSupport => {}
+                AdminBroadcast => {}
+                BroadcastAudience(_) => {}
+                AdminHelp => {}
+                AdminSearch => {}
+                AdminRoles => {}
+                AdminRoleAction(_) => {}
+                AdminBulk(_) => {}
+                AdminBulkConfirm => {}
+                AdminUser(_) => {}
+                AdminUserKeys(_) => {}
+                AdminUserPayments(_) => {}
+                AdminUserBalance(_) => {}
+                AdminUserNote(_) => {}
+                AdminUserBlock(_, _) => {}
+                StatsSection(_) => {}
+                SupportFilter(_) => {}
+                AdminPromos => {}
+                AdminPromoAction(_) => {}
+                ClientNoteAsk(_) => {}
+                LegacyRenew(_) => {}
+                LegacyRenewMethod(_, _) => {}
+                LegacyRestore => {}
+                LegacyRequestNew => {}
+                LegacyRequestApprove(_) => {}
+                LegacyRequestReject(_) => {}
+                PromoInput => {}
+                LegacyPriceAsk => {}
                 Menu => {}
                 List => {}
                 Add => {}
@@ -5884,27 +6385,6 @@ mod tests {
                 SupportPriority(_, _) => {}
                 SupportRate(_, _) => {}
                 FinanceExport => {}
-                AdminDashboard => {}
-                AdminOwners => {}
-                AdminFinance => {}
-                AdminSupport => {}
-                AdminBroadcast => {}
-                BroadcastAudience(_) => {}
-                AdminHelp => {}
-                AdminSearch => {}
-                AdminRoles => {}
-                AdminBulk(_) => {}
-                AdminBulkConfirm => {}
-                AdminUser(_) => {}
-                AdminUserKeys(_) => {}
-                AdminUserPayments(_) => {}
-                AdminUserBalance(_) => {}
-                AdminUserNote(_) => {}
-                AdminUserBlock(_, _) => {}
-                StatsSection(_) => {}
-                SupportFilter(_) => {}
-                AdminPromos => {}
-                ClientNoteAsk(_) => {}
                 Unknown => {}
             }
         }
@@ -6028,6 +6508,76 @@ mod tests {
             ),
             (Action::GroupScopeAsk, true, false),
             (Action::GroupScopeSet(ListScope::All), true, false),
+            // Пользовательские коммерческие действия доступны и владельцу,
+            // и групповому администратору в общей таблице авторизации.
+            (Action::Buy, true, true),
+            (Action::BuyTerm(1), true, true),
+            (Action::BuyMethod(1, "manual".into()), true, true),
+            (Action::BuyPaid(1), true, true),
+            (Action::MyKeys, true, true),
+            (Action::Profile, true, true),
+            (Action::Balance, true, true),
+            (Action::CustomerKey("mine".into()), true, true),
+            (Action::Renew("mine".into()), true, true),
+            (Action::RenewTerm("mine".into(), 1), true, true),
+            (
+                Action::RenewMethod("mine".into(), 1, "manual".into()),
+                true,
+                true,
+            ),
+            (Action::LegacyRenew("mine".into()), true, true),
+            (
+                Action::LegacyRenewMethod("mine".into(), "manual".into()),
+                true,
+                true,
+            ),
+            (Action::LegacyRequestNew, true, true),
+            (Action::PromoInput, true, true),
+            (Action::AutoRenew("mine".into(), 1, true), true, true),
+            (Action::DeviceLabelAsk("mine".into()), true, true),
+            (Action::SupportRate(1, 5), true, true),
+            // Остальные административные и операторские действия — owner-only.
+            (Action::PaymentApprove(1), true, false),
+            (Action::PaymentReject(1), true, false),
+            (Action::AssignOwnerAsk("mine".into()), true, false),
+            (Action::AdminExpiryAsk("mine".into()), true, false),
+            (Action::SetClientEnabled("mine".into(), true), true, false),
+            (Action::PaymentInstructionsAsk, true, false),
+            (Action::SupportTicket(1), true, false),
+            (Action::SupportNewCategory("general".into()), true, false),
+            (Action::SupportTake(1), true, false),
+            (Action::SupportReply(1), true, false),
+            (Action::SupportClose(1), true, false),
+            (Action::SupportPriority(1, "high".into()), true, false),
+            (Action::FinanceExport, true, false),
+            (Action::AdminDashboard, true, false),
+            (Action::AdminCreate, true, false),
+            (Action::AdminOwners, true, false),
+            (Action::AdminFinance, true, false),
+            (Action::AdminSupport, true, false),
+            (Action::AdminBroadcast, true, false),
+            (Action::BroadcastAudience("all".into()), true, false),
+            (Action::AdminHelp, true, false),
+            (Action::AdminSearch, true, false),
+            (Action::AdminRoles, true, false),
+            (Action::AdminRoleAction("add".into()), true, false),
+            (Action::AdminBulk("menu".into()), true, false),
+            (Action::AdminBulkConfirm, true, false),
+            (Action::AdminUser(1), true, false),
+            (Action::AdminUserKeys(1), true, false),
+            (Action::AdminUserPayments(1), true, false),
+            (Action::AdminUserBalance(1), true, false),
+            (Action::AdminUserNote(1), true, false),
+            (Action::AdminUserBlock(1, true), true, false),
+            (Action::StatsSection("vpn".into()), true, false),
+            (Action::SupportFilter("open".into()), true, false),
+            (Action::AdminPromos, true, false),
+            (Action::AdminPromoAction("legacy".into()), true, false),
+            (Action::ClientNoteAsk("mine".into()), true, false),
+            (Action::LegacyRestore, true, false),
+            (Action::LegacyRequestApprove(1), true, false),
+            (Action::LegacyRequestReject(1), true, false),
+            (Action::LegacyPriceAsk, true, false),
         ];
 
         // Ассерт полноты: на каждый вариант Action (образцы из

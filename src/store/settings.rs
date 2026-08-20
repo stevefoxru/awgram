@@ -121,6 +121,14 @@ impl Store {
     pub fn set_referral_percent(&self, value: u8) {
         self.set_json("referral_percent", &value.min(100));
     }
+    pub fn legacy_renewal_price_kopecks(&self) -> i64 {
+        self.get_json::<i64>("legacy_renewal_price_kopecks")
+            .unwrap_or(100_000)
+            .max(0)
+    }
+    pub fn set_legacy_renewal_price_kopecks(&self, value: i64) {
+        self.set_json("legacy_renewal_price_kopecks", &value.max(0));
+    }
     /// Фильтр списка клиентов — персональный (групповой админ не меняет вид
     /// владельцу). Фолбэк на старый глобальный ключ: туда писали версии до
     /// per-user фильтра и миграция из legacy state.json.

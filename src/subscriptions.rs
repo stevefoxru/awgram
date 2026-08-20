@@ -79,6 +79,28 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
             }
         }
     }
+    let year = crate::calendar::year_at(now);
+    if now >= crate::calendar::start_of_december(year) && now <= crate::calendar::end_of_year(year)
+    {
+        for (name, user_id) in store.legacy_clients() {
+            let Some(expires_at) = vpn.client_expiry(&name) else {
+                continue;
+            };
+            if expires_at > crate::calendar::end_of_year(year)
+                || !store.mark_expiry_notification(&name, user_id, expires_at, 31, now)
+            {
+                continue;
+            }
+            let target_year = year + 1;
+            let price = store.legacy_renewal_price_kopecks();
+            let sent=bot.send_message(ChatId(user_id),format!("🔧 Напоминание о техническом тарифе\n\nКлюч «{name}» действует до конца этого года. Продление за {:.2} ₽ сохранит доступ до 31.12.{target_year}.", price as f64 / 100.0))
+                .reply_markup(crate::bot::menu::legacy_renew_menu(&name, price)).await;
+            if let Err(error) = sent {
+                store.unmark_expiry_notification(&name, expires_at, 31);
+                tracing::warn!(%error,user_id,client=%name,"не удалось отправить legacy-напоминание");
+            }
+        }
+    }
     for user_id in store.all_user_ids() {
         for name in store.user_client_names(user_id) {
             let Some(expires_at) = vpn.client_expiry(&name) else {

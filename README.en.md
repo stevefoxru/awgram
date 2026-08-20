@@ -86,6 +86,11 @@ tangible on budget VPS hosts.
   config, restored after renewal, and deleted after seven days.
 - 📱 Device labels and key cards with status and expiry information.
 - 🎟 One-use discount promo codes with usage limits.
+- ♻️ A recovery area for keys previously purchased directly from the admin:
+  a `LEGACY` promo confirms eligibility, then each free replacement-key request
+  is reviewed manually. New requests close automatically on December 1, 2026.
+- 🔧 A separately editable annual renewal price for legacy keys through the end
+  of the following calendar year, with a December reminder.
 - 🆘 Categorized support tickets with priority, assignment, replies, and ratings.
 
 ### Administration & operations

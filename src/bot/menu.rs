@@ -9,7 +9,7 @@ fn cb(text: &str, data: &str) -> InlineKeyboardButton {
 }
 
 pub fn customer_keyboard() -> KeyboardMarkup {
-    KeyboardMarkup::new(vec![
+    let mut rows = vec![
         vec![
             KeyboardButton::new("🏠 Кабинет"),
             KeyboardButton::new("🔑 Мои ключи"),
@@ -23,9 +23,58 @@ pub fn customer_keyboard() -> KeyboardMarkup {
             KeyboardButton::new("🆘 Поддержка"),
         ],
         vec![KeyboardButton::new("🎟 Промокод")],
+    ];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|v| v.as_secs() as i64)
+        .unwrap_or(0);
+    if crate::calendar::legacy_requests_open(now) {
+        rows.push(vec![KeyboardButton::new("♻️ Восстановить ключи")]);
+    }
+    KeyboardMarkup::new(rows).resize_keyboard().persistent()
+}
+
+pub fn legacy_restore_menu(eligible: bool) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if eligible {
+        rows.push(vec![cb("➕ Подать заявку на ключ", "legacy:request:new")]);
+    } else {
+        rows.push(vec![cb("🎟 Активировать промокод", "legacy:promo")]);
+    }
+    rows.push(vec![cb("⬅️ Кабинет", "profile")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn legacy_request_admin_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("✅ Одобрить и создать", &format!("legacy:req:ok:{id}")),
+            cb("❌ Отклонить", &format!("legacy:req:no:{id}")),
+        ],
+        vec![cb("♻️ Все заявки", "admin:legacy")],
     ])
-    .resize_keyboard()
-    .persistent()
+}
+
+pub fn legacy_admin_menu(requests: &[crate::store::LegacyRequest]) -> InlineKeyboardMarkup {
+    let mut rows = requests
+        .iter()
+        .flat_map(|r| {
+            vec![
+                vec![cb(
+                    &format!("#{} · user {} · {}", r.id, r.user_id, r.requested_name),
+                    &format!("admin:user:{}", r.user_id),
+                )],
+                vec![
+                    cb("✅ Одобрить", &format!("legacy:req:ok:{}", r.id)),
+                    cb("❌ Отклонить", &format!("legacy:req:no:{}", r.id)),
+                ],
+            ]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("💰 Изменить цену продления", "legacy:price")]);
+    rows.push(vec![cb("🎟 Legacy-промокоды", "admin:promos")]);
+    rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn admin_keyboard() -> KeyboardMarkup {
@@ -50,10 +99,7 @@ pub fn admin_keyboard() -> KeyboardMarkup {
 
 pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![
-            cb("➕ Создать ключ", "add"),
-            cb("📦 Создать оптом", "addbulk"),
-        ],
+        vec![cb("➕ Создание ключей", "admin:create")],
         vec![cb("📊 Статистика", "stats"), cb("🔎 Поиск", "admin:search")],
         vec![
             cb("👥 Клиенты", "list"),
@@ -76,11 +122,43 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("🔄 Обновить", "admin:dashboard"),
         ],
         vec![cb("🎟 Промокоды", "admin:promos")],
+        vec![cb("♻️ Legacy-ключи", "admin:legacy")],
         vec![
             cb("🧰 Массовое управление", "admin:bulk:menu"),
             cb("🧑‍💼 Роли", "admin:roles"),
         ],
         vec![cb("ℹ️ Справка", "admin:help")],
+    ])
+}
+
+pub fn admin_create_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("➕ Создать один", "add"),
+            cb("📦 Создать оптом", "addbulk"),
+        ],
+        vec![
+            cb("👤 Пользователи", "admin:owners"),
+            cb("🗂 Группы", "groups"),
+        ],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn admin_roles_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("➕ Добавить сотрудника", "admin:role:add")],
+        vec![cb("➖ Убрать сотрудника", "admin:role:remove")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn admin_promos_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🎟 Создать скидочный", "admin:promo:discount")],
+        vec![cb("♻️ Создать Legacy", "admin:promo:legacy")],
+        vec![cb("♻️ Legacy-заявки", "admin:legacy")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
 
@@ -347,6 +425,30 @@ pub fn renew_method_menu(name: &str, months: i64) -> InlineKeyboardMarkup {
             "💰 Внутренний баланс",
             &format!("renew:method:{name}:{months}:balance"),
         )],
+    ])
+}
+
+pub fn legacy_renew_menu(name: &str, price_kopecks: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            &format!("💳 Продлить за {:.2} ₽", price_kopecks as f64 / 100.0),
+            &format!("legacy:renew:{name}"),
+        )],
+        vec![cb("⬅️ Мои ключи", "mykeys")],
+    ])
+}
+
+pub fn legacy_renew_method_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "💳 Перевод",
+            &format!("legacy:renew:method:{name}:manual"),
+        )],
+        vec![cb(
+            "💰 Внутренний баланс",
+            &format!("legacy:renew:method:{name}:balance"),
+        )],
+        vec![cb("⬅️ Назад", &format!("legacy:renew:{name}"))],
     ])
 }
 
@@ -1691,8 +1793,7 @@ mod tests {
     fn admin_dashboard_reaches_every_primary_section() {
         let data = all_callback_data(&admin_dashboard_menu());
         for expected in [
-            "add",
-            "addbulk",
+            "admin:create",
             "stats",
             "admin:search",
             "list",
@@ -1706,6 +1807,7 @@ mod tests {
             "settings",
             "admin:help",
             "admin:promos",
+            "admin:legacy",
             "admin:bulk:menu",
             "admin:roles",
         ] {
@@ -1714,6 +1816,9 @@ mod tests {
                 "missing {expected}"
             );
         }
+        let create = all_callback_data(&admin_create_menu());
+        assert!(create.contains(&"add".to_string()));
+        assert!(create.contains(&"addbulk".to_string()));
         assert!(all_callback_data(&finance_menu()).contains(&"admin:dashboard".to_string()));
         assert!(
             all_callback_data(&settings_menu(Lang::Ru, false, false, true, true, true))

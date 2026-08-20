@@ -91,7 +91,9 @@ pub enum State {
         audience: String,
     },
     AwaitingAdminSearch,
-    AwaitingStaffRole,
+    AwaitingStaffRole {
+        operation: String,
+    },
     AwaitingBulkManage {
         operation: String,
     },
@@ -110,8 +112,15 @@ pub enum State {
     AwaitingClientNote {
         name: String,
     },
-    AwaitingPromoCode,
+    AwaitingPromoCode {
+        kind: String,
+    },
     AwaitingCustomerPromo,
+    AwaitingLegacyRequest,
+    AwaitingLegacyReject {
+        id: i64,
+    },
+    AwaitingLegacyPrice,
 }
 
 #[cfg(test)]

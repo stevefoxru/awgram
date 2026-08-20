@@ -104,6 +104,17 @@ pub struct PromoCode {
     pub active: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct LegacyRequest {
+    pub id: i64,
+    pub user_id: i64,
+    pub requested_name: String,
+    pub comment: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub client_name: Option<String>,
+}
+
 impl Store {
     pub fn admin_user_stats(&self, now: i64) -> AdminUserStats {
         self.with_conn(|c| c.query_row(
@@ -211,8 +222,175 @@ impl Store {
         self.with_conn(|c|c.execute("INSERT INTO promo_codes(code,discount_percent,max_uses,expires_at,created_by,created_at) VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![code,percent,max_uses,expires_at,actor,now])).map(|n|n==1).unwrap_or(false)
     }
 
+    pub fn create_legacy_promo(
+        &self,
+        code: &str,
+        max_uses: Option<i64>,
+        actor: i64,
+        now: i64,
+    ) -> bool {
+        let code = code.trim().to_uppercase();
+        if code.is_empty() || code.len() > 24 || max_uses.is_some_and(|v| v <= 0) {
+            return false;
+        }
+        self.with_conn(|c|c.execute("INSERT INTO promo_codes(code,discount_percent,max_uses,expires_at,created_by,created_at,kind) VALUES(?1,100,?2,?3,?4,?5,'legacy')",rusqlite::params![code,max_uses,crate::calendar::LEGACY_REQUEST_DEADLINE-1,actor,now])).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn activate_legacy_promo(&self, user_id: i64, code: &str, now: i64) -> bool {
+        if !crate::calendar::legacy_requests_open(now) {
+            return false;
+        }
+        let code = code.trim().to_uppercase();
+        self.with_conn(|c| {
+            c.execute_batch("BEGIN IMMEDIATE")?;
+            let result = (|| {
+                c.query_row(
+                    "SELECT 1 FROM promo_codes WHERE code=?1 COLLATE NOCASE AND kind='legacy' AND active=1 AND (expires_at IS NULL OR expires_at>=?2) AND (max_uses IS NULL OR used_count<max_uses)",
+                    rusqlite::params![code,now],
+                    |_| Ok(()),
+                )?;
+                c.execute("INSERT INTO promo_uses(code,user_id,used_at) VALUES(?1,?2,?3)",rusqlite::params![code,user_id,now])?;
+                c.execute("INSERT INTO legacy_entitlements(user_id,promo_code,activated_at,expires_at) VALUES(?1,?2,?3,?4)",rusqlite::params![user_id,code,now,crate::calendar::LEGACY_RESTORE_DEADLINE])?;
+                c.execute("UPDATE promo_codes SET used_count=used_count+1 WHERE code=?1 COLLATE NOCASE",[&code])?;
+                Ok(())
+            })();
+            if result.is_ok(){c.execute_batch("COMMIT")?;}else{let _=c.execute_batch("ROLLBACK");}
+            result
+        }).is_ok()
+    }
+
+    pub fn consume_legacy_entitlement(&self, user_id: i64, name: &str, now: i64) -> bool {
+        if now > crate::calendar::LEGACY_RESTORE_DEADLINE {
+            return false;
+        }
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE legacy_entitlements SET used_client=?2,used_at=?3
+             WHERE id=(SELECT e.id FROM legacy_entitlements e
+                       WHERE e.user_id=?1 AND e.used_at IS NULL AND e.expires_at>=?3
+                         AND EXISTS(SELECT 1 FROM clients c WHERE c.name=?2 AND c.owner_user_id=?1)
+                       ORDER BY e.activated_at LIMIT 1)",
+                rusqlite::params![user_id, name, now],
+            )
+        })
+        .map(|n| n == 1)
+        .unwrap_or(false)
+    }
+
+    pub fn can_restore_legacy_client(&self, user_id: i64, name: &str, now: i64) -> bool {
+        now <= crate::calendar::LEGACY_RESTORE_DEADLINE
+            && self
+                .with_conn(|c| {
+                    c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM legacy_entitlements e
+             WHERE e.user_id=?1 AND e.used_at IS NULL AND e.expires_at>=?3)
+             AND EXISTS(SELECT 1 FROM clients c WHERE c.name=?2 AND c.owner_user_id=?1)",
+                        rusqlite::params![user_id, name, now],
+                        |r| r.get::<_, i64>(0),
+                    )
+                })
+                .is_ok_and(|v| v != 0)
+    }
+
+    pub fn has_pending_legacy_entitlement(&self, user_id: i64, code: &str, now: i64) -> bool {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM legacy_entitlements
+                 WHERE user_id=?1 AND promo_code=?2 COLLATE NOCASE
+                   AND used_at IS NULL AND expires_at>=?3)",
+                rusqlite::params![user_id, code.trim(), now],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .is_ok_and(|v| v != 0)
+    }
+
+    pub fn legacy_user_eligible(&self, user_id: i64, now: i64) -> bool {
+        crate::calendar::legacy_requests_open(now)
+            && self
+                .with_conn(|c| {
+                    c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM legacy_entitlements WHERE user_id=?1 AND expires_at>=?2)",
+            rusqlite::params![user_id,now],|r|r.get::<_,i64>(0)
+        )
+                })
+                .is_ok_and(|v| v != 0)
+    }
+
+    pub fn create_legacy_request(
+        &self,
+        user_id: i64,
+        requested_name: &str,
+        comment: Option<&str>,
+        now: i64,
+    ) -> Option<i64> {
+        let requested_name = requested_name.trim();
+        if !self.legacy_user_eligible(user_id, now)
+            || requested_name.is_empty()
+            || requested_name.chars().count() > 64
+            || comment.is_some_and(|v| v.chars().count() > 500)
+        {
+            return None;
+        }
+        self.with_conn(|c|{c.execute("INSERT INTO legacy_requests(user_id,requested_name,comment,created_at) VALUES(?1,?2,?3,?4)",rusqlite::params![user_id,requested_name,comment,now])?;Ok(c.last_insert_rowid())}).ok()
+    }
+
+    pub fn legacy_requests(&self, status: &str, limit: usize) -> Vec<LegacyRequest> {
+        self.with_conn(|c|{let mut s=c.prepare("SELECT id,user_id,requested_name,comment,status,created_at,client_name FROM legacy_requests WHERE status=?1 ORDER BY created_at LIMIT ?2")?;let rows=s.query_map(rusqlite::params![status,limit as i64],legacy_request_from_row)?;rows.collect()}).unwrap_or_default()
+    }
+
+    pub fn legacy_request(&self, id: i64) -> Option<LegacyRequest> {
+        self.with_conn(|c|c.query_row("SELECT id,user_id,requested_name,comment,status,created_at,client_name FROM legacy_requests WHERE id=?1",[id],legacy_request_from_row).optional()).ok().flatten()
+    }
+
+    pub fn decide_legacy_request(
+        &self,
+        id: i64,
+        admin_id: i64,
+        client_name: Option<&str>,
+        reason: Option<&str>,
+        now: i64,
+    ) -> bool {
+        let status = if client_name.is_some() {
+            "approved"
+        } else {
+            "rejected"
+        };
+        self.with_conn(|c|c.execute("UPDATE legacy_requests SET status=?2,decided_at=?3,decided_by=?4,client_name=?5,reject_reason=?6 WHERE id=?1 AND status='pending'",rusqlite::params![id,status,now,admin_id,client_name,reason])).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn mark_legacy_subscription(&self, name: &str, user_id: i64, now: i64) -> bool {
+        self.with_conn(|c|c.execute(
+            "INSERT INTO client_subscriptions(client_name,user_id,months,auto_renew,updated_at,legacy)
+             VALUES(?1,?2,12,0,?3,1)
+             ON CONFLICT(client_name) DO UPDATE SET user_id=?2,months=12,auto_renew=0,updated_at=?3,legacy=1",
+            rusqlite::params![name,user_id,now]
+        )).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn is_legacy_client(&self, name: &str, user_id: i64) -> bool {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT legacy FROM client_subscriptions WHERE client_name=?1 AND user_id=?2",
+                rusqlite::params![name, user_id],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .is_ok_and(|v| v != 0)
+    }
+
+    pub fn legacy_clients(&self) -> Vec<(String, i64)> {
+        self.with_conn(|c| {
+            let mut s =
+                c.prepare("SELECT client_name,user_id FROM client_subscriptions WHERE legacy=1")?;
+            let rows = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
     pub fn promo(&self, code: &str, now: i64) -> Option<PromoCode> {
-        self.with_conn(|c|c.query_row("SELECT code,discount_percent,max_uses,used_count,expires_at,active FROM promo_codes WHERE code=?1 COLLATE NOCASE AND active=1 AND (expires_at IS NULL OR expires_at>?2) AND (max_uses IS NULL OR used_count<max_uses)",rusqlite::params![code.trim(),now],|r|Ok(PromoCode{code:r.get(0)?,discount_percent:r.get(1)?,max_uses:r.get(2)?,used_count:r.get(3)?,expires_at:r.get(4)?,active:r.get::<_,i64>(5)?!=0})).optional()).ok().flatten()
+        self.with_conn(|c|c.query_row("SELECT code,discount_percent,max_uses,used_count,expires_at,active FROM promo_codes WHERE code=?1 COLLATE NOCASE AND kind='discount' AND active=1 AND (expires_at IS NULL OR expires_at>?2) AND (max_uses IS NULL OR used_count<max_uses)",rusqlite::params![code.trim(),now],|r|Ok(PromoCode{code:r.get(0)?,discount_percent:r.get(1)?,max_uses:r.get(2)?,used_count:r.get(3)?,expires_at:r.get(4)?,active:r.get::<_,i64>(5)?!=0})).optional()).ok().flatten()
     }
 
     pub fn activate_promo(&self, user_id: i64, code: &str, now: i64) -> Option<i64> {
@@ -220,7 +398,7 @@ impl Store {
         self.with_conn(|c|{
             c.execute_batch("BEGIN IMMEDIATE")?;
             let result=(||{
-                let discount:i64=c.query_row("SELECT discount_percent FROM promo_codes WHERE code=?1 COLLATE NOCASE AND active=1 AND (expires_at IS NULL OR expires_at>?2) AND (max_uses IS NULL OR used_count<max_uses)",rusqlite::params![code,now],|r|r.get(0))?;
+                let discount:i64=c.query_row("SELECT discount_percent FROM promo_codes WHERE code=?1 COLLATE NOCASE AND kind='discount' AND active=1 AND (expires_at IS NULL OR expires_at>?2) AND (max_uses IS NULL OR used_count<max_uses)",rusqlite::params![code,now],|r|r.get(0))?;
                 c.execute("INSERT INTO promo_uses(code,user_id,used_at) VALUES(?1,?2,?3)",rusqlite::params![code,user_id,now])?;
                 c.execute("UPDATE promo_codes SET used_count=used_count+1 WHERE code=?1 COLLATE NOCASE",[&code])?;
                 c.execute("UPDATE users SET promo_discount=?2 WHERE user_id=?1",rusqlite::params![user_id,discount])?;
@@ -783,6 +961,24 @@ impl Store {
         }).ok()
     }
 
+    pub fn create_legacy_renewal_request(
+        &self,
+        user_id: i64,
+        client_name: &str,
+        amount_kopecks: i64,
+        now: i64,
+    ) -> Option<i64> {
+        if !self.is_legacy_client(client_name, user_id) {
+            return None;
+        }
+        self.with_conn(|c| {
+            let changed=c.execute("INSERT INTO payment_requests(user_id,months,amount_kopecks,method,client_name,created_at)
+                SELECT ?1,12,?2,'legacy_manual',?3,?4
+                WHERE NOT EXISTS(SELECT 1 FROM payment_requests WHERE user_id=?1 AND client_name=?3 AND method='legacy_manual' AND status='pending')",rusqlite::params![user_id,amount_kopecks,client_name,now])?;
+            Ok((changed == 1).then(|| c.last_insert_rowid()))
+        }).ok().flatten()
+    }
+
     pub fn set_payment_proof(&self, id: i64, user_id: i64, proof: &str) -> bool {
         self.with_conn(|c| {
             c.execute(
@@ -904,6 +1100,18 @@ fn ticket_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SupportTicket> {
     })
 }
 
+fn legacy_request_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LegacyRequest> {
+    Ok(LegacyRequest {
+        id: r.get(0)?,
+        user_id: r.get(1)?,
+        requested_name: r.get(2)?,
+        comment: r.get(3)?,
+        status: r.get(4)?,
+        created_at: r.get(5)?,
+        client_name: r.get(6)?,
+    })
+}
+
 fn payment_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentRequest> {
     let status: String = r.get(5)?;
     Ok(PaymentRequest {
@@ -1016,5 +1224,36 @@ mod tests {
         let ticket = s.support_ticket(id).unwrap();
         assert_eq!(ticket.category, "payment");
         assert_eq!(ticket.priority, "normal");
+    }
+
+    #[test]
+    fn legacy_promo_enables_unlimited_manually_reviewed_requests() {
+        let s = Store::open_in_memory();
+        s.upsert_user(7, Some("alice"), "Alice", None, 10);
+        s.upsert_user(8, Some("bob"), "Bob", None, 10);
+        s.assign_client_group("old_alice", None, 11);
+        assert!(s.assign_client_owner("old_alice", Some(7)));
+        assert!(s.create_legacy_promo("RESTORE2026", Some(1), 1, 20));
+        assert!(s.activate_legacy_promo(7, "restore2026", 21));
+        assert!(s.legacy_user_eligible(7, 21));
+        assert!(!s.legacy_user_eligible(8, 21));
+        let first = s
+            .create_legacy_request(7, "phone", Some("первый из двух"), 22)
+            .unwrap();
+        let second = s.create_legacy_request(7, "laptop", None, 23).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(s.legacy_requests("pending", 10).len(), 2);
+        assert!(s.decide_legacy_request(first, 1, Some("phone_01"), None, 24));
+        assert_eq!(s.legacy_request(first).unwrap().status, "approved");
+        assert_eq!(s.activate_promo(8, "RESTORE2026", 22), None);
+        assert!(s.mark_legacy_subscription("old_alice", 7, 24));
+        assert!(s.is_legacy_client("old_alice", 7));
+        assert_eq!(s.legacy_clients(), vec![("old_alice".into(), 7)]);
+        assert!(s
+            .create_legacy_renewal_request(7, "old_alice", 100_000, 25)
+            .is_some());
+        assert!(s
+            .create_legacy_renewal_request(7, "old_alice", 100_000, 26)
+            .is_none());
     }
 }
