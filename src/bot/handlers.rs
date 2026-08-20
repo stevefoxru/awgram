@@ -3177,7 +3177,7 @@ async fn callback_handler(
                         &bot,
                         chat,
                         msg_id,
-                        "🏠 Админ-панель",
+                        "🏠 Админ-панель".to_string(),
                         menu::admin_dashboard_menu(),
                     )
                     .await;
