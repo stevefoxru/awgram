@@ -116,6 +116,35 @@ pub struct LegacyRequest {
 }
 
 impl Store {
+    /// Резервирует самостоятельное обновление не чаще одного раза в 10 минут.
+    pub fn claim_client_self_refresh(&self, name: &str, user_id: i64, now: i64) -> bool {
+        if self.client_owner(name) != Some(user_id) {
+            return false;
+        }
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO client_self_refreshes(client_name,user_id,last_requested_at)
+                 VALUES(?1,?2,?3)
+                 ON CONFLICT(client_name) DO UPDATE SET
+                   user_id=?2,last_requested_at=?3,request_count=request_count+1
+                 WHERE client_self_refreshes.user_id=?2
+                   AND client_self_refreshes.last_requested_at<=?3-600",
+                rusqlite::params![name, user_id, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn release_client_self_refresh(&self, name: &str, user_id: i64, claimed_at: i64) {
+        let _ = self.with_conn(|c| {
+            c.execute(
+                "DELETE FROM client_self_refreshes
+                 WHERE client_name=?1 AND user_id=?2 AND last_requested_at=?3",
+                rusqlite::params![name, user_id, claimed_at],
+            )
+        });
+    }
+
     pub fn admin_user_stats(&self, now: i64) -> AdminUserStats {
         self.with_conn(|c| c.query_row(
             "SELECT COUNT(*),
@@ -1255,5 +1284,20 @@ mod tests {
         assert!(s
             .create_legacy_renewal_request(7, "old_alice", 100_000, 26)
             .is_none());
+    }
+
+    #[test]
+    fn client_self_refresh_has_cooldown_and_owner_check() {
+        let s = Store::open_in_memory();
+        s.upsert_user(7, Some("alice"), "Alice", None, 1);
+        s.upsert_user(8, Some("bob"), "Bob", None, 1);
+        s.assign_client_group("phone", None, 1);
+        assert!(s.assign_client_owner("phone", Some(7)));
+        assert!(s.claim_client_self_refresh("phone", 7, 1_000));
+        assert!(!s.claim_client_self_refresh("phone", 7, 1_599));
+        assert!(!s.claim_client_self_refresh("phone", 8, 1_600));
+        assert!(s.claim_client_self_refresh("phone", 7, 1_600));
+        s.release_client_self_refresh("phone", 7, 1_600);
+        assert!(s.claim_client_self_refresh("phone", 7, 1_601));
     }
 }

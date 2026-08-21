@@ -18,10 +18,33 @@ async fn notify_admins(bot: &Bot, cfg: &Config, text: String) {
     }
 }
 
+fn vpn_problem(report: &crate::vpn::wire::CheckReport) -> Option<String> {
+    if report.ok {
+        return None;
+    }
+    Some(format!(
+        "service={} interface={} port={} module={} firewall={}",
+        report.service.active,
+        report.interface.present,
+        report.port.listening,
+        report.module.loaded,
+        !report.firewall.ufw_active || report.firewall.port_allowed
+    ))
+}
+
 async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     match vpn.check().await {
-        Ok(_) => {
-            if store.update_monitor_state("vpn", "ok", None, now) {
+        Ok(report) => {
+            if let Some(details) = vpn_problem(&report) {
+                if store.update_monitor_state("vpn", "error", Some(&details), now) {
+                    notify_admins(
+                        bot,
+                        cfg,
+                        format!("🚨 Мониторинг: AmneziaWG работает с ошибками\n{details}"),
+                    )
+                    .await;
+                }
+            } else if store.update_monitor_state("vpn", "ok", None, now) {
                 notify_admins(
                     bot,
                     cfg,
@@ -83,5 +106,24 @@ pub async fn run(bot: Bot, cfg: Arc<Config>, vpn: Arc<Vpn>, store: Arc<Store>) {
     loop {
         interval.tick().await;
         tick(&bot, &cfg, &vpn, &store, now_epoch()).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_with_internal_failure_is_not_healthy() {
+        let mut report = crate::vpn::wire::CheckReport {
+            ok: false,
+            ..Default::default()
+        };
+        report.service.active = true;
+        report.interface.present = true;
+        report.module.loaded = true;
+        assert!(vpn_problem(&report).is_some());
+        report.ok = true;
+        assert!(vpn_problem(&report).is_none());
     }
 }

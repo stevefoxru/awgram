@@ -17,6 +17,7 @@ use crate::vpn::Vpn;
 #[derive(Debug, PartialEq)]
 pub enum Action {
     AdminDashboard,
+    AdminVpn,
     AdminCreate,
     AdminOwners,
     AdminFinance,
@@ -135,6 +136,8 @@ pub enum Action {
     SetClientEnabled(String, bool),
     PaymentInstructionsAsk,
     CustomerKey(String),
+    CustomerRefresh(String),
+    CustomerRefreshRun(String),
     Renew(String),
     RenewTerm(String, i64),
     RenewMethod(String, i64, String),
@@ -154,6 +157,7 @@ pub enum Action {
 fn parse_callback(data: &str) -> Action {
     match data {
         "admin:dashboard" => Action::AdminDashboard,
+        "admin:vpn" => Action::AdminVpn,
         "admin:create" => Action::AdminCreate,
         "admin:owners" => Action::AdminOwners,
         "admin:finance" => Action::AdminFinance,
@@ -476,6 +480,10 @@ fn parse_callback(data: &str) -> Action {
                 Action::AskDelete(v.to_string())
             } else if let Some(v) = data.strip_prefix("recreate:") {
                 Action::Recreate(v.to_string())
+            } else if let Some(v) = data.strip_prefix("refreshgo:") {
+                Action::CustomerRefreshRun(v.to_string())
+            } else if let Some(v) = data.strip_prefix("refresh:") {
+                Action::CustomerRefresh(v.to_string())
             } else if let Some(v) = data.strip_prefix("regen:") {
                 Action::Regen(v.to_string())
             } else if let Some(v) = data.strip_prefix("exp:") {
@@ -1022,6 +1030,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | Profile
         | Balance
         | CustomerKey(_)
+        | CustomerRefresh(_)
+        | CustomerRefreshRun(_)
         | Renew(_)
         | RenewTerm(_, _)
         | RenewMethod(_, _, _)
@@ -1098,6 +1108,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | SupportPriority(_, _)
         | FinanceExport
         | AdminDashboard
+        | AdminVpn
         | AdminCreate
         | AdminOwners
         | AdminFinance
@@ -3243,6 +3254,8 @@ async fn callback_handler(
             | Action::Profile
             | Action::Balance
             | Action::CustomerKey(_)
+            | Action::CustomerRefresh(_)
+            | Action::CustomerRefreshRun(_)
             | Action::Renew(_)
             | Action::RenewTerm(_, _)
             | Action::RenewMethod(_, _, _)
@@ -3282,6 +3295,11 @@ async fn callback_handler(
     match action {
         Action::AdminDashboard => {
             admin_dashboard(&bot, chat, &vpn, &settings).await?;
+        }
+        Action::AdminVpn => {
+            bot.send_message(chat, "🛡 Управление VPN-службой\n\nПроверка показывает состояние systemd-юнита, интерфейса, порта, маршрутизации, firewall и клиентов. Диагностика формирует подробный технический отчёт.\n\nПерезапуск кратковременно разорвёт активные VPN-соединения и требует подтверждения.")
+                .reply_markup(menu::vpn_service_menu())
+                .await?;
         }
         Action::AdminCreate => {
             bot.send_message(chat,"➕ Создание ключей\n\nВыберите одиночное создание или пакет. После создания ключ можно привязать к пользователю и группе из его карточки.").reply_markup(menu::admin_create_menu()).await?;
@@ -4320,6 +4338,7 @@ async fn callback_handler(
                 chat,
                 format!("🔑 {name}\n📱 Устройство: {label}\nСтатус: {status}\nСрок: {expiry}"),
             )
+            .reply_markup(menu::customer_key_menu(&name))
             .await?;
             match vpn.existing_files(&name) {
                 Ok(res) => {
@@ -4329,6 +4348,57 @@ async fn callback_handler(
                 }
                 Err(e) => {
                     bot.send_message(chat, i18n::error_text(lang, &e)).await?;
+                }
+            }
+        }
+        Action::CustomerRefresh(name) => {
+            if settings.client_owner(&name) == Some(uid) {
+                bot.send_message(chat,format!("📱 Обновление подключения «{name}»\n\nБот создаст свежие файлы под текущие настройки VPN-сервера. Криптографический ключ, VPN-адрес, владелец и срок подписки не изменятся.\n\nПосле получения удалите старое подключение из AmneziaVPN/AmneziaWG и импортируйте новое."))
+                    .reply_markup(menu::customer_refresh_confirm_menu(&name))
+                    .await?;
+            }
+        }
+        Action::CustomerRefreshRun(name) => {
+            if settings.client_owner(&name) != Some(uid) {
+                return Ok(());
+            }
+            let claimed_at = now_epoch();
+            if !settings.claim_client_self_refresh(&name, uid, claimed_at) {
+                bot.send_message(chat,"Обновлять подключение можно не чаще одного раза в 10 минут. Попробуйте немного позже.")
+                    .reply_markup(menu::customer_key_menu(&name))
+                    .await?;
+                return Ok(());
+            }
+            let waiting = bot
+                .send_message(chat, "⏳ Создаю свежую конфигурацию…")
+                .await
+                .ok();
+            match vpn.regen_client(&name).await {
+                Ok(result) => {
+                    settings.log_event(
+                        now_epoch(),
+                        EventKind::Regen,
+                        Some(&name),
+                        Some(uid),
+                        Some("customer self-refresh"),
+                    );
+                    if let Some(message) = waiting {
+                        let _ = bot.delete_message(chat, message.id).await;
+                    }
+                    bot.send_message(chat,"✅ Подключение обновлено. Импортируйте полученные ниже файлы заново. Если проблема сохранится, обратитесь в поддержку и укажите оператора и регион.").await?;
+                    if let Err(error) = render::send_client_files(&bot, chat, lang, &result).await {
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
+                }
+                Err(error) => {
+                    settings.release_client_self_refresh(&name, uid, claimed_at);
+                    if let Some(message) = waiting {
+                        let _ = bot.delete_message(chat, message.id).await;
+                    }
+                    bot.send_message(chat, i18n::error_text(lang, &error))
+                        .reply_markup(menu::customer_key_menu(&name))
+                        .await?;
                 }
             }
         }
@@ -5011,10 +5081,31 @@ async fn callback_handler(
                     if let Some(m) = waiting {
                         let _ = bot.delete_message(chat, m.id).await;
                     }
-                    bot.send_message(chat, i18n::restart_done(lang, out.active))
-                        .reply_markup(menu::main_menu(lang))
-                        .parse_mode(ParseMode::Html)
-                        .await?;
+                    let verification = if !out.active {
+                        "⚠️ Systemd-служба неактивна после перезапуска.".to_string()
+                    } else {
+                        match vpn.check().await {
+                            Ok(report) if report.ok => {
+                                "✅ Контрольная проверка VPN пройдена.".to_string()
+                            }
+                            Ok(_) => "⚠️ Служба запущена, но контрольная проверка обнаружила проблемы. Откройте подробную диагностику.".to_string(),
+                            Err(error) => {
+                                tracing::warn!(%error, "контрольная проверка после restart провалилась");
+                                "⚠️ Не удалось выполнить контрольную проверку. Откройте подробную диагностику.".to_string()
+                            }
+                        }
+                    };
+                    bot.send_message(
+                        chat,
+                        format!("{}\n\n{verification}", i18n::restart_done(lang, out.active)),
+                    )
+                    .reply_markup(if role.is_owner() {
+                        menu::vpn_service_menu()
+                    } else {
+                        menu::main_menu(lang)
+                    })
+                    .parse_mode(ParseMode::Html)
+                    .await?;
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "restart провалился");
@@ -5272,7 +5363,11 @@ async fn callback_handler(
                     let body = i18n::check_card(lang, &report);
                     bot.send_message(chat, body)
                         .parse_mode(ParseMode::Html)
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(if role.is_owner() {
+                            menu::vpn_service_menu()
+                        } else {
+                            menu::main_menu(lang)
+                        })
                         .await?;
                 }
                 Err(e) => {
@@ -5293,7 +5388,11 @@ async fn callback_handler(
                 Ok(body) => {
                     let body = truncate_for_message(body);
                     bot.send_message(chat, i18n::diagnose_result(lang, &body))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(if role.is_owner() {
+                            menu::vpn_service_menu()
+                        } else {
+                            menu::main_menu(lang)
+                        })
                         .parse_mode(ParseMode::Html)
                         .await?;
                 }
@@ -6073,6 +6172,7 @@ mod tests {
         let keyboards = vec![
             menu::main_menu(Lang::Ru),
             menu::admin_dashboard_menu(),
+            menu::vpn_service_menu(),
             menu::admin_create_menu(),
             menu::admin_roles_menu(),
             menu::admin_promos_menu(),
@@ -6084,6 +6184,8 @@ mod tests {
             menu::support_category_menu(),
             menu::support_ticket_menu(1),
             menu::support_rating_menu(1),
+            menu::customer_key_menu("alice"),
+            menu::customer_refresh_confirm_menu("alice"),
             menu::legacy_renew_menu("old_alice", 100_000),
             menu::legacy_renew_method_menu("old_alice"),
             menu::legacy_restore_menu(false),
@@ -6150,6 +6252,7 @@ mod tests {
         use Action::*;
         let samples = vec![
             AdminDashboard,
+            AdminVpn,
             AdminCreate,
             AdminOwners,
             AdminFinance,
@@ -6259,6 +6362,7 @@ mod tests {
         for sample in &samples {
             match sample {
                 AdminDashboard => {}
+                AdminVpn => {}
                 AdminCreate => {}
                 AdminOwners => {}
                 AdminFinance => {}
@@ -6372,6 +6476,8 @@ mod tests {
                 SetClientEnabled(_, _) => {}
                 PaymentInstructionsAsk => {}
                 CustomerKey(_) => {}
+                CustomerRefresh(_) => {}
+                CustomerRefreshRun(_) => {}
                 Renew(_) => {}
                 RenewTerm(_, _) => {}
                 RenewMethod(_, _, _) => {}
@@ -6518,6 +6624,8 @@ mod tests {
             (Action::Profile, true, true),
             (Action::Balance, true, true),
             (Action::CustomerKey("mine".into()), true, true),
+            (Action::CustomerRefresh("mine".into()), true, true),
+            (Action::CustomerRefreshRun("mine".into()), true, true),
             (Action::Renew("mine".into()), true, true),
             (Action::RenewTerm("mine".into(), 1), true, true),
             (
@@ -6551,6 +6659,7 @@ mod tests {
             (Action::SupportPriority(1, "high".into()), true, false),
             (Action::FinanceExport, true, false),
             (Action::AdminDashboard, true, false),
+            (Action::AdminVpn, true, false),
             (Action::AdminCreate, true, false),
             (Action::AdminOwners, true, false),
             (Action::AdminFinance, true, false),

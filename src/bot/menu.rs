@@ -114,7 +114,7 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("📣 Рассылка", "admin:broadcast"),
         ],
         vec![
-            cb("🩺 Состояние сервера", "check"),
+            cb("🛡 VPN-служба", "admin:vpn"),
             cb("💾 Резервные копии", "backup"),
         ],
         vec![
@@ -128,6 +128,16 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("🧑‍💼 Роли", "admin:roles"),
         ],
         vec![cb("ℹ️ Справка", "admin:help")],
+    ])
+}
+
+pub fn vpn_service_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🩺 Проверить состояние", "check")],
+        vec![cb("🔬 Подробная диагностика", "diagnose")],
+        vec![cb("🔁 Перезапустить VPN", "restart")],
+        vec![cb("🧰 Восстановить модуль", "repair")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
 
@@ -383,6 +393,27 @@ pub fn customer_keys_menu(names: &[String]) -> InlineKeyboardMarkup {
             cb("✏️", &format!("device:label:{name}")),
         ]
     }))
+}
+
+pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("📱 Обновить подключение", &format!("refresh:{name}"))],
+        vec![
+            cb("📅 Продлить", &format!("renew:{name}")),
+            cb("✏️ Устройство", &format!("device:label:{name}")),
+        ],
+        vec![cb("⬅️ Мои ключи", "mykeys")],
+    ])
+}
+
+pub fn customer_refresh_confirm_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "✅ Создать свежую конфигурацию",
+            &format!("refreshgo:{name}"),
+        )],
+        vec![cb("⬅️ Назад к ключу", &format!("mykey:{name}"))],
+    ])
 }
 
 pub fn renew_terms_menu(name: &str) -> InlineKeyboardMarkup {
@@ -1137,6 +1168,15 @@ mod tests {
     }
 
     #[test]
+    fn customer_can_confirm_self_refresh() {
+        let card = all_callback_data(&customer_key_menu("alice"));
+        assert!(card.contains(&"refresh:alice".to_string()));
+        let confirm = all_callback_data(&customer_refresh_confirm_menu("alice"));
+        assert!(confirm.contains(&"refreshgo:alice".to_string()));
+        assert!(confirm.contains(&"mykey:alice".to_string()));
+    }
+
+    #[test]
     fn modify_param_menu_has_four_params_and_back() {
         let data = all_callback_data(&modify_param_menu(Lang::Ru, "alice"));
         assert!(data.contains(&"modparam:alice:keepalive".to_string()));
@@ -1802,7 +1842,7 @@ mod tests {
             "admin:support",
             "groups",
             "admin:broadcast",
-            "check",
+            "admin:vpn",
             "backup",
             "settings",
             "admin:help",
@@ -1819,6 +1859,10 @@ mod tests {
         let create = all_callback_data(&admin_create_menu());
         assert!(create.contains(&"add".to_string()));
         assert!(create.contains(&"addbulk".to_string()));
+        let vpn = all_callback_data(&vpn_service_menu());
+        for expected in ["check", "diagnose", "restart", "repair", "admin:dashboard"] {
+            assert!(vpn.contains(&expected.to_string()), "missing {expected}");
+        }
         assert!(all_callback_data(&finance_menu()).contains(&"admin:dashboard".to_string()));
         assert!(
             all_callback_data(&settings_menu(Lang::Ru, false, false, true, true, true))

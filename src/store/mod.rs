@@ -293,6 +293,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_legacy_requests_status ON legacy_requests(status,created_at);
     CREATE INDEX idx_subscriptions_legacy ON client_subscriptions(legacy,user_id);
     "#,
+    // v11: защита самостоятельного обновления клиентской конфигурации от спама.
+    r#"
+    CREATE TABLE client_self_refreshes(
+        client_name TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        last_requested_at INTEGER NOT NULL,
+        request_count INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX idx_client_self_refreshes_user ON client_self_refreshes(user_id,last_requested_at);
+    "#,
 ];
 
 pub struct Store {
@@ -380,7 +390,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 10);
+        assert_eq!(store.schema_version(), 11);
     }
 
     #[test]
@@ -389,12 +399,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 10);
+        assert_eq!(store.schema_version(), 11);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 10);
+        assert_eq!(store.schema_version(), 11);
     }
 }
