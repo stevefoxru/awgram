@@ -875,7 +875,7 @@ async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
 }
 
 fn parse_minor(value: &str) -> Option<i64> {
-    let normalized = value.trim().replace(',', '.');
+    let normalized = value.trim().replace(',', ".");
     let mut parts = normalized.split('.');
     let whole = parts.next()?.parse::<i64>().ok()?;
     let fraction = parts.next().unwrap_or("0");
