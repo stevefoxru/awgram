@@ -18,6 +18,15 @@ use crate::vpn::Vpn;
 pub enum Action {
     AdminDashboard,
     AdminVpn,
+    AdminServers,
+    AdminKeys,
+    AdminUsersHub,
+    AdminCommunication,
+    AdminSystem,
+    ServerAdd,
+    ServerCard(i64),
+    ServerBilling,
+    ServerBillingAsk(i64),
     AdminCreate,
     AdminOwners,
     AdminFinance,
@@ -158,6 +167,13 @@ fn parse_callback(data: &str) -> Action {
     match data {
         "admin:dashboard" => Action::AdminDashboard,
         "admin:vpn" => Action::AdminVpn,
+        "admin:servers" => Action::AdminServers,
+        "admin:keys" => Action::AdminKeys,
+        "admin:users" => Action::AdminUsersHub,
+        "admin:communication" => Action::AdminCommunication,
+        "admin:system" => Action::AdminSystem,
+        "server:add" => Action::ServerAdd,
+        "server:billing" => Action::ServerBilling,
         "admin:create" => Action::AdminCreate,
         "admin:owners" => Action::AdminOwners,
         "admin:finance" => Action::AdminFinance,
@@ -325,6 +341,12 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::LegacyRequestReject)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:bill:") {
+                v.parse()
+                    .map(Action::ServerBillingAsk)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:") {
+                v.parse().map(Action::ServerCard).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("renew:method:") {
                 let parts: Vec<_> = v.rsplitn(3, ':').collect();
                 match (
@@ -811,6 +833,63 @@ async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Handl
     Ok(())
 }
 
+fn server_card_text(server: &crate::store::VpnServer, now: i64) -> String {
+    let opened = server
+        .opened_at
+        .map(crate::calendar::format_date)
+        .unwrap_or_else(|| "не указано".into());
+    let paid = server
+        .paid_until
+        .map(crate::calendar::format_date)
+        .unwrap_or_else(|| "не настроено".into());
+    let cost = server
+        .cost_minor
+        .map(|v| {
+            format!(
+                "{:.2} {}",
+                v as f64 / 100.0,
+                server.currency.as_deref().unwrap_or("")
+            )
+        })
+        .unwrap_or_else(|| "не указана".into());
+    let days = server
+        .paid_until
+        .map(|v| (v - now).div_euclid(86_400))
+        .map(|v| format!("{v} дн."))
+        .unwrap_or_else(|| "—".into());
+    format!("🖥 {}\n\nСтатус: {}\nHostname: {}\nIP: {}\nХостер: {}\nЛокация: {}\nПротокол: {}\nОткрыт: {}\nДобавлен в бот: {}\nОплачен до: {}\nДо оплаты: {}\nСтоимость: {}\nПериод: {} мес.\nАвтопродление: {}",
+        server.name,server.status,server.hostname,server.public_ip,server.provider,server.location,server.protocol,opened,crate::calendar::format_date(server.added_at),paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"})
+}
+
+async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let servers = settings.vpn_servers();
+    let attention = servers
+        .iter()
+        .filter(|s| {
+            matches!(s.status.as_str(), "warning" | "offline")
+                || s.paid_until.is_some_and(|v| v <= now_epoch() + 7 * 86_400)
+        })
+        .count();
+    bot.send_message(chat,format!("🖥 Серверы\n\nВсего: {}\nТребуют внимания: {}\n\nЗдесь хранятся паспорта VPS, сроки оплаты и состояние инфраструктуры.",servers.len(),attention)).reply_markup(menu::servers_menu(&servers)).await?;
+    Ok(())
+}
+
+fn parse_minor(value: &str) -> Option<i64> {
+    let normalized = value.trim().replace(',', '.');
+    let mut parts = normalized.split('.');
+    let whole = parts.next()?.parse::<i64>().ok()?;
+    let fraction = parts.next().unwrap_or("0");
+    if parts.next().is_some() || fraction.len() > 2 || whole < 0 {
+        return None;
+    }
+    let cents = match fraction.len() {
+        0 => 0,
+        1 => fraction.parse::<i64>().ok()? * 10,
+        _ => fraction.parse().ok()?,
+    };
+    whole.checked_mul(100)?.checked_add(cents)
+}
+
 async fn maybe_issue_trial(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store, uid: i64) {
     let claimed_at = now_epoch();
     if !settings.claim_trial(uid, claimed_at) {
@@ -1109,6 +1188,15 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | FinanceExport
         | AdminDashboard
         | AdminVpn
+        | AdminServers
+        | AdminKeys
+        | AdminUsersHub
+        | AdminCommunication
+        | AdminSystem
+        | ServerAdd
+        | ServerCard(_)
+        | ServerBilling
+        | ServerBillingAsk(_)
         | AdminCreate
         | AdminOwners
         | AdminFinance
@@ -1631,6 +1719,31 @@ async fn message_handler(
         match msg.text().unwrap_or_default() {
             "/start" | "🏠 Админ-панель" => {
                 admin_dashboard(&bot, msg.chat.id, &vpn, &settings).await?;
+                return Ok(());
+            }
+            "🔎 Поиск" => {
+                bot.send_message(
+                    msg.chat.id,
+                    "Введите имя ключа, устройство, Telegram ID или username владельца:",
+                )
+                .await?;
+                dialogue.update(State::AwaitingAdminSearch).await?;
+                return Ok(());
+            }
+            "🚨 События" => {
+                let servers = settings.vpn_servers();
+                let alerts = servers
+                    .iter()
+                    .filter(|s| {
+                        matches!(s.status.as_str(), "warning" | "offline")
+                            || s.paid_until.is_some_and(|v| v <= now_epoch() + 7 * 86_400)
+                    })
+                    .count();
+                bot.send_message(msg.chat.id,format!("🚨 События\n\nСерверы требуют внимания: {alerts}\nОжидают оплаты: {}\nОткрытые обращения: {}",settings.pending_payments().len(),settings.open_support_count())).reply_markup(menu::admin_dashboard_menu()).await?;
+                return Ok(());
+            }
+            "👤 Кабинет" => {
+                bot.send_message(msg.chat.id,format!("👤 Администратор\nTelegram ID: {uid}\nЛичный баланс: {:.2} ₽\nЛичных ключей: {}",settings.balance_kopecks(uid) as f64/100.0,settings.user_client_names(uid).len())).reply_markup(menu::admin_keyboard()).await?;
                 return Ok(());
             }
             "👥 Клиенты" => {
@@ -2264,6 +2377,94 @@ async fn message_handler(
         } else {
             bot.send_message(msg.chat.id, "Введите цену в рублях, например 1000.")
                 .await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingServerAdd) {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let parts = msg
+            .text()
+            .unwrap_or_default()
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        let created = (parts.len() == 7)
+            .then(|| crate::store::NewVpnServer {
+                name: parts[0],
+                hostname: parts[1],
+                public_ip: parts[2],
+                provider: parts[3],
+                location: parts[4],
+                protocol: parts[5],
+                opened_at: crate::calendar::parse_date(parts[6]),
+                is_local: false,
+            })
+            .and_then(|value| settings.add_vpn_server(&value, uid, now_epoch()));
+        if let Some(id) = created {
+            dialogue.update(State::Idle).await?;
+            let server = settings.vpn_server(id).expect("server was just inserted");
+            bot.send_message(msg.chat.id, server_card_text(&server, now_epoch()))
+                .reply_markup(menu::server_card_menu(id))
+                .await?;
+        } else {
+            bot.send_message(msg.chat.id,"Не удалось сохранить. Формат: НАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | YYYY-MM-DD").await?;
+        }
+        return Ok(());
+    }
+    if let State::AwaitingServerBilling { server_id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let parts = msg
+            .text()
+            .unwrap_or_default()
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        let changed = if parts.len() == 5 {
+            match (
+                crate::calendar::parse_date(parts[0]),
+                parts[1].parse::<i64>().ok(),
+                parse_minor(parts[2]),
+            ) {
+                (Some(paid_until), Some(period_months), Some(cost_minor)) => settings
+                    .update_server_billing(
+                        server_id,
+                        &crate::store::ServerBillingUpdate {
+                            paid_until,
+                            period_months,
+                            cost_minor,
+                            currency: parts[3],
+                            auto_renew: matches!(
+                                parts[4].to_ascii_lowercase().as_str(),
+                                "да" | "yes" | "on" | "1"
+                            ),
+                        },
+                        now_epoch(),
+                    ),
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if changed {
+            dialogue.update(State::Idle).await?;
+            let server = settings
+                .vpn_server(server_id)
+                .expect("updated server exists");
+            bot.send_message(msg.chat.id, server_card_text(&server, now_epoch()))
+                .reply_markup(menu::server_card_menu(server_id))
+                .await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Неверный формат. Пример: 2026-09-15 | 1 | 6.00 | EUR | да",
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -3300,6 +3501,88 @@ async fn callback_handler(
             bot.send_message(chat, "🛡 Управление VPN-службой\n\nПроверка показывает состояние systemd-юнита, интерфейса, порта, маршрутизации, firewall и клиентов. Диагностика формирует подробный технический отчёт.\n\nПерезапуск кратковременно разорвёт активные VPN-соединения и требует подтверждения.")
                 .reply_markup(menu::vpn_service_menu())
                 .await?;
+        }
+        Action::AdminServers => {
+            servers_screen(&bot, chat, &settings).await?;
+        }
+        Action::AdminKeys => {
+            bot.send_message(
+                chat,
+                "🔑 Ключи\n\nСоздание, владельцы, группы, восстановление и массовое управление.",
+            )
+            .reply_markup(menu::admin_keys_hub())
+            .await?;
+        }
+        Action::AdminUsersHub => {
+            bot.send_message(
+                chat,
+                "👥 Пользователи\n\nCRM-карточки, поиск и роли сотрудников.",
+            )
+            .reply_markup(menu::admin_users_hub())
+            .await?;
+        }
+        Action::AdminCommunication => {
+            bot.send_message(
+                chat,
+                "💬 Связь\n\nТехническая поддержка и рассылки пользователям.",
+            )
+            .reply_markup(menu::admin_communication_hub())
+            .await?;
+        }
+        Action::AdminSystem => {
+            bot.send_message(
+                chat,
+                "⚙️ Система\n\nНастройки, резервные копии, VPN-служба и справка.",
+            )
+            .reply_markup(menu::admin_system_hub())
+            .await?;
+        }
+        Action::ServerAdd => {
+            bot.send_message(chat,"➕ Новый паспорт VPS\n\nОтправьте одной строкой:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | ДАТА ОТКРЫТИЯ\n\nПример:\nNetherlands #1 | nl1.example.com | 192.0.2.10 | Hoster | Amsterdam | modern | 2026-03-15").await?;
+            dialogue.update(State::AwaitingServerAdd).await?;
+        }
+        Action::ServerCard(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                bot.send_message(chat, server_card_text(&server, now_epoch()))
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+            }
+        }
+        Action::ServerBilling => {
+            let servers = settings.vpn_servers();
+            let lines = servers
+                .iter()
+                .map(|s| {
+                    format!(
+                        "• {} — {}",
+                        s.name,
+                        s.paid_until
+                            .map(crate::calendar::format_date)
+                            .unwrap_or_else(|| "не настроено".into())
+                    )
+                })
+                .collect::<Vec<_>>();
+            bot.send_message(
+                chat,
+                format!(
+                    "💳 Календарь оплаты серверов\n\n{}",
+                    if lines.is_empty() {
+                        "Серверы ещё не добавлены".into()
+                    } else {
+                        lines.join("\n")
+                    }
+                ),
+            )
+            .reply_markup(menu::servers_menu(&servers))
+            .await?;
+        }
+        Action::ServerBillingAsk(id) => {
+            if settings.vpn_server(id).is_some() {
+                bot.send_message(chat,"Введите:\nОПЛАЧЕН ДО | ПЕРИОД В МЕСЯЦАХ | СТОИМОСТЬ | ВАЛЮТА | АВТОПРОДЛЕНИЕ\n\nПример: 2026-09-15 | 1 | 6.00 | EUR | да").await?;
+                dialogue
+                    .update(State::AwaitingServerBilling { server_id: id })
+                    .await?;
+            }
         }
         Action::AdminCreate => {
             bot.send_message(chat,"➕ Создание ключей\n\nВыберите одиночное создание или пакет. После создания ключ можно привязать к пользователю и группе из его карточки.").reply_markup(menu::admin_create_menu()).await?;
@@ -6172,6 +6455,12 @@ mod tests {
         let keyboards = vec![
             menu::main_menu(Lang::Ru),
             menu::admin_dashboard_menu(),
+            menu::admin_keys_hub(),
+            menu::admin_users_hub(),
+            menu::admin_communication_hub(),
+            menu::admin_system_hub(),
+            menu::servers_menu(&[]),
+            menu::server_card_menu(1),
             menu::vpn_service_menu(),
             menu::admin_create_menu(),
             menu::admin_roles_menu(),
@@ -6253,6 +6542,15 @@ mod tests {
         let samples = vec![
             AdminDashboard,
             AdminVpn,
+            AdminServers,
+            AdminKeys,
+            AdminUsersHub,
+            AdminCommunication,
+            AdminSystem,
+            ServerAdd,
+            ServerCard(1),
+            ServerBilling,
+            ServerBillingAsk(1),
             AdminCreate,
             AdminOwners,
             AdminFinance,
@@ -6363,6 +6661,15 @@ mod tests {
             match sample {
                 AdminDashboard => {}
                 AdminVpn => {}
+                AdminServers => {}
+                AdminKeys => {}
+                AdminUsersHub => {}
+                AdminCommunication => {}
+                AdminSystem => {}
+                ServerAdd => {}
+                ServerCard(_) => {}
+                ServerBilling => {}
+                ServerBillingAsk(_) => {}
                 AdminCreate => {}
                 AdminOwners => {}
                 AdminFinance => {}
@@ -6660,6 +6967,15 @@ mod tests {
             (Action::FinanceExport, true, false),
             (Action::AdminDashboard, true, false),
             (Action::AdminVpn, true, false),
+            (Action::AdminServers, true, false),
+            (Action::AdminKeys, true, false),
+            (Action::AdminUsersHub, true, false),
+            (Action::AdminCommunication, true, false),
+            (Action::AdminSystem, true, false),
+            (Action::ServerAdd, true, false),
+            (Action::ServerCard(1), true, false),
+            (Action::ServerBilling, true, false),
+            (Action::ServerBillingAsk(1), true, false),
             (Action::AdminCreate, true, false),
             (Action::AdminOwners, true, false),
             (Action::AdminFinance, true, false),

@@ -16,6 +16,39 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+pub fn parse_date(value: &str) -> Option<i64> {
+    let mut parts = value.trim().split('-');
+    let year = parts.next()?.parse::<i64>().ok()?;
+    let month = parts.next()?.parse::<i64>().ok()?;
+    let day = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() || !(1970..=2200).contains(&year) || !(1..=12).contains(&month) {
+        return None;
+    }
+    let max_day = match month {
+        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=max_day)
+        .contains(&day)
+        .then(|| days_from_civil(year, month, day) * 86_400)
+}
+
+pub fn format_date(epoch: i64) -> String {
+    let z = epoch.div_euclid(86_400) + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    format!("{day:02}.{month:02}.{year:04}")
+}
+
 pub fn year_at(epoch: i64) -> i64 {
     let z = epoch.div_euclid(86_400) + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -66,5 +99,13 @@ mod tests {
             legacy_renewal_target(1_799_000_000, Some(LEGACY_RESTORE_DEADLINE)),
             1_830_297_599
         );
+    }
+
+    #[test]
+    fn parses_and_formats_dates() {
+        let epoch = parse_date("2026-08-21").unwrap();
+        assert_eq!(format_date(epoch), "21.08.2026");
+        assert!(parse_date("2026-02-29").is_none());
+        assert!(parse_date("2028-02-29").is_some());
     }
 }

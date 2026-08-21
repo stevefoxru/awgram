@@ -10,6 +10,7 @@ use rusqlite::Connection;
 mod commerce;
 mod events;
 mod groups;
+mod servers;
 mod settings;
 mod stats;
 
@@ -22,6 +23,7 @@ pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
     INVITE_TTL_SECS,
 };
+pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
 pub use stats::{PeriodTotals, Sample, TrafficSummary};
 
 /// SQL-батчи миграций: индекс в массиве + 1 == schema_version после применения.
@@ -303,6 +305,51 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_client_self_refreshes_user ON client_self_refreshes(user_id,last_requested_at);
     "#,
+    // v12: реестр VPN-серверов, паспорта VPS и календарь оплаты.
+    r#"
+    CREATE TABLE vpn_servers(
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        hostname TEXT NOT NULL,
+        public_ip TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        location TEXT NOT NULL,
+        protocol TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        enabled_for_provisioning INTEGER NOT NULL DEFAULT 0,
+        opened_at INTEGER,
+        added_at INTEGER NOT NULL,
+        paid_until INTEGER,
+        billing_period_months INTEGER,
+        cost_minor INTEGER,
+        currency TEXT,
+        auto_renew INTEGER NOT NULL DEFAULT 0,
+        panel_url TEXT,
+        order_ref TEXT,
+        note TEXT,
+        is_local INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE server_payment_events(
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        paid_at INTEGER NOT NULL,
+        paid_until INTEGER NOT NULL,
+        amount_minor INTEGER,
+        currency TEXT,
+        actor_id INTEGER NOT NULL,
+        note TEXT
+    );
+    CREATE TABLE server_billing_notifications(
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        paid_until INTEGER NOT NULL,
+        threshold_days INTEGER NOT NULL,
+        sent_at INTEGER NOT NULL,
+        PRIMARY KEY(server_id,paid_until,threshold_days)
+    );
+    CREATE INDEX idx_vpn_servers_paid_until ON vpn_servers(paid_until,status);
+    "#,
 ];
 
 pub struct Store {
@@ -390,7 +437,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 11);
+        assert_eq!(store.schema_version(), 12);
     }
 
     #[test]
@@ -399,12 +446,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 11);
+        assert_eq!(store.schema_version(), 12);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 11);
+        assert_eq!(store.schema_version(), 12);
     }
 }

@@ -121,6 +121,10 @@ pub enum State {
         id: i64,
     },
     AwaitingLegacyPrice,
+    AwaitingServerAdd,
+    AwaitingServerBilling {
+        server_id: i64,
+    },
 }
 
 #[cfg(test)]

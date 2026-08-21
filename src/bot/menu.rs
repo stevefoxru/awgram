@@ -81,17 +81,13 @@ pub fn admin_keyboard() -> KeyboardMarkup {
     KeyboardMarkup::new(vec![
         vec![
             KeyboardButton::new("🏠 Админ-панель"),
-            KeyboardButton::new("👥 Клиенты"),
+            KeyboardButton::new("🔎 Поиск"),
         ],
         vec![
-            KeyboardButton::new("💳 Финансы"),
-            KeyboardButton::new("🔗 Владельцы"),
-        ],
-        vec![
-            KeyboardButton::new("📣 Рассылка"),
+            KeyboardButton::new("🚨 События"),
             KeyboardButton::new("🆘 Обращения"),
         ],
-        vec![KeyboardButton::new("⚙️ Настройки")],
+        vec![KeyboardButton::new("👤 Кабинет")],
     ])
     .resize_keyboard()
     .persistent()
@@ -99,35 +95,107 @@ pub fn admin_keyboard() -> KeyboardMarkup {
 
 pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("➕ Создание ключей", "admin:create")],
-        vec![cb("📊 Статистика", "stats"), cb("🔎 Поиск", "admin:search")],
         vec![
-            cb("👥 Клиенты", "list"),
-            cb("👤 Пользователи", "admin:owners"),
+            cb("🖥 Серверы", "admin:servers"),
+            cb("🔑 Ключи", "admin:keys"),
         ],
         vec![
+            cb("👥 Пользователи", "admin:users"),
             cb("💳 Финансы", "admin:finance"),
-            cb("🆘 Поддержка", "admin:support"),
         ],
         vec![
-            cb("🗂 Группы", "groups"),
+            cb("📊 Аналитика", "stats"),
+            cb("💬 Связь", "admin:communication"),
+        ],
+        vec![cb("⚙️ Система", "admin:system")],
+        vec![
+            cb("🔎 Поиск", "admin:search"),
+            cb("🔄 Обновить", "admin:dashboard"),
+        ],
+    ])
+}
+
+pub fn admin_keys_hub() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("➕ Создание ключей", "admin:create"),
+            cb("📋 Все ключи", "list"),
+        ],
+        vec![cb("🗂 Группы", "groups"), cb("🔗 Владельцы", "admin:owners")],
+        vec![cb("🧰 Массовые операции", "admin:bulk:menu")],
+        vec![cb("♻️ Восстановление старых", "admin:legacy")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn admin_users_hub() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("📋 Все пользователи", "admin:owners"),
+            cb("🔎 Поиск", "admin:search"),
+        ],
+        vec![cb("🧑‍💼 Роли сотрудников", "admin:roles")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn admin_communication_hub() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("🆘 Поддержка", "admin:support"),
             cb("📣 Рассылка", "admin:broadcast"),
         ],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn admin_system_hub() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
         vec![
-            cb("🛡 VPN-служба", "admin:vpn"),
+            cb("⚙️ Настройки", "settings"),
             cb("💾 Резервные копии", "backup"),
         ],
         vec![
-            cb("⚙️ Настройки", "settings"),
-            cb("🔄 Обновить", "admin:dashboard"),
+            cb("🛡 VPN-служба", "admin:vpn"),
+            cb("ℹ️ Справка", "admin:help"),
         ],
-        vec![cb("🎟 Промокоды", "admin:promos")],
-        vec![cb("♻️ Legacy-ключи", "admin:legacy")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup {
+    let mut rows = servers
+        .iter()
+        .map(|server| {
+            let icon = match server.status.as_str() {
+                "online" => "🟢",
+                "warning" => "🟠",
+                "offline" => "🔴",
+                "maintenance" => "🚧",
+                _ => "⚪",
+            };
+            vec![cb(
+                &format!("{icon} {} · {}", server.name, server.location),
+                &format!("server:{}", server.id),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![
+        cb("➕ Добавить паспорт VPS", "server:add"),
+        cb("💳 Календарь оплаты", "server:billing"),
+    ]);
+    rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("💳 Настроить оплату", &format!("server:bill:{id}"))],
+        vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
-            cb("🧰 Массовое управление", "admin:bulk:menu"),
-            cb("🧑‍💼 Роли", "admin:roles"),
+            cb("⬅️ Все серверы", "admin:servers"),
+            cb("🏠 Админ-панель", "admin:dashboard"),
         ],
-        vec![cb("ℹ️ Справка", "admin:help")],
     ])
 }
 
@@ -1833,23 +1901,14 @@ mod tests {
     fn admin_dashboard_reaches_every_primary_section() {
         let data = all_callback_data(&admin_dashboard_menu());
         for expected in [
-            "admin:create",
-            "stats",
-            "admin:search",
-            "list",
-            "admin:owners",
+            "admin:servers",
+            "admin:keys",
+            "admin:users",
             "admin:finance",
-            "admin:support",
-            "groups",
-            "admin:broadcast",
-            "admin:vpn",
-            "backup",
-            "settings",
-            "admin:help",
-            "admin:promos",
-            "admin:legacy",
-            "admin:bulk:menu",
-            "admin:roles",
+            "stats",
+            "admin:communication",
+            "admin:system",
+            "admin:search",
         ] {
             assert!(
                 data.iter().any(|value| value == expected),

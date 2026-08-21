@@ -66,6 +66,47 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         }
     }
 
+    for server in store.vpn_servers() {
+        let Some(paid_until) = server.paid_until else {
+            continue;
+        };
+        let seconds = paid_until - now;
+        let days = seconds.div_euclid(86_400);
+        let threshold = match days {
+            i64::MIN..=-1 => Some(-1),
+            0 => Some(0),
+            1 => Some(1),
+            2..=3 => Some(3),
+            4..=7 => Some(7),
+            8..=14 => Some(14),
+            _ => None,
+        };
+        let Some(threshold) = threshold else {
+            continue;
+        };
+        if !store.mark_server_billing_notification(server.id, paid_until, threshold, now) {
+            continue;
+        }
+        let cost = server
+            .cost_minor
+            .map(|v| {
+                format!(
+                    "{:.2} {}",
+                    v as f64 / 100.0,
+                    server.currency.as_deref().unwrap_or("")
+                )
+            })
+            .unwrap_or_else(|| "не указана".into());
+        let urgency = if days < 0 {
+            format!("просрочено на {} дн.", -days)
+        } else if days == 0 {
+            "сегодня".into()
+        } else {
+            format!("через {days} дн.")
+        };
+        notify_admins(bot,cfg,format!("💳 Оплата VPN-сервера {urgency}\n\n🖥 {}\n🏢 {}\n🌐 {}\n📅 Оплачен до: {}\n💰 Сумма: {}",server.name,server.provider,server.public_ip,crate::calendar::format_date(paid_until),cost)).await;
+    }
+
     let Some(parent) = cfg.db_path.parent() else {
         return;
     };
