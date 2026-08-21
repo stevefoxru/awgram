@@ -123,8 +123,7 @@ impl Store {
     ) -> bool {
         if value.paid_until <= now
             || !(1..=120).contains(&value.period_months)
-            || value.cost_minor < 0
-            || value.cost_minor > 1_000_000_000
+            || !(0..=1_000_000_000).contains(&value.cost_minor)
             || value.currency.trim().is_empty()
             || value.currency.chars().count() > 8
         {

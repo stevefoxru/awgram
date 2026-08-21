@@ -32,7 +32,7 @@ pub fn parse_date(value: &str) -> Option<i64> {
     };
     (1..=max_day)
         .contains(&day)
-        .then(|| days_from_civil(year, month, day) * 86_400)
+        .then_some(days_from_civil(year, month, day) * 86_400)
 }
 
 pub fn format_date(epoch: i64) -> String {

@@ -2391,8 +2391,8 @@ async fn message_handler(
             .split('|')
             .map(str::trim)
             .collect::<Vec<_>>();
-        let created = (parts.len() == 7)
-            .then(|| crate::store::NewVpnServer {
+        let created = if parts.len() == 7 {
+            let value = crate::store::NewVpnServer {
                 name: parts[0],
                 hostname: parts[1],
                 public_ip: parts[2],
@@ -2401,8 +2401,11 @@ async fn message_handler(
                 protocol: parts[5],
                 opened_at: crate::calendar::parse_date(parts[6]),
                 is_local: false,
-            })
-            .and_then(|value| settings.add_vpn_server(&value, uid, now_epoch()));
+            };
+            settings.add_vpn_server(&value, uid, now_epoch())
+        } else {
+            None
+        };
         if let Some(id) = created {
             dialogue.update(State::Idle).await?;
             let server = settings.vpn_server(id).expect("server was just inserted");
