@@ -97,12 +97,10 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                 )
             })
             .unwrap_or_else(|| "не указана".into());
-        let urgency = if days < 0 {
-            format!("просрочено на {} дн.", -days)
-        } else if days == 0 {
-            "сегодня".into()
-        } else {
-            format!("через {days} дн.")
+        let urgency = match days.cmp(&0) {
+            std::cmp::Ordering::Less => format!("просрочено на {} дн.", -days),
+            std::cmp::Ordering::Equal => "сегодня".into(),
+            std::cmp::Ordering::Greater => format!("через {days} дн."),
         };
         notify_admins(bot,cfg,format!("💳 Оплата VPN-сервера {urgency}\n\n🖥 {}\n🏢 {}\n🌐 {}\n📅 Оплачен до: {}\n💰 Сумма: {}",server.name,server.provider,server.public_ip,crate::calendar::format_date(paid_until),cost)).await;
     }
