@@ -348,11 +348,20 @@ pick_channel_tag() { # $1=канал; stdin=теги по строке (новы
 }
 
 fetch_latest_tag() { # $1=канал (пусто → stable)
-  local ch="${1:-stable}" tag
+  local ch="${1:-stable}" tag latest_url
   if [ "$ch" = "stable" ]; then
-    # /releases/latest игнорирует prerelease — прежнее поведение без изменений
-    tag="$(curl -fsSL "${CURL_BASE[@]}" --max-time 30 "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
-          | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)" || true
+    # Обычный github.com redirect не расходует лимит GitHub API, который у
+    # хостинговых VPS часто разделяется между множеством клиентов.
+    latest_url="$(curl -fsSL "${CURL_BASE[@]}" --max-time 30 -o /dev/null \
+      -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null)" || true
+    case "$latest_url" in
+      */releases/tag/*) tag="${latest_url##*/releases/tag/}"; tag="${tag%%[?#]*}" ;;
+    esac
+    # Резерв для GitHub Enterprise/proxy, не поддерживающих redirect latest.
+    if [ -z "$tag" ]; then
+      tag="$(curl -fsSL "${CURL_BASE[@]}" --max-time 30 "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+            | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)" || true
+    fi
   else
     # список отсортирован по дате создания (новые сверху) — берём первый тег,
     # проходящий фильтр канала; prerelease-поле API не нужно, фильтр по суффиксу
