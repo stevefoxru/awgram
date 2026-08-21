@@ -24,8 +24,10 @@ pub fn parse_date(value: &str) -> Option<i64> {
     if parts.next().is_some() || !(1970..=2200).contains(&year) || !(1..=12).contains(&month) {
         return None;
     }
+    let leap_year =
+        year.rem_euclid(400) == 0 || (year.rem_euclid(4) == 0 && year.rem_euclid(100) != 0);
     let max_day = match month {
-        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 if leap_year => 29,
         2 => 28,
         4 | 6 | 9 | 11 => 30,
         _ => 31,
