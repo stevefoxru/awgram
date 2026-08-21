@@ -199,6 +199,13 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("✏️ Паспорт", &format!("server:edit:{id}")),
             cb("💳 Оплата", &format!("server:bill:{id}")),
         ],
+        vec![
+            cb("🔗 Подключить VPS", &format!("server:enroll:{id}")),
+            cb(
+                "🚫 Отозвать подключение",
+                &format!("server:enroll:revoke:{id}"),
+            ),
+        ],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),

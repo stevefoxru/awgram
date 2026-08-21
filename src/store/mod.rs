@@ -10,6 +10,7 @@ use rusqlite::Connection;
 mod commerce;
 mod events;
 mod groups;
+mod server_enrollment;
 mod servers;
 mod settings;
 mod stats;
@@ -23,6 +24,7 @@ pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
     INVITE_TTL_SECS,
 };
+pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
 pub use stats::{PeriodTotals, Sample, TrafficSummary};
 
@@ -350,6 +352,21 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_vpn_servers_paid_until ON vpn_servers(paid_until,status);
     "#,
+    // v13: одноразовые bootstrap-приглашения для удалённых VPN-узлов.
+    // В БД хранится только SHA-256 токена; исходный секрет показывается один раз.
+    r#"
+    CREATE TABLE server_enrollments(
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_by INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER,
+        revoked_at INTEGER
+    );
+    CREATE INDEX idx_server_enrollments_server ON server_enrollments(server_id,expires_at);
+    "#,
 ];
 
 pub struct Store {
@@ -437,7 +454,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 12);
+        assert_eq!(store.schema_version(), 13);
     }
 
     #[test]
@@ -446,12 +463,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 12);
+        assert_eq!(store.schema_version(), 13);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 12);
+        assert_eq!(store.schema_version(), 13);
     }
 }

@@ -28,6 +28,8 @@ pub enum Action {
     ServerBilling,
     ServerBillingAsk(i64),
     ServerPassportAsk(i64),
+    ServerEnroll(i64),
+    ServerEnrollRevoke(i64),
     AdminCreate,
     AdminOwners,
     AdminFinance,
@@ -349,6 +351,14 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:edit:") {
                 v.parse()
                     .map(Action::ServerPassportAsk)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:enroll:revoke:") {
+                v.parse()
+                    .map(Action::ServerEnrollRevoke)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:enroll:") {
+                v.parse()
+                    .map(Action::ServerEnroll)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:") {
                 v.parse().map(Action::ServerCard).unwrap_or(Action::Unknown)
@@ -1203,6 +1213,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerBilling
         | ServerBillingAsk(_)
         | ServerPassportAsk(_)
+        | ServerEnroll(_)
+        | ServerEnrollRevoke(_)
         | AdminCreate
         | AdminOwners
         | AdminFinance
@@ -3642,6 +3654,34 @@ async fn callback_handler(
                     .update(State::AwaitingServerPassport { server_id: id })
                     .await?;
             }
+        }
+        Action::ServerEnroll(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                if server.is_local {
+                    bot.send_message(
+                        chat,
+                        "🏠 Локальный сервер уже подключён напрямую к боту и не требует bootstrap.",
+                    )
+                    .await?;
+                } else if let Some(issue) = settings.create_server_enrollment(id, uid, now_epoch())
+                {
+                    let command = format!("curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/node-bootstrap.sh | sudo bash -s -- --server-id {} --token {} --protocol {}",server.id,issue.token,server.protocol);
+                    bot.send_message(chat,format!("🔐 Одноразовое подключение сервера\n\nКоманда действует 30 минут и показывается только сейчас. Запустите её от root на VPS {} ({}). Повторное создание автоматически отзывает предыдущий токен.\n\n{}\n\nНа этом этапе команда безопасно зарегистрирует заготовку узла. Пароль SSH боту не передаётся и в базе не хранится.",server.name,server.public_ip,command)).reply_markup(menu::server_card_menu(id)).await?;
+                }
+            }
+        }
+        Action::ServerEnrollRevoke(id) => {
+            let revoked = settings.revoke_server_enrollments(id, now_epoch());
+            bot.send_message(
+                chat,
+                if revoked {
+                    "✅ Активное приглашение подключения отозвано."
+                } else {
+                    "Активных приглашений для этого сервера нет."
+                },
+            )
+            .reply_markup(menu::server_card_menu(id))
+            .await?;
         }
         Action::AdminCreate => {
             bot.send_message(chat,"➕ Создание ключей\n\nВыберите одиночное создание или пакет. После создания ключ можно привязать к пользователю и группе из его карточки.").reply_markup(menu::admin_create_menu()).await?;
@@ -6611,6 +6651,8 @@ mod tests {
             ServerBilling,
             ServerBillingAsk(1),
             ServerPassportAsk(1),
+            ServerEnroll(1),
+            ServerEnrollRevoke(1),
             AdminCreate,
             AdminOwners,
             AdminFinance,
@@ -6731,6 +6773,8 @@ mod tests {
                 ServerBilling => {}
                 ServerBillingAsk(_) => {}
                 ServerPassportAsk(_) => {}
+                ServerEnroll(_) => {}
+                ServerEnrollRevoke(_) => {}
                 AdminCreate => {}
                 AdminOwners => {}
                 AdminFinance => {}
@@ -7038,6 +7082,8 @@ mod tests {
             (Action::ServerBilling, true, false),
             (Action::ServerBillingAsk(1), true, false),
             (Action::ServerPassportAsk(1), true, false),
+            (Action::ServerEnroll(1), true, false),
+            (Action::ServerEnrollRevoke(1), true, false),
             (Action::AdminCreate, true, false),
             (Action::AdminOwners, true, false),
             (Action::AdminFinance, true, false),
