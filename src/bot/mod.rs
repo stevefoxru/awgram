@@ -125,6 +125,9 @@ pub enum State {
     AwaitingServerBilling {
         server_id: i64,
     },
+    AwaitingServerPassport {
+        server_id: i64,
+    },
 }
 
 #[cfg(test)]

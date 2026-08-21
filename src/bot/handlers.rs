@@ -27,6 +27,7 @@ pub enum Action {
     ServerCard(i64),
     ServerBilling,
     ServerBillingAsk(i64),
+    ServerPassportAsk(i64),
     AdminCreate,
     AdminOwners,
     AdminFinance,
@@ -344,6 +345,10 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:bill:") {
                 v.parse()
                     .map(Action::ServerBillingAsk)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:edit:") {
+                v.parse()
+                    .map(Action::ServerPassportAsk)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:") {
                 v.parse().map(Action::ServerCard).unwrap_or(Action::Unknown)
@@ -857,8 +862,8 @@ fn server_card_text(server: &crate::store::VpnServer, now: i64) -> String {
         .map(|v| (v - now).div_euclid(86_400))
         .map(|v| format!("{v} дн."))
         .unwrap_or_else(|| "—".into());
-    format!("🖥 {}\n\nСтатус: {}\nHostname: {}\nIP: {}\nХостер: {}\nЛокация: {}\nПротокол: {}\nОткрыт: {}\nДобавлен в бот: {}\nОплачен до: {}\nДо оплаты: {}\nСтоимость: {}\nПериод: {} мес.\nАвтопродление: {}",
-        server.name,server.status,server.hostname,server.public_ip,server.provider,server.location,server.protocol,opened,crate::calendar::format_date(server.added_at),paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"})
+    format!("🖥 {}\n\nУзел: {}\nСтатус: {}\nHostname: {}\nIP: {}\nХостер: {}\nЛокация: {}\nПротокол: {}\nОткрыт: {}\nДобавлен в бот: {}\nОплачен до: {}\nДо оплаты: {}\nСтоимость: {}\nПериод: {} мес.\nАвтопродление: {}",
+        server.name,if server.is_local{"локальный — здесь работают бот и VPN"}else{"удалённый"},server.status,server.hostname,server.public_ip,server.provider,server.location,server.protocol,opened,crate::calendar::format_date(server.added_at),paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"})
 }
 
 async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
@@ -1197,6 +1202,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerCard(_)
         | ServerBilling
         | ServerBillingAsk(_)
+        | ServerPassportAsk(_)
         | AdminCreate
         | AdminOwners
         | AdminFinance
@@ -2471,6 +2477,48 @@ async fn message_handler(
         }
         return Ok(());
     }
+    if let State::AwaitingServerPassport { server_id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let parts = msg
+            .text()
+            .unwrap_or_default()
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        let changed = if parts.len() == 7 {
+            settings.update_server_passport(
+                server_id,
+                &crate::store::NewVpnServer {
+                    name: parts[0],
+                    hostname: parts[1],
+                    public_ip: parts[2],
+                    provider: parts[3],
+                    location: parts[4],
+                    protocol: parts[5],
+                    opened_at: crate::calendar::parse_date(parts[6]),
+                    is_local: false,
+                },
+                now_epoch(),
+            )
+        } else {
+            false
+        };
+        if changed {
+            dialogue.update(State::Idle).await?;
+            let server = settings
+                .vpn_server(server_id)
+                .expect("updated server exists");
+            bot.send_message(msg.chat.id, server_card_text(&server, now_epoch()))
+                .reply_markup(menu::server_card_menu(server_id))
+                .await?;
+        } else {
+            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Формат: НАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | YYYY-MM-DD").await?;
+        }
+        return Ok(());
+    }
     if role == Role::Denied && settings.user_blocked(uid) {
         if msg.text() == Some("🆘 Поддержка") {
             bot.send_message(msg.chat.id, "Выберите тему обращения:")
@@ -3584,6 +3632,14 @@ async fn callback_handler(
                 bot.send_message(chat,"Введите:\nОПЛАЧЕН ДО | ПЕРИОД В МЕСЯЦАХ | СТОИМОСТЬ | ВАЛЮТА | АВТОПРОДЛЕНИЕ\n\nПример: 2026-09-15 | 1 | 6.00 | EUR | да").await?;
                 dialogue
                     .update(State::AwaitingServerBilling { server_id: id })
+                    .await?;
+            }
+        }
+        Action::ServerPassportAsk(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                bot.send_message(chat,format!("✏️ Редактирование паспорта\n\nОтправьте:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | ДАТА ОТКРЫТИЯ\n\nТекущие данные:\n{} | {} | {} | {} | {} | {} | {}",server.name,server.hostname,server.public_ip,server.provider,server.location,server.protocol,server.opened_at.map(crate::calendar::format_date).unwrap_or_else(||"YYYY-MM-DD".into()))).await?;
+                dialogue
+                    .update(State::AwaitingServerPassport { server_id: id })
                     .await?;
             }
         }
@@ -6554,6 +6610,7 @@ mod tests {
             ServerCard(1),
             ServerBilling,
             ServerBillingAsk(1),
+            ServerPassportAsk(1),
             AdminCreate,
             AdminOwners,
             AdminFinance,
@@ -6673,6 +6730,7 @@ mod tests {
                 ServerCard(_) => {}
                 ServerBilling => {}
                 ServerBillingAsk(_) => {}
+                ServerPassportAsk(_) => {}
                 AdminCreate => {}
                 AdminOwners => {}
                 AdminFinance => {}
@@ -6979,6 +7037,7 @@ mod tests {
             (Action::ServerCard(1), true, false),
             (Action::ServerBilling, true, false),
             (Action::ServerBillingAsk(1), true, false),
+            (Action::ServerPassportAsk(1), true, false),
             (Action::AdminCreate, true, false),
             (Action::AdminOwners, true, false),
             (Action::AdminFinance, true, false),

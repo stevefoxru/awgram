@@ -73,6 +73,47 @@ fn server_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VpnServer> {
 const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local";
 
 impl Store {
+    pub fn ensure_local_vpn_server(&self, hostname: &str, actor: i64, now: i64) -> Option<i64> {
+        let hostname = hostname.trim();
+        if hostname.is_empty() {
+            return None;
+        }
+        self.with_conn(|c| {
+            if let Some(id) = c
+                .query_row(
+                    "SELECT id FROM vpn_servers WHERE is_local=1 ORDER BY id LIMIT 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+            {
+                return Ok(id);
+            }
+            if let Some(id) = c
+                .query_row(
+                    "SELECT id FROM vpn_servers WHERE hostname=?1 ORDER BY id LIMIT 1",
+                    [hostname],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+            {
+                c.execute(
+                    "UPDATE vpn_servers SET is_local=1,updated_at=?2 WHERE id=?1",
+                    rusqlite::params![id, now],
+                )?;
+                return Ok(id);
+            }
+            let name = format!("Локальный · {hostname}");
+            c.execute(
+                "INSERT INTO vpn_servers(name,hostname,public_ip,provider,location,protocol,status,is_local,created_by,added_at,updated_at)
+                 VALUES(?1,?2,'не указан','не указан','не указана','modern','unknown',1,?3,?4,?4)",
+                rusqlite::params![name, hostname, actor, now],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .ok()
+    }
+
     pub fn add_vpn_server(&self, value: &NewVpnServer<'_>, actor: i64, now: i64) -> Option<i64> {
         let valid = !value.name.trim().is_empty()
             && !value.hostname.trim().is_empty()
@@ -133,6 +174,34 @@ impl Store {
             "UPDATE vpn_servers SET paid_until=?2,billing_period_months=?3,cost_minor=?4,currency=?5,auto_renew=?6,updated_at=?7 WHERE id=?1",
             rusqlite::params![id,value.paid_until,value.period_months,value.cost_minor,value.currency.trim().to_uppercase(),value.auto_renew as i64,now]
         )).is_ok_and(|n|n==1)
+    }
+
+    pub fn update_server_passport(&self, id: i64, value: &NewVpnServer<'_>, now: i64) -> bool {
+        if value.name.trim().is_empty()
+            || value.hostname.trim().is_empty()
+            || value.public_ip.trim().is_empty()
+            || !matches!(value.protocol, "modern" | "legacy")
+        {
+            return false;
+        }
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE vpn_servers SET name=?2,hostname=?3,public_ip=?4,provider=?5,location=?6,protocol=?7,opened_at=?8,updated_at=?9 WHERE id=?1",
+                rusqlite::params![id,value.name.trim(),value.hostname.trim(),value.public_ip.trim(),value.provider.trim(),value.location.trim(),value.protocol,value.opened_at,now],
+            )
+        })
+        .is_ok_and(|n| n == 1)
+    }
+
+    pub fn set_local_server_status(&self, status: &str, now: i64) -> bool {
+        let Some(server) = self
+            .vpn_servers()
+            .into_iter()
+            .find(|server| server.is_local)
+        else {
+            return false;
+        };
+        self.set_server_status(server.id, status, now)
     }
 
     pub fn set_server_status(&self, id: i64, status: &str, now: i64) -> bool {
@@ -205,5 +274,31 @@ mod tests {
         assert!(server.auto_renew);
         assert!(store.mark_server_billing_notification(id, 10_000, 7, 400));
         assert!(!store.mark_server_billing_notification(id, 10_000, 7, 401));
+    }
+
+    #[test]
+    fn local_server_is_created_once_and_can_be_completed() {
+        let store = Store::open_in_memory();
+        let id = store.ensure_local_vpn_server("nl26", 1, 100).unwrap();
+        assert_eq!(store.ensure_local_vpn_server("nl26", 1, 200), Some(id));
+        assert_eq!(store.vpn_servers().len(), 1);
+        assert!(store.vpn_server(id).unwrap().is_local);
+        assert!(store.update_server_passport(
+            id,
+            &NewVpnServer {
+                name: "Netherlands main",
+                hostname: "nl26",
+                public_ip: "192.0.2.26",
+                provider: "Hoster",
+                location: "Amsterdam",
+                protocol: "modern",
+                opened_at: Some(50),
+                is_local: true,
+            },
+            300
+        ));
+        assert_eq!(store.vpn_server(id).unwrap().provider, "Hoster");
+        assert!(store.set_local_server_status("online", 400));
+        assert_eq!(store.vpn_server(id).unwrap().status, "online");
     }
 }

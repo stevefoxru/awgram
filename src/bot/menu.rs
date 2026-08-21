@@ -175,7 +175,12 @@ pub fn servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup
                 _ => "⚪",
             };
             vec![cb(
-                &format!("{icon} {} · {}", server.name, server.location),
+                &format!(
+                    "{icon} {}{} · {}",
+                    if server.is_local { "🏠 " } else { "" },
+                    server.name,
+                    server.location
+                ),
                 &format!("server:{}", server.id),
             )]
         })
@@ -190,7 +195,10 @@ pub fn servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup
 
 pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("💳 Настроить оплату", &format!("server:bill:{id}"))],
+        vec![
+            cb("✏️ Паспорт", &format!("server:edit:{id}")),
+            cb("💳 Оплата", &format!("server:bill:{id}")),
+        ],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),

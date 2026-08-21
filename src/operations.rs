@@ -36,6 +36,7 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     match vpn.check().await {
         Ok(report) => {
             if let Some(details) = vpn_problem(&report) {
+                store.set_local_server_status("warning", now);
                 if store.update_monitor_state("vpn", "error", Some(&details), now) {
                     notify_admins(
                         bot,
@@ -44,16 +45,20 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                     )
                     .await;
                 }
-            } else if store.update_monitor_state("vpn", "ok", None, now) {
-                notify_admins(
-                    bot,
-                    cfg,
-                    "✅ Мониторинг: AmneziaWG снова работает штатно.".into(),
-                )
-                .await;
+            } else {
+                store.set_local_server_status("online", now);
+                if store.update_monitor_state("vpn", "ok", None, now) {
+                    notify_admins(
+                        bot,
+                        cfg,
+                        "✅ Мониторинг: AmneziaWG снова работает штатно.".into(),
+                    )
+                    .await;
+                }
             }
         }
         Err(error) => {
+            store.set_local_server_status("offline", now);
             let details = error.to_string();
             if store.update_monitor_state("vpn", "error", Some(&details), now) {
                 notify_admins(
