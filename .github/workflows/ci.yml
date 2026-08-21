@@ -23,7 +23,18 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        shell: bash
+        run: |
+          status=0
+          output="$(cargo clippy --all-targets -- -D warnings 2>&1)" || status=$?
+          printf '%s\n' "$output"
+          if (( status != 0 )); then
+            output="${output//'%'/'%25'}"
+            output="${output//$'\r'/'%0D'}"
+            output="${output//$'\n'/'%0A'}"
+            echo "::error title=Clippy failed::$output"
+            exit "$status"
+          fi
       - name: test
         run: cargo test
       - name: shellcheck installer
