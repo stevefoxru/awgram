@@ -6897,8 +6897,6 @@ mod tests {
             AdminUsersHub,
             AdminCommunication,
             AdminSystem,
-            AdminUpdate,
-            AdminUpdateRun,
             ServerAdd,
             ServerCard(1),
             ServerBilling,
@@ -6908,7 +6906,6 @@ mod tests {
             ServerEnrollRevoke(1),
             AdminCreate,
             AdminOwners,
-            AdminOwnersPage(0),
             AdminFinance,
             AdminSupport,
             AdminBroadcast,
@@ -7007,9 +7004,6 @@ mod tests {
             MoveClientTo(None, "s".into()),
             GroupScopeAsk,
             GroupScopeSet(crate::store::ListScope::All),
-            BuyServer(1),
-            CustomerMove("s".into()),
-            CustomerMoveServer("s".into(), 1),
             Unknown,
         ];
 
