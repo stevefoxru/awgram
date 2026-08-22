@@ -103,6 +103,7 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("👥 Пользователи", "admin:users"),
             cb("💳 Финансы", "admin:finance"),
         ],
+        vec![cb("🏷 Цены и промокоды", "admin:commerce")],
         vec![
             cb("📊 Аналитика", "stats"),
             cb("💬 Связь", "admin:communication"),
@@ -259,6 +260,24 @@ pub fn admin_promos_menu() -> InlineKeyboardMarkup {
         vec![cb("🎟 Создать скидочный", "admin:promo:discount")],
         vec![cb("♻️ Создать Legacy", "admin:promo:legacy")],
         vec![cb("♻️ Legacy-заявки", "admin:legacy")],
+        vec![cb("⬅️ Цены и промокоды", "admin:commerce")],
+    ])
+}
+
+pub fn admin_commerce_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("₽ Тарифы", "admin:prices:rub"),
+            cb("⭐ Stars", "admin:prices:stars"),
+        ],
+        vec![
+            cb("🎟 Промокоды", "admin:promos"),
+            cb("🤝 Реферальный %", "admin:referral"),
+        ],
+        vec![
+            cb("♻️ Legacy-тариф", "legacy:price"),
+            cb("💳 Реквизиты", "set:payment"),
+        ],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
@@ -353,15 +372,18 @@ pub fn admin_user_menu(user_id: i64, blocked: bool) -> InlineKeyboardMarkup {
     ])
 }
 
-pub fn buy_terms_menu() -> InlineKeyboardMarkup {
+pub fn buy_terms_menu(prices: [i64; 4]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
-            cb("1 месяц — 200 ₽", "buy:term:1"),
-            cb("3 месяца — 600 ₽", "buy:term:3"),
+            cb(&format!("1 месяц — {} ₽", prices[0] / 100), "buy:term:1"),
+            cb(&format!("3 месяца — {} ₽", prices[1] / 100), "buy:term:3"),
         ],
         vec![
-            cb("6 месяцев — 1000 ₽", "buy:term:6"),
-            cb("12 месяцев — 2000 ₽", "buy:term:12"),
+            cb(&format!("6 месяцев — {} ₽", prices[2] / 100), "buy:term:6"),
+            cb(
+                &format!("12 месяцев — {} ₽", prices[3] / 100),
+                "buy:term:12",
+            ),
         ],
     ])
 }
@@ -393,6 +415,10 @@ pub fn buy_method_menu(months: i64) -> InlineKeyboardMarkup {
         vec![cb(
             "💰 Внутренний баланс",
             &format!("buy:method:{months}:balance"),
+        )],
+        vec![cb(
+            "⭐ Telegram Stars",
+            &format!("buy:method:{months}:stars"),
         )],
     ])
 }
@@ -541,6 +567,23 @@ pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn expired_subscription_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🚀 ВОЗОБНОВИТЬ ТАРИФ", &format!("renew:{name}"))],
+        vec![cb("🆘 Нужна помощь", "support:new:connection")],
+        vec![cb("⬅️ Мои ключи", "mykeys")],
+    ])
+}
+
+pub fn instructions_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("📱 AmneziaVPN", "guide:amnezia")],
+        vec![cb("🛡 AmneziaWG", "guide:awg")],
+        vec![cb("🩺 Не подключается", "guide:trouble")],
+        vec![cb("🆘 Поддержка", "support:new:connection")],
+    ])
+}
+
 pub fn customer_move_servers_menu(
     name: &str,
     servers: &[crate::store::VpnServer],
@@ -575,15 +618,27 @@ pub fn customer_refresh_confirm_menu(name: &str) -> InlineKeyboardMarkup {
     ])
 }
 
-pub fn renew_terms_menu(name: &str) -> InlineKeyboardMarkup {
+pub fn renew_terms_menu(name: &str, prices: [i64; 4]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
-            cb("1 месяц — 200 ₽", &format!("renew:term:{name}:1")),
-            cb("3 месяца — 600 ₽", &format!("renew:term:{name}:3")),
+            cb(
+                &format!("1 месяц — {} ₽", prices[0] / 100),
+                &format!("renew:term:{name}:1"),
+            ),
+            cb(
+                &format!("3 месяца — {} ₽", prices[1] / 100),
+                &format!("renew:term:{name}:3"),
+            ),
         ],
         vec![
-            cb("6 месяцев — 1000 ₽", &format!("renew:term:{name}:6")),
-            cb("12 месяцев — 2000 ₽", &format!("renew:term:{name}:12")),
+            cb(
+                &format!("6 месяцев — {} ₽", prices[2] / 100),
+                &format!("renew:term:{name}:6"),
+            ),
+            cb(
+                &format!("12 месяцев — {} ₽", prices[3] / 100),
+                &format!("renew:term:{name}:12"),
+            ),
         ],
     ])
 }
@@ -614,6 +669,10 @@ pub fn renew_method_menu(name: &str, months: i64) -> InlineKeyboardMarkup {
         vec![cb(
             "💰 Внутренний баланс",
             &format!("renew:method:{name}:{months}:balance"),
+        )],
+        vec![cb(
+            "⭐ Telegram Stars",
+            &format!("renew:method:{name}:{months}:stars"),
         )],
     ])
 }

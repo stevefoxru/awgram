@@ -33,15 +33,19 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
         if left <= 0 || left > 86_400 || !store.claim_renewal_attempt(&name, expires_at, now) {
             continue;
         }
-        let (amount, seconds) = match months {
-            1 => (20_000, 30 * 86_400),
-            3 => (60_000, 90 * 86_400),
-            6 => (100_000, 180 * 86_400),
-            12 => (200_000, 365 * 86_400),
+        let seconds = match months {
+            1 => 30 * 86_400,
+            3 => 90 * 86_400,
+            6 => 180 * 86_400,
+            12 => 365 * 86_400,
             _ => {
                 store.finish_renewal_attempt(&name, expires_at, "invalid_tariff");
                 continue;
             }
+        };
+        let Some(amount) = store.tariff_price_kopecks(months) else {
+            store.finish_renewal_attempt(&name, expires_at, "invalid_tariff");
+            continue;
         };
         let reference = format!("autorenew:{name}:{expires_at}");
         if !store.spend_balance(user_id, amount, &reference, now) {
@@ -118,7 +122,11 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
             } else {
                 format!("⚠️ Срок действия ключа «{name}» закончится через {threshold} дн. Продлите подписку заранее, чтобы не потерять доступ.")
             };
-            match bot.send_message(ChatId(user_id), text).await {
+            let mut request = bot.send_message(ChatId(user_id), text);
+            if threshold == 0 {
+                request = request.reply_markup(crate::bot::menu::expired_subscription_menu(&name));
+            }
+            match request.await {
                 Ok(_) => {}
                 Err(error) => {
                     store.unmark_expiry_notification(&name, expires_at, threshold);

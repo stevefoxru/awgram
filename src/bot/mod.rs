@@ -75,6 +75,9 @@ pub enum State {
     },
     AwaitingTopupAmount,
     AwaitingPaymentInstructions,
+    AwaitingTariffPricesRub,
+    AwaitingTariffPricesStars,
+    AwaitingReferralPercent,
     AwaitingSupportMessage {
         category: String,
     },

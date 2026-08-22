@@ -13,6 +13,7 @@ mod groups;
 mod server_enrollment;
 mod servers;
 mod settings;
+mod stars;
 mod stats;
 
 pub use commerce::{
@@ -26,6 +27,7 @@ pub use groups::{
 };
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
+pub use stars::{StarOrder, StarPaymentClaim};
 pub use stats::{PeriodTotals, Sample, TrafficSummary};
 
 /// SQL-батчи миграций: индекс в массиве + 1 == schema_version после применения.
@@ -384,6 +386,27 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_clients_server ON clients(server_id,removed_at);
     CREATE INDEX idx_payments_server ON payment_requests(server_id,status);
+    "#,
+    // v15: Telegram Stars orders. Charge id is unique, making successful
+    // payment handling idempotent even if Telegram retries an update.
+    r#"
+    CREATE TABLE star_orders(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        kind TEXT NOT NULL CHECK(kind IN ('purchase','renew')),
+        months INTEGER NOT NULL,
+        stars INTEGER NOT NULL CHECK(stars > 0),
+        client_name TEXT,
+        server_id INTEGER REFERENCES vpn_servers(id),
+        status TEXT NOT NULL DEFAULT 'pending',
+        telegram_charge_id TEXT UNIQUE,
+        created_at INTEGER NOT NULL,
+        paid_at INTEGER,
+        fulfilled_at INTEGER,
+        failure TEXT
+    );
+    CREATE INDEX idx_star_orders_user ON star_orders(user_id,created_at);
+    CREATE INDEX idx_star_orders_status ON star_orders(status,created_at);
     "#,
 ];
 

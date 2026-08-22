@@ -113,6 +113,43 @@ impl Store {
     pub fn set_payment_instructions(&self, value: &str) {
         self.set_json("payment_instructions", &value.to_string());
     }
+    pub fn tariff_price_kopecks(&self, months: i64) -> Option<i64> {
+        let defaults = [20_000, 60_000, 100_000, 200_000];
+        let prices = self
+            .get_json::<[i64; 4]>("tariff_prices_kopecks")
+            .unwrap_or(defaults);
+        Some(
+            match months {
+                1 => prices[0],
+                3 => prices[1],
+                6 => prices[2],
+                12 => prices[3],
+                _ => return None,
+            }
+            .max(0),
+        )
+    }
+    pub fn set_tariff_prices_kopecks(&self, prices: [i64; 4]) {
+        self.set_json("tariff_prices_kopecks", &prices.map(|value| value.max(0)));
+    }
+    /// Telegram Stars are intentionally disabled until the owner sets all
+    /// four prices. Stars are not tied to a stable RUB exchange rate.
+    pub fn tariff_price_stars(&self, months: i64) -> Option<i64> {
+        let prices = self.get_json::<[i64; 4]>("tariff_prices_stars")?;
+        Some(
+            match months {
+                1 => prices[0],
+                3 => prices[1],
+                6 => prices[2],
+                12 => prices[3],
+                _ => return None,
+            }
+            .max(0),
+        )
+    }
+    pub fn set_tariff_prices_stars(&self, prices: [i64; 4]) {
+        self.set_json("tariff_prices_stars", &prices.map(|value| value.max(0)));
+    }
     pub fn referral_percent(&self) -> u8 {
         self.get_json::<u8>("referral_percent")
             .unwrap_or(25)
