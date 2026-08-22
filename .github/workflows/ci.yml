@@ -56,3 +56,7 @@ jobs:
         run: |
           shellcheck install.sh node-bootstrap.sh scripts/test-install.sh scripts/test-install-inner.sh
           bash -n install.sh node-bootstrap.sh
+          clientctl_end="$(grep -n '^AWGRAM_CLIENTCTL$' install.sh | cut -d: -f1)"
+          updatectl_start="$(grep -n '^install_updatectl()' install.sh | cut -d: -f1)"
+          test -n "$clientctl_end" && test -n "$updatectl_start"
+          test "$updatectl_start" -gt "$clientctl_end"

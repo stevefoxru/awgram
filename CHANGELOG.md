@@ -5,6 +5,12 @@ Format — [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning 
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-08-22
+
+- Исправлен установщик v0.16.0: функция установки `awgram-updatectl` была
+  ошибочно записана внутрь heredoc клиентского helper и не определялась при
+  `awgram-setup update`. Добавлена структурная CI-проверка границ heredoc.
+
 ## [0.16.0] - 2026-08-22
 
 - VPS, на котором запущены бот и текущая AmneziaWG, автоматически

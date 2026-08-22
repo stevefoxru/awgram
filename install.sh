@@ -458,20 +458,6 @@ disable_one() {
   printf '%s\n' "$(date +%s)" > "$disabled_dir/$n"
 }
 
-install_updatectl() {
-  install -d -m 755 /usr/local/libexec
-  cat > "$UPDATECTL_PATH" <<'AWGRAM_UPDATECTL'
-#!/usr/bin/env bash
-set -euo pipefail
-[[ "${1:-}" = "start" ]] || { echo 'usage: awgram-updatectl start' >&2; exit 2; }
-command -v systemd-run >/dev/null 2>&1 || { echo 'systemd-run is required' >&2; exit 3; }
-systemd-run --quiet --collect --unit=awgram-self-update \
-  /usr/local/bin/awgram-setup update --yes
-printf '{"ok":true,"unit":"awgram-self-update"}\n'
-AWGRAM_UPDATECTL
-  chmod 755 "$UPDATECTL_PATH"
-  chown root:root "$UPDATECTL_PATH"
-}
 enable_one() {
   local n="$1"
   valid_name "$n" || return 2
@@ -519,6 +505,21 @@ AWGRAM_CLIENTCTL
 */5 * * * * root AWGRAM_MANAGE_SCRIPT="$MANAGE_SCRIPT" "$CLIENTCTL_PATH" enforce "$CLIENTS_DIR" _ >/dev/null 2>&1
 EOF
   chmod 644 /etc/cron.d/awg-expiry
+}
+
+install_updatectl() {
+  install -d -m 755 /usr/local/libexec
+  cat > "$UPDATECTL_PATH" <<'AWGRAM_UPDATECTL'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" = "start" ]] || { echo 'usage: awgram-updatectl start' >&2; exit 2; }
+command -v systemd-run >/dev/null 2>&1 || { echo 'systemd-run is required' >&2; exit 3; }
+systemd-run --quiet --collect --unit=awgram-self-update \
+  /usr/local/bin/awgram-setup update --yes
+printf '{"ok":true,"unit":"awgram-self-update"}\n'
+AWGRAM_UPDATECTL
+  chmod 755 "$UPDATECTL_PATH"
+  chown root:root "$UPDATECTL_PATH"
 }
 
 install_unit() {
