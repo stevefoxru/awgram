@@ -4505,15 +4505,15 @@ async fn callback_handler(
                     bot.send_message(chat, "Сначала выберите локацию.").await?;
                     return Ok(());
                 };
-                if let Some(order) = settings.create_star_order(
-                    uid,
-                    "purchase",
+                if let Some(order) = settings.create_star_order(crate::store::NewStarOrder {
+                    user_id: uid,
+                    kind: "purchase",
                     months,
                     stars,
-                    None,
-                    Some(server_id),
-                    now_epoch(),
-                ) {
+                    client_name: None,
+                    server_id: Some(server_id),
+                    created_at: now_epoch(),
+                }) {
                     send_star_invoice(&bot, chat, &order).await?;
                 }
                 return Ok(());
@@ -4785,15 +4785,15 @@ async fn callback_handler(
                     .await?;
                     return Ok(());
                 };
-                if let Some(order) = settings.create_star_order(
-                    uid,
-                    "renew",
+                if let Some(order) = settings.create_star_order(crate::store::NewStarOrder {
+                    user_id: uid,
+                    kind: "renew",
                     months,
                     stars,
-                    Some(&name),
-                    None,
-                    now_epoch(),
-                ) {
+                    client_name: Some(&name),
+                    server_id: None,
+                    created_at: now_epoch(),
+                }) {
                     send_star_invoice(&bot, chat, &order).await?;
                 }
                 return Ok(());

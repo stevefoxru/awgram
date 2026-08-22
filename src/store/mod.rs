@@ -27,7 +27,7 @@ pub use groups::{
 };
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
-pub use stars::{StarOrder, StarPaymentClaim};
+pub use stars::{NewStarOrder, StarOrder, StarPaymentClaim};
 pub use stats::{PeriodTotals, Sample, TrafficSummary};
 
 /// SQL-батчи миграций: индекс в массиве + 1 == schema_version после применения.

@@ -21,6 +21,16 @@ pub enum StarPaymentClaim {
     Invalid,
 }
 
+pub struct NewStarOrder<'a> {
+    pub user_id: i64,
+    pub kind: &'a str,
+    pub months: i64,
+    pub stars: i64,
+    pub client_name: Option<&'a str>,
+    pub server_id: Option<i64>,
+    pub created_at: i64,
+}
+
 fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StarOrder> {
     Ok(StarOrder {
         id: row.get(0)?,
@@ -35,24 +45,23 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StarOrder> {
 }
 
 impl Store {
-    pub fn create_star_order(
-        &self,
-        user_id: i64,
-        kind: &str,
-        months: i64,
-        stars: i64,
-        client_name: Option<&str>,
-        server_id: Option<i64>,
-        now: i64,
-    ) -> Option<StarOrder> {
-        if !matches!(kind, "purchase" | "renew") || stars <= 0 {
+    pub fn create_star_order(&self, order: NewStarOrder<'_>) -> Option<StarOrder> {
+        if !matches!(order.kind, "purchase" | "renew") || order.stars <= 0 {
             return None;
         }
         self.with_conn(|connection| {
             connection.execute(
                 "INSERT INTO star_orders(user_id,kind,months,stars,client_name,server_id,created_at)
                  VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                rusqlite::params![user_id, kind, months, stars, client_name, server_id, now],
+                rusqlite::params![
+                    order.user_id,
+                    order.kind,
+                    order.months,
+                    order.stars,
+                    order.client_name,
+                    order.server_id,
+                    order.created_at
+                ],
             )?;
             let id = connection.last_insert_rowid();
             connection.query_row(
@@ -137,7 +146,15 @@ mod tests {
         let store = Store::open_in_memory();
         store.upsert_user(7, None, "User", None, 1);
         let order = store
-            .create_star_order(7, "renew", 1, 50, Some("phone"), None, 2)
+            .create_star_order(NewStarOrder {
+                user_id: 7,
+                kind: "renew",
+                months: 1,
+                stars: 50,
+                client_name: Some("phone"),
+                server_id: None,
+                created_at: 2,
+            })
             .unwrap();
         assert!(matches!(
             store.claim_star_payment(order.id, 7, 50, "charge", 3),
