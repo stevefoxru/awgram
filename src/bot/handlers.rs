@@ -2261,15 +2261,33 @@ async fn message_handler(
         let value = if raw.eq_ignore_ascii_case("clear") {
             Some((None, None))
         } else {
-            parts.first().and_then(|part| part.parse::<i64>().ok()).filter(|v| (0..=100).contains(v)).map(|discount| {
-                let until = parts.get(1).and_then(|date| crate::calendar::parse_date(date));
-                (Some(discount), until)
-            })
+            parts
+                .first()
+                .and_then(|part| part.parse::<i64>().ok())
+                .filter(|v| (0..=100).contains(v))
+                .map(|discount| {
+                    let until = parts
+                        .get(1)
+                        .and_then(|date| crate::calendar::parse_date(date));
+                    (Some(discount), until)
+                })
         };
-        let changed = value.is_some_and(|(discount, until)| settings.set_personal_discount(user_id, discount, until));
-        bot.send_message(msg.chat.id, if changed { "✅ Индивидуальная скидка сохранена." } else { "Формат: 25 (бессрочно), 25 2027-12-31 или clear." })
-            .reply_markup(menu::admin_user_menu(user_id, settings.user_blocked(user_id)))
-            .await?;
+        let changed = value.is_some_and(|(discount, until)| {
+            settings.set_personal_discount(user_id, discount, until)
+        });
+        bot.send_message(
+            msg.chat.id,
+            if changed {
+                "✅ Индивидуальная скидка сохранена."
+            } else {
+                "Формат: 25 (бессрочно), 25 2027-12-31 или clear."
+            },
+        )
+        .reply_markup(menu::admin_user_menu(
+            user_id,
+            settings.user_blocked(user_id),
+        ))
+        .await?;
         if changed {
             dialogue.update(State::Idle).await?;
         }
@@ -4089,7 +4107,9 @@ async fn callback_handler(
         Action::AdminUserDiscount(user_id) => {
             bot.send_message(chat, "Введите скидку в процентах: 25 — бессрочно; 25 2027-12-31 — до даты; clear — удалить.")
                 .await?;
-            dialogue.update(State::AwaitingUserDiscount { user_id }).await?;
+            dialogue
+                .update(State::AwaitingUserDiscount { user_id })
+                .await?;
         }
         Action::AdminUserNote(user_id) => {
             bot.send_message(
@@ -4174,7 +4194,10 @@ async fn callback_handler(
                 .await?;
         }
         Action::BuyServer(server_id) => {
-            let available = settings.available_vpn_servers().into_iter().any(|server| server.id == server_id && server.is_local);
+            let available = settings
+                .available_vpn_servers()
+                .into_iter()
+                .any(|server| server.id == server_id && server.is_local);
             if available && settings.set_purchase_server(uid, server_id, now_epoch()) {
                 bot.send_message(chat, "Выберите срок подписки:")
                     .reply_markup(menu::buy_terms_menu())
@@ -4257,9 +4280,16 @@ async fn callback_handler(
                     }
                 }
             } else if method == "manual" {
-                if let Some(id) =
-                    settings.purchase_server(uid).and_then(|server_id| settings.create_payment_request_on_server(uid, months, amount, "manual", server_id, now_epoch()))
-                {
+                if let Some(id) = settings.purchase_server(uid).and_then(|server_id| {
+                    settings.create_payment_request_on_server(
+                        uid,
+                        months,
+                        amount,
+                        "manual",
+                        server_id,
+                        now_epoch(),
+                    )
+                }) {
                     let text = format!(
                         "Заявка #{id}\nТариф: {months} мес.\nСумма: {} ₽\n\n{}",
                         amount / 100,
@@ -4311,7 +4341,10 @@ async fn callback_handler(
             if settings.client_owner(&name) == Some(uid) && vpn.exists(&name).await.unwrap_or(false)
             {
                 if settings.is_legacy_client(&name, uid) {
-                    let price = settings.legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+                    let price = settings.legacy_renewal_price_for_user(
+                        uid,
+                        settings.legacy_renewal_price_kopecks(),
+                    );
                     let target = crate::calendar::legacy_renewal_target(
                         now_epoch(),
                         vpn.client_expiry(&name),
@@ -4346,7 +4379,8 @@ async fn callback_handler(
             {
                 let target =
                     crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
-                let price = settings.legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+                let price = settings
+                    .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
                 bot.send_message(chat,format!("Продление ключа «{name}» до 31.12.{} стоит {:.2} ₽. Выберите способ оплаты:",crate::calendar::year_at(target),price as f64 / 100.0)).reply_markup(menu::legacy_renew_method_menu(&name)).await?;
             }
         }
@@ -4357,7 +4391,8 @@ async fn callback_handler(
             {
                 return Ok(());
             }
-            let amount = settings.legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+            let amount = settings
+                .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
             let target =
                 crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
             if method == "balance" {
@@ -4621,11 +4656,19 @@ async fn callback_handler(
                 }
                 return Ok(());
             }
-            let Some(server_id) = req.server_id.or_else(|| settings.purchase_server(req.user_id)) else {
-                bot.send_message(chat, "В заявке не указана локация; попросите пользователя создать новую заявку.").await?;
+            let Some(server_id) = req
+                .server_id
+                .or_else(|| settings.purchase_server(req.user_id))
+            else {
+                bot.send_message(
+                    chat,
+                    "В заявке не указана локация; попросите пользователя создать новую заявку.",
+                )
+                .await?;
                 return Ok(());
             };
-            match provision_customer_key(&vpn, &settings, req.user_id, req.months, server_id).await {
+            match provision_customer_key(&vpn, &settings, req.user_id, req.months, server_id).await
+            {
                 Ok(result) => {
                     if settings.decide_payment(
                         id,
@@ -4899,14 +4942,23 @@ async fn callback_handler(
                     && server.enabled_for_provisioning
                     && settings.server_client_count(server.id) < server.capacity
             }) else {
-                bot.send_message(chat, "Локация заполнена или недоступна.").await?;
+                bot.send_message(chat, "Локация заполнена или недоступна.")
+                    .await?;
                 return Ok(());
             };
-            let user = settings.user(uid).ok_or_else(|| crate::error::Error::Parse("пользователь не найден".into()))?;
-            let existing = vpn.list().await?.into_iter().map(|client| client.name).collect::<std::collections::HashSet<_>>();
-            let new_name = crate::vpn::validate::gen_available_names(&customer_base_name(&user), 1, &existing)
-                .map_err(|error| crate::error::Error::Parse(error.to_string()))?
-                .remove(0);
+            let user = settings
+                .user(uid)
+                .ok_or_else(|| crate::error::Error::Parse("пользователь не найден".into()))?;
+            let existing = vpn
+                .list()
+                .await?
+                .into_iter()
+                .map(|client| client.name)
+                .collect::<std::collections::HashSet<_>>();
+            let new_name =
+                crate::vpn::validate::gen_available_names(&customer_base_name(&user), 1, &existing)
+                    .map_err(|error| crate::error::Error::Parse(error.to_string()))?
+                    .remove(0);
             let expiry = vpn.client_expiry(&name);
             let replacement = vpn.add(&new_name, None, settings.psk_default()).await?;
             if let Some(expires_at) = expiry {
@@ -4922,7 +4974,13 @@ async fn callback_handler(
             settings.assign_client_group(&new_name, None, now_epoch());
             settings.assign_client_owner(&new_name, Some(uid));
             settings.assign_client_server(&new_name, server_id, &server.protocol);
-            settings.log_event(now_epoch(), EventKind::Regen, Some(&new_name), Some(uid), Some(&format!("replaced={name} server={server_id}")));
+            settings.log_event(
+                now_epoch(),
+                EventKind::Regen,
+                Some(&new_name),
+                Some(uid),
+                Some(&format!("replaced={name} server={server_id}")),
+            );
             bot.send_message(chat, format!("✅ Старый ключ «{name}» удалён. Новый ключ «{new_name}» создан в локации {} ({}) и сохранил прежний срок.", server.location, server.protocol)).await?;
             render::send_client_files(&bot, chat, lang, &replacement).await?;
         }

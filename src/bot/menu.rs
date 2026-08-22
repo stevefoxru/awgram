@@ -334,7 +334,10 @@ pub fn admin_user_menu(user_id: i64, blocked: bool) -> InlineKeyboardMarkup {
             cb("➕ Баланс", &format!("admin:userbal:{user_id}")),
             cb("📝 Заметка", &format!("admin:usernote:{user_id}")),
         ],
-        vec![cb("🏷 Индивидуальная скидка", &format!("admin:userdiscount:{user_id}"))],
+        vec![cb(
+            "🏷 Индивидуальная скидка",
+            &format!("admin:userdiscount:{user_id}"),
+        )],
         vec![cb(
             if blocked {
                 "✅ Разблокировать"
@@ -530,7 +533,10 @@ pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
             cb("📅 Продлить", &format!("renew:{name}")),
             cb("✏️ Устройство", &format!("device:label:{name}")),
         ],
-        vec![cb("🔄 Сменить ключ и локацию", &format!("move:choose:{name}"))],
+        vec![cb(
+            "🔄 Сменить ключ и локацию",
+            &format!("move:choose:{name}"),
+        )],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
 }
@@ -540,12 +546,21 @@ pub fn customer_move_servers_menu(
     servers: &[crate::store::VpnServer],
     store: &crate::store::Store,
 ) -> InlineKeyboardMarkup {
-    let mut rows = servers.iter().map(|server| {
-        vec![cb(
-            &format!("📍 {} · {} ({}/{})", server.location, server.protocol, store.server_client_count(server.id), server.capacity),
-            &format!("move:run:{name}:{}", server.id),
-        )]
-    }).collect::<Vec<_>>();
+    let mut rows = servers
+        .iter()
+        .map(|server| {
+            vec![cb(
+                &format!(
+                    "📍 {} · {} ({}/{})",
+                    server.location,
+                    server.protocol,
+                    store.server_client_count(server.id),
+                    server.capacity
+                ),
+                &format!("move:run:{name}:{}", server.id),
+            )]
+        })
+        .collect::<Vec<_>>();
     rows.push(vec![cb("⬅️ Назад", &format!("mykey:{name}"))]);
     InlineKeyboardMarkup::new(rows)
 }

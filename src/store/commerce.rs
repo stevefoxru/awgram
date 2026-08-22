@@ -460,16 +460,22 @@ impl Store {
     /// Наибольшая применимая скидка: постоянная/срочная персональная либо
     /// одноразовый промокод. Одноразовая скидка расходуется только здесь.
     pub fn purchase_discount(&self, user_id: i64, now: i64) -> i64 {
-        let personal = self.with_conn(|c| {
-            c.query_row(
-                "SELECT personal_discount,personal_discount_until FROM users WHERE user_id=?1",
-                [user_id],
-                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
-            )
-        }).ok().and_then(|(discount, until)| {
-            discount.filter(|_| until.is_none_or(|expires| expires > now))
-        }).unwrap_or(0);
-        personal.max(self.take_promo_discount(user_id)).clamp(0, 100)
+        let personal = self
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT personal_discount,personal_discount_until FROM users WHERE user_id=?1",
+                    [user_id],
+                    |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+                )
+            })
+            .ok()
+            .and_then(|(discount, until)| {
+                discount.filter(|_| until.is_none_or(|expires| expires > now))
+            })
+            .unwrap_or(0);
+        personal
+            .max(self.take_promo_discount(user_id))
+            .clamp(0, 100)
     }
 
     pub fn set_personal_discount(
@@ -486,7 +492,8 @@ impl Store {
                 "UPDATE users SET personal_discount=?2,personal_discount_until=?3 WHERE user_id=?1",
                 rusqlite::params![user_id, discount, until],
             )
-        }).is_ok_and(|changed| changed == 1)
+        })
+        .is_ok_and(|changed| changed == 1)
     }
 
     pub fn personal_discount(&self, user_id: i64, now: i64) -> Option<(i64, Option<i64>)> {
@@ -496,7 +503,9 @@ impl Store {
                 [user_id],
                 |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
-        }).ok().and_then(|(discount, until)| {
+        })
+        .ok()
+        .and_then(|(discount, until)| {
             discount
                 .filter(|_| until.is_none_or(|expires| expires > now))
                 .map(|value| (value, until))
@@ -510,7 +519,8 @@ impl Store {
                  ON CONFLICT(user_id) DO UPDATE SET server_id=?2,updated_at=?3",
                 rusqlite::params![user_id, server_id, now],
             )
-        }).is_ok()
+        })
+        .is_ok()
     }
 
     pub fn purchase_server(&self, user_id: i64) -> Option<i64> {
@@ -519,12 +529,19 @@ impl Store {
                 "SELECT server_id FROM purchase_preferences WHERE user_id=?1",
                 [user_id],
                 |row| row.get(0),
-            ).optional()
-        }).ok().flatten()
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
     }
 
     pub fn legacy_renewal_price_for_user(&self, user_id: i64, base: i64) -> i64 {
-        let count = self.legacy_clients().into_iter().filter(|(_, owner)| *owner == user_id).count();
+        let count = self
+            .legacy_clients()
+            .into_iter()
+            .filter(|(_, owner)| *owner == user_id)
+            .count();
         match count {
             10.. => 50_000,
             6..=9 => 75_000,
