@@ -367,6 +367,24 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_server_enrollments_server ON server_enrollments(server_id,expires_at);
     "#,
+    // v14: размещение ключей, ёмкость узлов, мультипротокольные адаптеры и
+    // постоянные индивидуальные скидки. Старые ключи привязываются к локальному
+    // узлу при его регистрации, поэтому перевыпуск конфигураций не требуется.
+    r#"
+    ALTER TABLE vpn_servers ADD COLUMN capacity INTEGER NOT NULL DEFAULT 150;
+    ALTER TABLE clients ADD COLUMN server_id INTEGER REFERENCES vpn_servers(id);
+    ALTER TABLE clients ADD COLUMN protocol TEXT NOT NULL DEFAULT 'amneziawg-2';
+    ALTER TABLE payment_requests ADD COLUMN server_id INTEGER REFERENCES vpn_servers(id);
+    ALTER TABLE users ADD COLUMN personal_discount INTEGER;
+    ALTER TABLE users ADD COLUMN personal_discount_until INTEGER;
+    CREATE TABLE purchase_preferences(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id),
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id),
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_clients_server ON clients(server_id,removed_at);
+    CREATE INDEX idx_payments_server ON payment_requests(server_id,status);
+    "#,
 ];
 
 pub struct Store {

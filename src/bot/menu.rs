@@ -159,7 +159,15 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
             cb("🛡 VPN-служба", "admin:vpn"),
             cb("ℹ️ Справка", "admin:help"),
         ],
+        vec![cb("⬆️ Обновить бота", "admin:update")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn bot_update_confirm_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("✅ Запустить обновление", "admin:update:run")],
+        vec![cb("❌ Отмена", "admin:system")],
     ])
 }
 
@@ -284,7 +292,11 @@ pub fn statistics_menu() -> InlineKeyboardMarkup {
     ])
 }
 
-pub fn admin_users_menu(users: &[crate::store::UserRow]) -> InlineKeyboardMarkup {
+pub fn admin_users_menu(
+    users: &[crate::store::UserRow],
+    page: usize,
+    pages: usize,
+) -> InlineKeyboardMarkup {
     let mut rows = users
         .iter()
         .map(|u| {
@@ -296,6 +308,17 @@ pub fn admin_users_menu(users: &[crate::store::UserRow]) -> InlineKeyboardMarkup
             vec![cb(&label, &format!("admin:user:{}", u.user_id))]
         })
         .collect::<Vec<_>>();
+    if pages > 1 {
+        let mut navigation = Vec::new();
+        if page > 0 {
+            navigation.push(cb("⬅️", &format!("admin:owners:page:{}", page - 1)));
+        }
+        navigation.push(cb(&format!("{}/{}", page + 1, pages), "noop"));
+        if page + 1 < pages {
+            navigation.push(cb("➡️", &format!("admin:owners:page:{}", page + 1)));
+        }
+        rows.push(navigation);
+    }
     rows.push(vec![cb("🔎 Найти пользователя", "admin:search")]);
     rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
     InlineKeyboardMarkup::new(rows)
@@ -311,6 +334,7 @@ pub fn admin_user_menu(user_id: i64, blocked: bool) -> InlineKeyboardMarkup {
             cb("➕ Баланс", &format!("admin:userbal:{user_id}")),
             cb("📝 Заметка", &format!("admin:usernote:{user_id}")),
         ],
+        vec![cb("🏷 Индивидуальная скидка", &format!("admin:userdiscount:{user_id}"))],
         vec![cb(
             if blocked {
                 "✅ Разблокировать"
@@ -337,6 +361,27 @@ pub fn buy_terms_menu() -> InlineKeyboardMarkup {
             cb("12 месяцев — 2000 ₽", "buy:term:12"),
         ],
     ])
+}
+
+pub fn buy_servers_menu(
+    servers: &[crate::store::VpnServer],
+    store: &crate::store::Store,
+) -> InlineKeyboardMarkup {
+    let mut rows = servers
+        .iter()
+        .map(|server| {
+            let used = store.server_client_count(server.id);
+            vec![cb(
+                &format!(
+                    "📍 {} · {} ({}/{})",
+                    server.location, server.protocol, used, server.capacity
+                ),
+                &format!("buy:server:{}", server.id),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("⬅️ Кабинет", "profile")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn buy_method_menu(months: i64) -> InlineKeyboardMarkup {
@@ -485,8 +530,24 @@ pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
             cb("📅 Продлить", &format!("renew:{name}")),
             cb("✏️ Устройство", &format!("device:label:{name}")),
         ],
+        vec![cb("🔄 Сменить ключ и локацию", &format!("move:choose:{name}"))],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
+}
+
+pub fn customer_move_servers_menu(
+    name: &str,
+    servers: &[crate::store::VpnServer],
+    store: &crate::store::Store,
+) -> InlineKeyboardMarkup {
+    let mut rows = servers.iter().map(|server| {
+        vec![cb(
+            &format!("📍 {} · {} ({}/{})", server.location, server.protocol, store.server_client_count(server.id), server.capacity),
+            &format!("move:run:{name}:{}", server.id),
+        )]
+    }).collect::<Vec<_>>();
+    rows.push(vec![cb("⬅️ Назад", &format!("mykey:{name}"))]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn customer_refresh_confirm_menu(name: &str) -> InlineKeyboardMarkup {

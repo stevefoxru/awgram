@@ -448,6 +448,27 @@ impl Vpn {
             .is_some_and(|name| self.clients_dir.join("disabled").join(name).is_file())
     }
 
+    /// Планирует обновление отдельным transient systemd-unit. Вызов сразу
+    /// возвращается, поэтому перезапуск awgram не обрывает сам запуск обновления.
+    pub async fn schedule_bot_update(&self) -> Result<()> {
+        let helper = std::path::Path::new("/usr/local/libexec/awgram-updatectl");
+        let spec = RunSpec {
+            script: helper,
+            sudo_prefix: &self.sudo_prefix,
+            timeout_secs: self.timeout_secs,
+            extra_env: &[],
+        };
+        let (out, code) = run(&spec, &["start"]).await?;
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(crate::error::Error::ScriptFailed {
+                code: Some(code),
+                stderr: out,
+            })
+        }
+    }
+
     /// Свободные адреса в подсети сервера для превентивной проверки массовой
     /// генерации. `total` = usable-хостов v4-подсети (минус network+broadcast),
     /// `free` = total − 1 (сервер) − existing. Берёт первый IPv4 из

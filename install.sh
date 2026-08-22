@@ -17,6 +17,7 @@ SETUP_CONF="$CFG_DIR/setup.conf"
 UNIT_FILE="/etc/systemd/system/awgram.service"
 SUDOERS_FILE="/etc/sudoers.d/awgram"
 CLIENTCTL_PATH="/usr/local/libexec/awgram-clientctl"
+UPDATECTL_PATH="/usr/local/libexec/awgram-updatectl"
 SVC_USER="awgram"
 
 UI_LANG=""; MODE=""; TOKEN=""; ADMINS=""; MANAGE_SCRIPT=""; CLIENTS_DIR=""
@@ -446,6 +447,7 @@ public_key() {
     inpeer && found && /^PublicKey[[:space:]]*=/ {sub(/^[^=]*=[[:space:]]*/,""); print; exit}
   ' "$server_conf"
 }
+
 disable_one() {
   local n="$1" key
   valid_name "$n" || return 2
@@ -454,6 +456,21 @@ disable_one() {
   key="$(public_key "$n")"; [[ -n "$key" ]] || return 4
   awg set "$iface" peer "$key" remove
   printf '%s\n' "$(date +%s)" > "$disabled_dir/$n"
+}
+
+install_updatectl() {
+  install -d -m 755 /usr/local/libexec
+  cat > "$UPDATECTL_PATH" <<'AWGRAM_UPDATECTL'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" = "start" ]] || { echo 'usage: awgram-updatectl start' >&2; exit 2; }
+command -v systemd-run >/dev/null 2>&1 || { echo 'systemd-run is required' >&2; exit 3; }
+systemd-run --quiet --collect --unit=awgram-self-update \
+  /usr/local/bin/awgram-setup update --yes
+printf '{"ok":true,"unit":"awgram-self-update"}\n'
+AWGRAM_UPDATECTL
+  chmod 755 "$UPDATECTL_PATH"
+  chown root:root "$UPDATECTL_PATH"
 }
 enable_one() {
   local n="$1"
@@ -650,6 +667,7 @@ cmd_install() {
   staged="$(fetch_binary "$tag")"
   install_binary "$staged"
   install_clientctl
+  install_updatectl
   # конфигурация и запуск
   write_config
   [ -z "$TOKEN" ] || write_env_token
@@ -759,7 +777,7 @@ cmd_help() {
 # ---------- hardened mode setup ----------
 write_sudoers() {
   local tmp; tmp="$(mktemp)"
-  printf '%s ALL=(root) NOPASSWD: %s, %s\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" > "$tmp"
+  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" "$UPDATECTL_PATH" > "$tmp"
   chmod 440 "$tmp"
   visudo -c -f "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die err_sudoers; }
   mv -f "$tmp" "$SUDOERS_FILE"
@@ -825,6 +843,7 @@ cmd_update() {
   staged="$(fetch_binary "$tag")"
   install_binary "$staged"
   install_clientctl
+  install_updatectl
   if [ "$MODE" = "hardened" ]; then write_sudoers; fi
   if is_systemd; then
     systemctl restart awgram 2>/dev/null || true

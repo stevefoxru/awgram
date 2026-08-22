@@ -23,6 +23,8 @@ pub enum Action {
     AdminUsersHub,
     AdminCommunication,
     AdminSystem,
+    AdminUpdate,
+    AdminUpdateRun,
     ServerAdd,
     ServerCard(i64),
     ServerBilling,
@@ -32,6 +34,7 @@ pub enum Action {
     ServerEnrollRevoke(i64),
     AdminCreate,
     AdminOwners,
+    AdminOwnersPage(usize),
     AdminFinance,
     AdminSupport,
     AdminBroadcast,
@@ -46,6 +49,7 @@ pub enum Action {
     AdminUserKeys(i64),
     AdminUserPayments(i64),
     AdminUserBalance(i64),
+    AdminUserDiscount(i64),
     AdminUserNote(i64),
     AdminUserBlock(i64, bool),
     StatsSection(String),
@@ -135,6 +139,7 @@ pub enum Action {
     GroupScopeAsk,
     GroupScopeSet(ListScope),
     Buy,
+    BuyServer(i64),
     BuyTerm(i64),
     BuyMethod(i64, String),
     BuyPaid(i64),
@@ -148,6 +153,8 @@ pub enum Action {
     SetClientEnabled(String, bool),
     PaymentInstructionsAsk,
     CustomerKey(String),
+    CustomerMove(String),
+    CustomerMoveServer(String, i64),
     CustomerRefresh(String),
     CustomerRefreshRun(String),
     Renew(String),
@@ -175,6 +182,8 @@ fn parse_callback(data: &str) -> Action {
         "admin:users" => Action::AdminUsersHub,
         "admin:communication" => Action::AdminCommunication,
         "admin:system" => Action::AdminSystem,
+        "admin:update" => Action::AdminUpdate,
+        "admin:update:run" => Action::AdminUpdateRun,
         "server:add" => Action::ServerAdd,
         "server:billing" => Action::ServerBilling,
         "admin:create" => Action::AdminCreate,
@@ -219,7 +228,11 @@ fn parse_callback(data: &str) -> Action {
         "legacy:promo" => Action::PromoInput,
         "legacy:price" => Action::LegacyPriceAsk,
         _ => {
-            if let Some(v) = data.strip_prefix("buy:term:") {
+            if let Some(v) = data.strip_prefix("admin:owners:page:") {
+                v.parse()
+                    .map(Action::AdminOwnersPage)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("buy:term:") {
                 v.parse().map(Action::BuyTerm).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("buy:method:") {
                 let mut parts = v.splitn(2, ':');
@@ -227,6 +240,8 @@ fn parse_callback(data: &str) -> Action {
                     (Some(months), Some(method)) => Action::BuyMethod(months, method.to_string()),
                     _ => Action::Unknown,
                 }
+            } else if let Some(v) = data.strip_prefix("buy:server:") {
+                v.parse().map(Action::BuyServer).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("buy:paid:") {
                 v.parse().map(Action::BuyPaid).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("pay:ok:") {
@@ -247,6 +262,16 @@ fn parse_callback(data: &str) -> Action {
                 Action::SetClientEnabled(v.to_string(), false)
             } else if let Some(v) = data.strip_prefix("mykey:") {
                 Action::CustomerKey(v.to_string())
+            } else if let Some(v) = data.strip_prefix("move:choose:") {
+                Action::CustomerMove(v.to_string())
+            } else if let Some(v) = data.strip_prefix("move:run:") {
+                let mut parts = v.rsplitn(2, ':');
+                match (parts.next().and_then(|id| id.parse().ok()), parts.next()) {
+                    (Some(server_id), Some(name)) => {
+                        Action::CustomerMoveServer(name.to_string(), server_id)
+                    }
+                    _ => Action::Unknown,
+                }
             } else if let Some(v) = data.strip_prefix("device:label:") {
                 Action::DeviceLabelAsk(v.to_string())
             } else if let Some(v) = data.strip_prefix("support:take:") {
@@ -311,6 +336,10 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("admin:userbal:") {
                 v.parse()
                     .map(Action::AdminUserBalance)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:userdiscount:") {
+                v.parse()
+                    .map(Action::AdminUserDiscount)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("admin:usernote:") {
                 v.parse()
@@ -670,7 +699,23 @@ async fn provision_customer_key(
     settings: &Store,
     user_id: i64,
     months: i64,
+    server_id: i64,
 ) -> crate::error::Result<crate::vpn::model::AddResult> {
+    let server = settings
+        .vpn_server(server_id)
+        .ok_or_else(|| crate::error::Error::Parse("локация не найдена".to_string()))?;
+    if !server.is_local {
+        return Err(crate::error::Error::Parse(
+            "удалённый узел ещё не подключён к транспортному агенту".to_string(),
+        ));
+    }
+    if !server.enabled_for_provisioning
+        || settings.server_client_count(server_id) >= server.capacity
+    {
+        return Err(crate::error::Error::Parse(
+            "на выбранной локации нет свободных мест".to_string(),
+        ));
+    }
     let user = settings
         .user(user_id)
         .ok_or_else(|| crate::error::Error::Parse("пользователь не зарегистрирован".to_string()))?;
@@ -688,6 +733,12 @@ async fn provision_customer_key(
     let result = vpn.add(&name, Some(expiry), settings.psk_default()).await?;
     settings.assign_client_group(&name, None, now_epoch());
     settings.assign_client_owner(&name, Some(user_id));
+    if !settings.assign_client_server(&name, server_id, &server.protocol) {
+        let _ = vpn.remove(&name).await;
+        return Err(crate::error::Error::Parse(
+            "не удалось закрепить ключ за сервером".to_string(),
+        ));
+    }
     Ok(result)
 }
 
@@ -741,22 +792,35 @@ async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -
     Ok(())
 }
 
-async fn owners_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
-    let users = settings
+async fn owners_screen(
+    bot: &Bot,
+    chat: ChatId,
+    settings: &Store,
+    requested_page: usize,
+) -> HandlerResult {
+    const PAGE_SIZE: usize = 10;
+    let all = settings
         .all_user_ids()
         .into_iter()
         .filter_map(|id| settings.user(id))
         .rev()
-        .take(50)
+        .collect::<Vec<_>>();
+    let pages = all.len().max(1).div_ceil(PAGE_SIZE);
+    let page = requested_page.min(pages - 1);
+    let users = all
+        .iter()
+        .skip(page * PAGE_SIZE)
+        .take(PAGE_SIZE)
+        .cloned()
         .collect::<Vec<_>>();
     bot.send_message(
         chat,
         format!(
-            "👤 Пользователи\n\nВсего: {}\nПоказаны последние {}. Откройте карточку или воспользуйтесь поиском.",
-            settings.all_user_ids().len(), users.len()
+            "👤 Владельцы ключей\n\nВсего пользователей: {}\nСтраница {} из {} · по {PAGE_SIZE} записей.\nОткройте карточку или воспользуйтесь поиском.",
+            all.len(), page + 1, pages
         ),
     )
-    .reply_markup(menu::admin_users_menu(&users))
+    .reply_markup(menu::admin_users_menu(&users, page, pages))
     .await?;
     Ok(())
 }
@@ -769,7 +833,7 @@ async fn admin_user_screen(
 ) -> HandlerResult {
     let Some(p) = settings.admin_user_profile(user_id) else {
         bot.send_message(chat, "Пользователь не найден.")
-            .reply_markup(menu::admin_users_menu(&[]))
+            .reply_markup(menu::admin_users_menu(&[], 0, 1))
             .await?;
         return Ok(());
     };
@@ -844,7 +908,7 @@ async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Handl
             )
         })
         .collect::<Vec<_>>();
-    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nЦена ежегодного продления: {:.2} ₽\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
+    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nБазовая цена ежегодного продления: {:.2} ₽\n6–9 legacy-ключей: 750 ₽ за ключ/год\n10 и более: 500 ₽ за ключ/год\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
     Ok(())
 }
 
@@ -872,8 +936,8 @@ fn server_card_text(server: &crate::store::VpnServer, now: i64) -> String {
         .map(|v| (v - now).div_euclid(86_400))
         .map(|v| format!("{v} дн."))
         .unwrap_or_else(|| "—".into());
-    format!("🖥 {}\n\nУзел: {}\nСтатус: {}\nHostname: {}\nIP: {}\nХостер: {}\nЛокация: {}\nПротокол: {}\nОткрыт: {}\nДобавлен в бот: {}\nОплачен до: {}\nДо оплаты: {}\nСтоимость: {}\nПериод: {} мес.\nАвтопродление: {}",
-        server.name,if server.is_local{"локальный — здесь работают бот и VPN"}else{"удалённый"},server.status,server.hostname,server.public_ip,server.provider,server.location,server.protocol,opened,crate::calendar::format_date(server.added_at),paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"})
+    format!("🖥 {}\n\nУзел: {}\nСтатус: {}\nHostname: {}\nIP: {}\nХостер: {}\nЛокация: {}\nПротокол: {}\nВыдача новых ключей: {}\nЛимит ключей: {}\nОткрыт: {}\nДобавлен в бот: {}\nОплачен до: {}\nДо оплаты: {}\nСтоимость: {}\nПериод: {} мес.\nАвтопродление: {}",
+        server.name,if server.is_local{"локальный — здесь работают бот и VPN"}else{"удалённый"},server.status,server.hostname,server.public_ip,server.provider,server.location,server.protocol,if server.enabled_for_provisioning{"включена"}else{"выключена"},server.capacity,opened,crate::calendar::format_date(server.added_at),paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"})
 }
 
 async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
@@ -1117,6 +1181,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | Lang(_)
         | SetListFilter(_)
         | Buy
+        | BuyServer(_)
         | BuyTerm(_)
         | BuyMethod(_, _)
         | BuyPaid(_)
@@ -1124,6 +1189,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | Profile
         | Balance
         | CustomerKey(_)
+        | CustomerMove(_)
+        | CustomerMoveServer(_, _)
         | CustomerRefresh(_)
         | CustomerRefreshRun(_)
         | Renew(_)
@@ -1208,6 +1275,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminUsersHub
         | AdminCommunication
         | AdminSystem
+        | AdminUpdate
+        | AdminUpdateRun
         | ServerAdd
         | ServerCard(_)
         | ServerBilling
@@ -1217,6 +1286,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerEnrollRevoke(_)
         | AdminCreate
         | AdminOwners
+        | AdminOwnersPage(_)
         | AdminFinance
         | AdminSupport
         | AdminBroadcast
@@ -1231,6 +1301,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminUserKeys(_)
         | AdminUserPayments(_)
         | AdminUserBalance(_)
+        | AdminUserDiscount(_)
         | AdminUserNote(_)
         | AdminUserBlock(_, _)
         | StatsSection(_)
@@ -1775,7 +1846,7 @@ async fn message_handler(
                 return Ok(());
             }
             "🔗 Владельцы" => {
-                owners_screen(&bot, msg.chat.id, &settings).await?;
+                owners_screen(&bot, msg.chat.id, &settings, 0).await?;
                 return Ok(());
             }
             "📣 Рассылка" => {
@@ -2175,6 +2246,30 @@ async fn message_handler(
             settings.user_blocked(user_id),
         ))
         .await?;
+        if changed {
+            dialogue.update(State::Idle).await?;
+        }
+        return Ok(());
+    }
+    if let State::AwaitingUserDiscount { user_id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let raw = msg.text().unwrap_or_default().trim();
+        let parts = raw.split_whitespace().collect::<Vec<_>>();
+        let value = if raw.eq_ignore_ascii_case("clear") {
+            Some((None, None))
+        } else {
+            parts.first().and_then(|part| part.parse::<i64>().ok()).filter(|v| (0..=100).contains(v)).map(|discount| {
+                let until = parts.get(1).and_then(|date| crate::calendar::parse_date(date));
+                (Some(discount), until)
+            })
+        };
+        let changed = value.is_some_and(|(discount, until)| settings.set_personal_discount(user_id, discount, until));
+        bot.send_message(msg.chat.id, if changed { "✅ Индивидуальная скидка сохранена." } else { "Формат: 25 (бессрочно), 25 2027-12-31 или clear." })
+            .reply_markup(menu::admin_user_menu(user_id, settings.user_blocked(user_id)))
+            .await?;
         if changed {
             dialogue.update(State::Idle).await?;
         }
@@ -3511,6 +3606,7 @@ async fn callback_handler(
     let customer_action = matches!(
         &action,
         Action::Buy
+            | Action::BuyServer(_)
             | Action::BuyTerm(_)
             | Action::BuyMethod(_, _)
             | Action::BuyPaid(_)
@@ -3518,6 +3614,8 @@ async fn callback_handler(
             | Action::Profile
             | Action::Balance
             | Action::CustomerKey(_)
+            | Action::CustomerMove(_)
+            | Action::CustomerMoveServer(_, _)
             | Action::CustomerRefresh(_)
             | Action::CustomerRefreshRun(_)
             | Action::Renew(_)
@@ -3599,6 +3697,20 @@ async fn callback_handler(
             )
             .reply_markup(menu::admin_system_hub())
             .await?;
+        }
+        Action::AdminUpdate => {
+            bot.send_message(chat, "⬆️ Обновление бота\n\nБудет установлен последний стабильный релиз GitHub. Служба автоматически перезапустится; VPN-соединения и ключи не затрагиваются.")
+                .reply_markup(menu::bot_update_confirm_menu())
+                .await?;
+        }
+        Action::AdminUpdateRun => {
+            bot.send_message(chat, "⏳ Обновление запущено. Бот вернётся после автоматического перезапуска. Статус: systemctl status awgram-self-update")
+                .await?;
+            if let Err(error) = vpn.schedule_bot_update().await {
+                bot.send_message(chat, format!("❌ Не удалось запустить обновление: {error}"))
+                    .reply_markup(menu::admin_system_hub())
+                    .await?;
+            }
         }
         Action::ServerAdd => {
             bot.send_message(chat,"➕ Новый паспорт VPS\n\nОтправьте одной строкой:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | ДАТА ОТКРЫТИЯ\n\nПример:\nNetherlands #1 | nl1.example.com | 192.0.2.10 | Hoster | Amsterdam | modern | 2026-03-15").await?;
@@ -3687,7 +3799,10 @@ async fn callback_handler(
             bot.send_message(chat,"➕ Создание ключей\n\nВыберите одиночное создание или пакет. После создания ключ можно привязать к пользователю и группе из его карточки.").reply_markup(menu::admin_create_menu()).await?;
         }
         Action::AdminOwners => {
-            owners_screen(&bot, chat, &settings).await?;
+            owners_screen(&bot, chat, &settings, 0).await?;
+        }
+        Action::AdminOwnersPage(page) => {
+            owners_screen(&bot, chat, &settings, page).await?;
         }
         Action::AdminFinance => {
             finance_screen(&bot, chat, &settings).await?;
@@ -3971,6 +4086,11 @@ async fn callback_handler(
                 .update(State::AwaitingUserBalance { user_id })
                 .await?;
         }
+        Action::AdminUserDiscount(user_id) => {
+            bot.send_message(chat, "Введите скидку в процентах: 25 — бессрочно; 25 2027-12-31 — до даты; clear — удалить.")
+                .await?;
+            dialogue.update(State::AwaitingUserDiscount { user_id }).await?;
+        }
         Action::AdminUserNote(user_id) => {
             bot.send_message(
                 chat,
@@ -4044,9 +4164,25 @@ async fn callback_handler(
                 .await?;
         }
         Action::Buy => {
-            bot.send_message(chat, "Выберите срок подписки:")
-                .reply_markup(menu::buy_terms_menu())
+            let servers = settings
+                .available_vpn_servers()
+                .into_iter()
+                .filter(|server| server.is_local)
+                .collect::<Vec<_>>();
+            bot.send_message(chat, if servers.is_empty() { "Сейчас нет доступных локаций. Администратор уже может проверить лимиты серверов." } else { "Выберите локацию и протокол:" })
+                .reply_markup(menu::buy_servers_menu(&servers, &settings))
                 .await?;
+        }
+        Action::BuyServer(server_id) => {
+            let available = settings.available_vpn_servers().into_iter().any(|server| server.id == server_id && server.is_local);
+            if available && settings.set_purchase_server(uid, server_id, now_epoch()) {
+                bot.send_message(chat, "Выберите срок подписки:")
+                    .reply_markup(menu::buy_terms_menu())
+                    .await?;
+            } else {
+                bot.send_message(chat, "Эта локация заполнена или временно недоступна.")
+                    .await?;
+            }
         }
         Action::BuyTerm(months) => {
             if tariff(months).is_some() {
@@ -4059,7 +4195,7 @@ async fn callback_handler(
             let Some((base_amount, _)) = tariff(months) else {
                 return Ok(());
             };
-            let discount = settings.take_promo_discount(uid);
+            let discount = settings.purchase_discount(uid, now_epoch());
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
             if method == "balance" {
                 let reference = format!("balance:{}:{}", uid, now_epoch());
@@ -4069,7 +4205,11 @@ async fn callback_handler(
                         .await?;
                     return Ok(());
                 }
-                match provision_customer_key(&vpn, &settings, uid, months).await {
+                let Some(server_id) = settings.purchase_server(uid) else {
+                    bot.send_message(chat, "Сначала выберите локацию.").await?;
+                    return Ok(());
+                };
+                match provision_customer_key(&vpn, &settings, uid, months, server_id).await {
                     Ok(result) => {
                         if let Some(referrer) = settings.user(uid).and_then(|u| u.referrer_id) {
                             let reward = amount * i64::from(settings.referral_percent()) / 100;
@@ -4118,7 +4258,7 @@ async fn callback_handler(
                 }
             } else if method == "manual" {
                 if let Some(id) =
-                    settings.create_payment_request(uid, months, amount, "manual", now_epoch())
+                    settings.purchase_server(uid).and_then(|server_id| settings.create_payment_request_on_server(uid, months, amount, "manual", server_id, now_epoch()))
                 {
                     let text = format!(
                         "Заявка #{id}\nТариф: {months} мес.\nСумма: {} ₽\n\n{}",
@@ -4171,7 +4311,7 @@ async fn callback_handler(
             if settings.client_owner(&name) == Some(uid) && vpn.exists(&name).await.unwrap_or(false)
             {
                 if settings.is_legacy_client(&name, uid) {
-                    let price = settings.legacy_renewal_price_kopecks();
+                    let price = settings.legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
                     let target = crate::calendar::legacy_renewal_target(
                         now_epoch(),
                         vpn.client_expiry(&name),
@@ -4206,7 +4346,7 @@ async fn callback_handler(
             {
                 let target =
                     crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
-                let price = settings.legacy_renewal_price_kopecks();
+                let price = settings.legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
                 bot.send_message(chat,format!("Продление ключа «{name}» до 31.12.{} стоит {:.2} ₽. Выберите способ оплаты:",crate::calendar::year_at(target),price as f64 / 100.0)).reply_markup(menu::legacy_renew_method_menu(&name)).await?;
             }
         }
@@ -4217,7 +4357,7 @@ async fn callback_handler(
             {
                 return Ok(());
             }
-            let amount = settings.legacy_renewal_price_kopecks();
+            let amount = settings.legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
             let target =
                 crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
             if method == "balance" {
@@ -4287,7 +4427,7 @@ async fn callback_handler(
             let Some((base_amount, expiry)) = tariff(months) else {
                 return Ok(());
             };
-            let discount = settings.take_promo_discount(uid);
+            let discount = settings.purchase_discount(uid, now_epoch());
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
             let seconds = duration_seconds(expiry).unwrap_or(0);
             if method == "balance" {
@@ -4481,7 +4621,11 @@ async fn callback_handler(
                 }
                 return Ok(());
             }
-            match provision_customer_key(&vpn, &settings, req.user_id, req.months).await {
+            let Some(server_id) = req.server_id.or_else(|| settings.purchase_server(req.user_id)) else {
+                bot.send_message(chat, "В заявке не указана локация; попросите пользователя создать новую заявку.").await?;
+                return Ok(());
+            };
+            match provision_customer_key(&vpn, &settings, req.user_id, req.months, server_id).await {
                 Ok(result) => {
                     if settings.decide_payment(
                         id,
@@ -4732,6 +4876,55 @@ async fn callback_handler(
                     bot.send_message(chat, i18n::error_text(lang, &e)).await?;
                 }
             }
+        }
+        Action::CustomerMove(name) => {
+            if settings.client_owner(&name) != Some(uid) {
+                return Ok(());
+            }
+            let servers = settings
+                .available_vpn_servers()
+                .into_iter()
+                .filter(|server| server.is_local)
+                .collect::<Vec<_>>();
+            bot.send_message(chat, "🔄 Замена ключа и локации\n\nСначала будет создан новый ключ. Старый удалится только после успешного выпуска нового. Выберите доступную локацию:")
+                .reply_markup(menu::customer_move_servers_menu(&name, &servers, &settings))
+                .await?;
+        }
+        Action::CustomerMoveServer(name, server_id) => {
+            if settings.client_owner(&name) != Some(uid) {
+                return Ok(());
+            }
+            let Some(server) = settings.vpn_server(server_id).filter(|server| {
+                server.is_local
+                    && server.enabled_for_provisioning
+                    && settings.server_client_count(server.id) < server.capacity
+            }) else {
+                bot.send_message(chat, "Локация заполнена или недоступна.").await?;
+                return Ok(());
+            };
+            let user = settings.user(uid).ok_or_else(|| crate::error::Error::Parse("пользователь не найден".into()))?;
+            let existing = vpn.list().await?.into_iter().map(|client| client.name).collect::<std::collections::HashSet<_>>();
+            let new_name = crate::vpn::validate::gen_available_names(&customer_base_name(&user), 1, &existing)
+                .map_err(|error| crate::error::Error::Parse(error.to_string()))?
+                .remove(0);
+            let expiry = vpn.client_expiry(&name);
+            let replacement = vpn.add(&new_name, None, settings.psk_default()).await?;
+            if let Some(expires_at) = expiry {
+                if let Err(error) = vpn.set_client_expiry(&new_name, Some(expires_at)).await {
+                    let _ = vpn.remove(&new_name).await;
+                    return Err(error.into());
+                }
+            }
+            if let Err(error) = vpn.remove(&name).await {
+                let _ = vpn.remove(&new_name).await;
+                return Err(error.into());
+            }
+            settings.assign_client_group(&new_name, None, now_epoch());
+            settings.assign_client_owner(&new_name, Some(uid));
+            settings.assign_client_server(&new_name, server_id, &server.protocol);
+            settings.log_event(now_epoch(), EventKind::Regen, Some(&new_name), Some(uid), Some(&format!("replaced={name} server={server_id}")));
+            bot.send_message(chat, format!("✅ Старый ключ «{name}» удалён. Новый ключ «{new_name}» создан в локации {} ({}) и сохранил прежний срок.", server.location, server.protocol)).await?;
+            render::send_client_files(&bot, chat, lang, &replacement).await?;
         }
         Action::CustomerRefresh(name) => {
             if settings.client_owner(&name) == Some(uid) {
@@ -6646,6 +6839,8 @@ mod tests {
             AdminUsersHub,
             AdminCommunication,
             AdminSystem,
+            AdminUpdate,
+            AdminUpdateRun,
             ServerAdd,
             ServerCard(1),
             ServerBilling,
@@ -6655,6 +6850,7 @@ mod tests {
             ServerEnrollRevoke(1),
             AdminCreate,
             AdminOwners,
+            AdminOwnersPage(0),
             AdminFinance,
             AdminSupport,
             AdminBroadcast,
@@ -6669,6 +6865,7 @@ mod tests {
             AdminUserKeys(1),
             AdminUserPayments(1),
             AdminUserBalance(1),
+            AdminUserDiscount(1),
             AdminUserNote(1),
             AdminUserBlock(1, true),
             StatsSection("vpn".into()),
@@ -6752,6 +6949,9 @@ mod tests {
             MoveClientTo(None, "s".into()),
             GroupScopeAsk,
             GroupScopeSet(crate::store::ListScope::All),
+            BuyServer(1),
+            CustomerMove("s".into()),
+            CustomerMoveServer("s".into(), 1),
             Unknown,
         ];
 
@@ -6768,6 +6968,8 @@ mod tests {
                 AdminUsersHub => {}
                 AdminCommunication => {}
                 AdminSystem => {}
+                AdminUpdate => {}
+                AdminUpdateRun => {}
                 ServerAdd => {}
                 ServerCard(_) => {}
                 ServerBilling => {}
@@ -6777,6 +6979,7 @@ mod tests {
                 ServerEnrollRevoke(_) => {}
                 AdminCreate => {}
                 AdminOwners => {}
+                AdminOwnersPage(_) => {}
                 AdminFinance => {}
                 AdminSupport => {}
                 AdminBroadcast => {}
@@ -6791,6 +6994,7 @@ mod tests {
                 AdminUserKeys(_) => {}
                 AdminUserPayments(_) => {}
                 AdminUserBalance(_) => {}
+                AdminUserDiscount(_) => {}
                 AdminUserNote(_) => {}
                 AdminUserBlock(_, _) => {}
                 StatsSection(_) => {}
@@ -6875,6 +7079,7 @@ mod tests {
                 GroupScopeAsk => {}
                 GroupScopeSet(_) => {}
                 Buy => {}
+                BuyServer(_) => {}
                 BuyTerm(_) => {}
                 BuyMethod(_, _) => {}
                 BuyPaid(_) => {}
@@ -6888,6 +7093,8 @@ mod tests {
                 SetClientEnabled(_, _) => {}
                 PaymentInstructionsAsk => {}
                 CustomerKey(_) => {}
+                CustomerMove(_) => {}
+                CustomerMoveServer(_, _) => {}
                 CustomerRefresh(_) => {}
                 CustomerRefreshRun(_) => {}
                 Renew(_) => {}

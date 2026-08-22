@@ -106,6 +106,9 @@ pub enum State {
     AwaitingUserBalance {
         user_id: i64,
     },
+    AwaitingUserDiscount {
+        user_id: i64,
+    },
     AwaitingUserNote {
         user_id: i64,
     },

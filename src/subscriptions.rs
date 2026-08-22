@@ -92,7 +92,10 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
                 continue;
             }
             let target_year = year + 1;
-            let price = store.legacy_renewal_price_kopecks();
+            let price = store.legacy_renewal_price_for_user(
+                user_id,
+                store.legacy_renewal_price_kopecks(),
+            );
             let sent=bot.send_message(ChatId(user_id),format!("🔧 Напоминание о техническом тарифе\n\nКлюч «{name}» действует до конца этого года. Продление за {:.2} ₽ сохранит доступ до 31.12.{target_year}.", price as f64 / 100.0))
                 .reply_markup(crate::bot::menu::legacy_renew_menu(&name, price)).await;
             if let Err(error) = sent {

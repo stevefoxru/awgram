@@ -24,6 +24,7 @@ pub struct VpnServer {
     pub order_ref: Option<String>,
     pub note: Option<String>,
     pub is_local: bool,
+    pub capacity: i64,
 }
 
 pub struct NewVpnServer<'a> {
@@ -67,10 +68,11 @@ fn server_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VpnServer> {
         order_ref: row.get(17)?,
         note: row.get(18)?,
         is_local: row.get::<_, i64>(19)? != 0,
+        capacity: row.get(20)?,
     })
 }
 
-const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local";
+const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local,capacity";
 
 impl Store {
     pub fn ensure_local_vpn_server(&self, hostname: &str, actor: i64, now: i64) -> Option<i64> {
@@ -87,6 +89,10 @@ impl Store {
                 )
                 .optional()?
             {
+                c.execute(
+                    "UPDATE clients SET server_id=?1 WHERE server_id IS NULL AND removed_at IS NULL",
+                    [id],
+                )?;
                 return Ok(id);
             }
             if let Some(id) = c
@@ -98,18 +104,27 @@ impl Store {
                 .optional()?
             {
                 c.execute(
-                    "UPDATE vpn_servers SET is_local=1,updated_at=?2 WHERE id=?1",
+                    "UPDATE vpn_servers SET is_local=1,enabled_for_provisioning=1,updated_at=?2 WHERE id=?1",
                     rusqlite::params![id, now],
+                )?;
+                c.execute(
+                    "UPDATE clients SET server_id=?1 WHERE server_id IS NULL AND removed_at IS NULL",
+                    [id],
                 )?;
                 return Ok(id);
             }
             let name = format!("Локальный · {hostname}");
             c.execute(
-                "INSERT INTO vpn_servers(name,hostname,public_ip,provider,location,protocol,status,is_local,created_by,added_at,updated_at)
-                 VALUES(?1,?2,'не указан','не указан','не указана','modern','unknown',1,?3,?4,?4)",
+                "INSERT INTO vpn_servers(name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,is_local,created_by,added_at,updated_at)
+                 VALUES(?1,?2,'не указан','не указан','не указана','modern','unknown',1,1,?3,?4,?4)",
                 rusqlite::params![name, hostname, actor, now],
             )?;
-            Ok(c.last_insert_rowid())
+            let id = c.last_insert_rowid();
+            c.execute(
+                "UPDATE clients SET server_id=?1 WHERE server_id IS NULL AND removed_at IS NULL",
+                [id],
+            )?;
+            Ok(id)
         })
         .ok()
     }
@@ -118,7 +133,7 @@ impl Store {
         let valid = !value.name.trim().is_empty()
             && !value.hostname.trim().is_empty()
             && !value.public_ip.trim().is_empty()
-            && matches!(value.protocol, "modern" | "legacy");
+            && valid_protocol(value.protocol);
         if !valid {
             return None;
         }
@@ -180,7 +195,7 @@ impl Store {
         if value.name.trim().is_empty()
             || value.hostname.trim().is_empty()
             || value.public_ip.trim().is_empty()
-            || !matches!(value.protocol, "modern" | "legacy")
+            || !valid_protocol(value.protocol)
         {
             return false;
         }
@@ -220,6 +235,70 @@ impl Store {
         .is_ok_and(|n| n == 1)
     }
 
+    pub fn set_server_capacity(&self, id: i64, capacity: i64, now: i64) -> bool {
+        if !(1..=100_000).contains(&capacity) {
+            return false;
+        }
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE vpn_servers SET capacity=?2,updated_at=?3 WHERE id=?1",
+                rusqlite::params![id, capacity, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn set_server_provisioning(&self, id: i64, enabled: bool, now: i64) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE vpn_servers SET enabled_for_provisioning=?2,updated_at=?3 WHERE id=?1",
+                rusqlite::params![id, enabled as i64, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn server_client_count(&self, id: i64) -> i64 {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM clients WHERE server_id=?1 AND removed_at IS NULL",
+                [id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap_or(0)
+    }
+
+    pub fn available_vpn_servers(&self) -> Vec<VpnServer> {
+        self.vpn_servers()
+            .into_iter()
+            .filter(|server| {
+                server.enabled_for_provisioning
+                    && server.status != "offline"
+                    && self.server_client_count(server.id) < server.capacity
+            })
+            .collect()
+    }
+
+    pub fn assign_client_server(&self, name: &str, server_id: i64, protocol: &str) -> bool {
+        if !valid_protocol(protocol) {
+            return false;
+        }
+        let Some(server) = self.vpn_server(server_id) else {
+            return false;
+        };
+        if self.server_client_count(server_id) >= server.capacity {
+            return false;
+        }
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE clients SET server_id=?2,protocol=?3 WHERE name=?1 AND removed_at IS NULL",
+                rusqlite::params![name, server_id, protocol],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
     pub fn mark_server_billing_notification(
         &self,
         id: i64,
@@ -232,6 +311,13 @@ impl Store {
             rusqlite::params![id,paid_until,days,now]
         )).is_ok_and(|n|n==1)
     }
+}
+
+pub fn valid_protocol(value: &str) -> bool {
+    matches!(
+        value,
+        "modern" | "legacy" | "amneziawg-2" | "amneziawg-1" | "wireguard" | "openvpn" | "outline"
+    )
 }
 
 #[cfg(test)]

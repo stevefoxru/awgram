@@ -46,6 +46,7 @@ pub struct PaymentRequest {
     pub proof: Option<String>,
     pub client_name: Option<String>,
     pub created_at: i64,
+    pub server_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -232,7 +233,7 @@ impl Store {
     }
 
     pub fn user_payments(&self, user_id: i64, limit: usize) -> Vec<PaymentRequest> {
-        self.with_conn(|c| { let mut s=c.prepare("SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at FROM payment_requests WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2")?; let rows=s.query_map(rusqlite::params![user_id,limit as i64],payment_from_row)?; rows.collect() }).unwrap_or_default()
+        self.with_conn(|c| { let mut s=c.prepare("SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at,server_id FROM payment_requests WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2")?; let rows=s.query_map(rusqlite::params![user_id,limit as i64],payment_from_row)?; rows.collect() }).unwrap_or_default()
     }
 
     pub fn create_promo(
@@ -454,6 +455,81 @@ impl Store {
             Ok(value.unwrap_or(0))
         })
         .unwrap_or(0)
+    }
+
+    /// Наибольшая применимая скидка: постоянная/срочная персональная либо
+    /// одноразовый промокод. Одноразовая скидка расходуется только здесь.
+    pub fn purchase_discount(&self, user_id: i64, now: i64) -> i64 {
+        let personal = self.with_conn(|c| {
+            c.query_row(
+                "SELECT personal_discount,personal_discount_until FROM users WHERE user_id=?1",
+                [user_id],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+        }).ok().and_then(|(discount, until)| {
+            discount.filter(|_| until.is_none_or(|expires| expires > now))
+        }).unwrap_or(0);
+        personal.max(self.take_promo_discount(user_id)).clamp(0, 100)
+    }
+
+    pub fn set_personal_discount(
+        &self,
+        user_id: i64,
+        discount: Option<i64>,
+        until: Option<i64>,
+    ) -> bool {
+        if discount.is_some_and(|value| !(0..=100).contains(&value)) {
+            return false;
+        }
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE users SET personal_discount=?2,personal_discount_until=?3 WHERE user_id=?1",
+                rusqlite::params![user_id, discount, until],
+            )
+        }).is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn personal_discount(&self, user_id: i64, now: i64) -> Option<(i64, Option<i64>)> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT personal_discount,personal_discount_until FROM users WHERE user_id=?1",
+                [user_id],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+        }).ok().and_then(|(discount, until)| {
+            discount
+                .filter(|_| until.is_none_or(|expires| expires > now))
+                .map(|value| (value, until))
+        })
+    }
+
+    pub fn set_purchase_server(&self, user_id: i64, server_id: i64, now: i64) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO purchase_preferences(user_id,server_id,updated_at) VALUES(?1,?2,?3)
+                 ON CONFLICT(user_id) DO UPDATE SET server_id=?2,updated_at=?3",
+                rusqlite::params![user_id, server_id, now],
+            )
+        }).is_ok()
+    }
+
+    pub fn purchase_server(&self, user_id: i64) -> Option<i64> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT server_id FROM purchase_preferences WHERE user_id=?1",
+                [user_id],
+                |row| row.get(0),
+            ).optional()
+        }).ok().flatten()
+    }
+
+    pub fn legacy_renewal_price_for_user(&self, user_id: i64, base: i64) -> i64 {
+        let count = self.legacy_clients().into_iter().filter(|(_, owner)| *owner == user_id).count();
+        match count {
+            10.. => 50_000,
+            6..=9 => 75_000,
+            _ => base,
+        }
     }
 
     pub fn set_subscription_pause(
@@ -807,7 +883,7 @@ impl Store {
     pub fn recent_payments(&self, limit: usize) -> Vec<PaymentRequest> {
         self.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at
+                "SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at,server_id
                  FROM payment_requests ORDER BY created_at DESC LIMIT ?1",
             )?;
             let rows = stmt.query_map([limit as i64], payment_from_row)?;
@@ -972,6 +1048,25 @@ impl Store {
         .ok()
     }
 
+    pub fn create_payment_request_on_server(
+        &self,
+        user_id: i64,
+        months: i64,
+        amount_kopecks: i64,
+        method: &str,
+        server_id: i64,
+        now: i64,
+    ) -> Option<i64> {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO payment_requests(user_id,months,amount_kopecks,method,server_id,created_at)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![user_id, months, amount_kopecks, method, server_id, now],
+            )?;
+            Ok(c.last_insert_rowid())
+        }).ok()
+    }
+
     pub fn create_renewal_request(
         &self,
         user_id: i64,
@@ -1023,7 +1118,7 @@ impl Store {
     pub fn payment_request(&self, id: i64) -> Option<PaymentRequest> {
         self.with_conn(|c| {
             c.query_row(
-                "SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at
+                "SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at,server_id
                  FROM payment_requests WHERE id=?1",
                 [id],
                 payment_from_row,
@@ -1037,7 +1132,7 @@ impl Store {
     pub fn pending_payments(&self) -> Vec<PaymentRequest> {
         self.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at
+                "SELECT id,user_id,months,amount_kopecks,method,status,proof,client_name,created_at,server_id
                  FROM payment_requests WHERE status='pending' ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], payment_from_row)?;
@@ -1153,6 +1248,7 @@ fn payment_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentRequest> {
         proof: r.get(6)?,
         client_name: r.get(7)?,
         created_at: r.get(8)?,
+        server_id: r.get(9)?,
     })
 }
 
