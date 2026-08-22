@@ -495,7 +495,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 14);
+        assert_eq!(store.schema_version(), 15);
     }
 
     #[test]
@@ -504,12 +504,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 14);
+        assert_eq!(store.schema_version(), 15);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 14);
+        assert_eq!(store.schema_version(), 15);
     }
 }
