@@ -7419,6 +7419,10 @@ mod tests {
                 StatsSection(_) => {}
                 SupportFilter(_) => {}
                 AdminPromos => {}
+                AdminCommerce => {}
+                AdminPricesRub => {}
+                AdminPricesStars => {}
+                AdminReferral => {}
                 AdminPromoAction(_) => {}
                 ClientNoteAsk(_) => {}
                 LegacyRenew(_) => {}
@@ -7428,6 +7432,7 @@ mod tests {
                 LegacyRequestApprove(_) => {}
                 LegacyRequestReject(_) => {}
                 PromoInput => {}
+                Guide(_) => {}
                 LegacyPriceAsk => {}
                 Menu => {}
                 List => {}
