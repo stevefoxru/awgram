@@ -2544,7 +2544,7 @@ async fn message_handler(
                 .reply_markup(menu::server_card_menu(id))
                 .await?;
         } else {
-            bot.send_message(msg.chat.id,"Не удалось сохранить. Формат: НАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | YYYY-MM-DD").await?;
+            bot.send_message(msg.chat.id,"Не удалось сохранить. Протокол: modern, legacy, amneziawg-2, amneziawg-1, wireguard, openvpn или outline.").await?;
         }
         return Ok(());
     }
@@ -2640,7 +2640,7 @@ async fn message_handler(
                 .reply_markup(menu::server_card_menu(server_id))
                 .await?;
         } else {
-            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Формат: НАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | YYYY-MM-DD").await?;
+            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Проверьте дату и протокол: modern, legacy, amneziawg-2, amneziawg-1, wireguard, openvpn или outline.").await?;
         }
         return Ok(());
     }
@@ -3731,7 +3731,7 @@ async fn callback_handler(
             }
         }
         Action::ServerAdd => {
-            bot.send_message(chat,"➕ Новый паспорт VPS\n\nОтправьте одной строкой:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | ДАТА ОТКРЫТИЯ\n\nПример:\nNetherlands #1 | nl1.example.com | 192.0.2.10 | Hoster | Amsterdam | modern | 2026-03-15").await?;
+            bot.send_message(chat,"➕ Новый паспорт VPS\n\nОтправьте одной строкой:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПротокол: modern, legacy, amneziawg-2, amneziawg-1, wireguard, openvpn или outline.\nПример:\nNetherlands #1 | nl1.example.com | 192.0.2.10 | Hoster | Amsterdam | amneziawg-2 | 2026-03-15").await?;
             dialogue.update(State::AwaitingServerAdd).await?;
         }
         Action::ServerCard(id) => {
@@ -3779,7 +3779,7 @@ async fn callback_handler(
         }
         Action::ServerPassportAsk(id) => {
             if let Some(server) = settings.vpn_server(id) {
-                bot.send_message(chat,format!("✏️ Редактирование паспорта\n\nОтправьте:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | modern или legacy | ДАТА ОТКРЫТИЯ\n\nТекущие данные:\n{} | {} | {} | {} | {} | {} | {}",server.name,server.hostname,server.public_ip,server.provider,server.location,server.protocol,server.opened_at.map(crate::calendar::format_date).unwrap_or_else(||"YYYY-MM-DD".into()))).await?;
+                bot.send_message(chat,format!("✏️ Редактирование паспорта\n\nОтправьте:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПротокол: modern, legacy, amneziawg-2, amneziawg-1, wireguard, openvpn или outline.\n\nТекущие данные:\n{} | {} | {} | {} | {} | {} | {}",server.name,server.hostname,server.public_ip,server.provider,server.location,server.protocol,server.opened_at.map(crate::calendar::format_date).unwrap_or_else(||"YYYY-MM-DD".into()))).await?;
                 dialogue
                     .update(State::AwaitingServerPassport { server_id: id })
                     .await?;
@@ -7359,6 +7359,7 @@ mod tests {
             (Action::AdminUserKeys(1), true, false),
             (Action::AdminUserPayments(1), true, false),
             (Action::AdminUserBalance(1), true, false),
+            (Action::AdminUserDiscount(1), true, false),
             (Action::AdminUserNote(1), true, false),
             (Action::AdminUserBlock(1, true), true, false),
             (Action::StatsSection("vpn".into()), true, false),
