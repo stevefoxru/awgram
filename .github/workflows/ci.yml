@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           status=0
-          output="$(cargo test 2>&1)" || status=$?
+          output="$(cargo test -- --test-threads=1 --format terse 2>&1)" || status=$?
           printf '%s\n' "$output"
           if (( status != 0 )); then
             output="$(printf '%s\n' "$output" | tail -n 120)"
