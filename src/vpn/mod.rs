@@ -169,6 +169,12 @@ impl Vpn {
             ));
         }
         let helper = "/usr/local/libexec/awgram-deployctl";
+        if !std::path::Path::new(helper).is_file() {
+            return Err(crate::error::Error::Parse(
+                "не установлен системный helper awgram-deployctl; повторите обновление через install.sh"
+                    .into(),
+            ));
+        }
         let port = request.port.to_string();
         let server_id = request.server_id.to_string();
         let mut command = tokio::process::Command::new(if self.sudo_prefix.is_empty() {

@@ -872,6 +872,15 @@ cmd_update() {
   elif [ -n "$BINARY_FILE" ]; then tag="local"
   else tag="$(fetch_latest_tag "${CHANNEL:-stable}")"; fi
   if [ "$tag" = "$INSTALLED_VERSION" ] && [ -z "$BINARY_FILE" ] && [ -z "$PIN_VERSION" ]; then
+    # Даже когда бинарник уже актуален, восстанавливаем системные helpers.
+    # Это нужно после перехода со старого setup-скрипта: он мог обновить
+    # бинарник первым, но ещё не знать о helper, добавленном новой версией.
+    ensure_deps
+    install_clientctl
+    install_updatectl
+    install_deployctl
+    if [ "$MODE" = "hardened" ]; then write_sudoers; fi
+    update_setup_script "$tag"
     [ ! -f "$SETUP_CONF" ] || save_setup_conf
     info up_to_date "$tag"; return 0
   fi
