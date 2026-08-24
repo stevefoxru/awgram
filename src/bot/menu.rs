@@ -215,6 +215,11 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
                 &format!("server:enroll:revoke:{id}"),
             ),
         ],
+        vec![cb(
+            "🚀 Установить VPN на VPS",
+            &format!("server:deploy:{id}"),
+        )],
+        vec![cb("⭐ Сделать основным", &format!("server:default:{id}"))],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),

@@ -159,6 +159,11 @@ The bot is a layer on top of `manage_amneziawg.sh` from
 [bivlked/amneziawg-installer](https://github.com/bivlked/amneziawg-installer)
 and depends directly on its interface.
 
+To provision a separate AWG 1.0 node, create a VPS passport with the
+`amneziawg-1` protocol and choose “Install VPN on VPS” in its card. The initial
+password is used in process memory only; subsequent access uses a dedicated
+SSH key restricted to the node management command set.
+
 - **Supported installer version:
   [v5.25.0](https://github.com/bivlked/amneziawg-installer/releases/tag/v5.25.0)**
   (`--json` contract verified). Minimum is

@@ -134,6 +134,9 @@ pub enum State {
     AwaitingServerPassport {
         server_id: i64,
     },
+    AwaitingServerDeployCredentials {
+        server_id: i64,
+    },
 }
 
 #[cfg(test)]

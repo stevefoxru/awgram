@@ -299,6 +299,20 @@ impl Store {
         .is_ok_and(|changed| changed == 1)
     }
 
+    pub fn client_vpn_server(&self, name: &str) -> Option<VpnServer> {
+        self.with_conn(|connection| {
+            connection
+                .query_row(
+                    &format!("SELECT {SERVER_COLUMNS} FROM vpn_servers WHERE id=(SELECT server_id FROM clients WHERE name=?1 AND removed_at IS NULL)"),
+                    [name],
+                    server_from_row,
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
     pub fn mark_server_billing_notification(
         &self,
         id: i64,

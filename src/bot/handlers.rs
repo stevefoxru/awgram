@@ -36,6 +36,7 @@ pub enum Action {
     ServerEnroll(i64),
     ServerEnrollRevoke(i64),
     ServerSetDefault(i64),
+    ServerDeployAsk(i64),
     AdminCreate,
     AdminOwners,
     AdminOwnersPage(usize),
@@ -414,6 +415,10 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::ServerSetDefault)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:deploy:") {
+                v.parse()
+                    .map(Action::ServerDeployAsk)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
                     .map(Action::ServerEnroll)
@@ -760,11 +765,6 @@ async fn provision_customer_key(
     let server = settings
         .vpn_server(server_id)
         .ok_or_else(|| crate::error::Error::Parse("локация не найдена".to_string()))?;
-    if !server.is_local {
-        return Err(crate::error::Error::Parse(
-            "удалённый узел ещё не подключён к транспортному агенту".to_string(),
-        ));
-    }
     if !server.enabled_for_provisioning
         || settings.server_client_count(server_id) >= server.capacity
     {
@@ -786,11 +786,29 @@ async fn provision_customer_key(
         .remove(0);
     let expiry = tariff_duration(months)
         .ok_or_else(|| crate::error::Error::Parse("неизвестный тариф".to_string()))?;
-    let result = vpn.add(&name, Some(expiry), settings.psk_default()).await?;
+    let result = if server.is_local {
+        vpn.add(&name, Some(expiry), settings.psk_default()).await?
+    } else {
+        let result = vpn.remote_add(&server, &name).await?;
+        let seconds = parse_duration(expiry)
+            .ok_or_else(|| crate::error::Error::Parse("неверный срок тарифа".into()))?;
+        if let Err(error) = vpn
+            .remote_set_expiry(&server, &name, now_epoch() + seconds)
+            .await
+        {
+            let _ = vpn.remote_remove(&server, &name).await;
+            return Err(error);
+        }
+        result
+    };
     settings.assign_client_group(&name, None, now_epoch());
     settings.assign_client_owner(&name, Some(user_id));
     if !settings.assign_client_server(&name, server_id, &server.protocol) {
-        let _ = vpn.remove(&name).await;
+        if server.is_local {
+            let _ = vpn.remove(&name).await;
+        } else {
+            let _ = vpn.remote_remove(&server, &name).await;
+        }
         return Err(crate::error::Error::Parse(
             "не удалось закрепить ключ за сервером".to_string(),
         ));
@@ -1344,6 +1362,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerEnroll(_)
         | ServerEnrollRevoke(_)
         | ServerSetDefault(_)
+        | ServerDeployAsk(_)
         | AdminCreate
         | AdminOwners
         | AdminOwnersPage(_)
@@ -2875,6 +2894,69 @@ async fn message_handler(
         }
         return Ok(());
     }
+    if let State::AwaitingServerDeployCredentials { server_id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let raw = msg.text().unwrap_or_default();
+        let mut parts = raw.splitn(2, '|').map(str::trim);
+        let user = parts.next().unwrap_or_default();
+        let mut password = parts.next().unwrap_or_default().to_owned();
+        // Сообщение содержит секрет: удаляем его до сетевого запроса и никогда
+        // не записываем пароль в БД или журнал.
+        let _ = bot.delete_message(msg.chat.id, msg.id).await;
+        let Some(server) = settings.vpn_server(server_id) else {
+            password.clear();
+            dialogue.update(State::Idle).await?;
+            bot.send_message(msg.chat.id, "Сервер не найден.").await?;
+            return Ok(());
+        };
+        if user != "root" || password.is_empty() {
+            password.clear();
+            bot.send_message(msg.chat.id, "Неверный формат. Отправьте: root | ПАРОЛЬ")
+                .await?;
+            return Ok(());
+        }
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "⏳ Подключаюсь к {} и запускаю установку AWG 1.0…",
+                server.public_ip
+            ),
+        )
+        .await?;
+        let result = vpn
+            .deploy_node(crate::vpn::DeployRequest {
+                host: &server.public_ip,
+                port: 22,
+                user,
+                password: &password,
+                server_id: server.id,
+                protocol: &server.protocol,
+            })
+            .await;
+        password.clear();
+        dialogue.update(State::Idle).await?;
+        match result {
+            Ok(_) => {
+                settings.set_server_status(server.id, "maintenance", now_epoch());
+                settings.set_server_provisioning(server.id, false, now_epoch());
+                bot.send_message(msg.chat.id, "✅ Установка запущена. Пароль удалён. VPS может перезагрузиться дважды; после готовности включите выдачу и назначьте сервер основным.")
+                    .reply_markup(menu::server_card_menu(server.id)).await?;
+            }
+            Err(error) => {
+                tracing::warn!(server_id = server.id, %error, "server deployment failed");
+                bot.send_message(
+                    msg.chat.id,
+                    format!("❌ Не удалось запустить установку: {error}"),
+                )
+                .reply_markup(menu::server_card_menu(server.id))
+                .await?;
+            }
+        }
+        return Ok(());
+    }
     if role == Role::Denied && settings.user_blocked(uid) {
         if msg.text() == Some("🆘 Поддержка") {
             bot.send_message(msg.chat.id, "Выберите тему обращения:")
@@ -4061,6 +4143,26 @@ async fn callback_handler(
             } else {
                 bot.send_message(chat, "Сначала сервер должен подключиться, пройти проверку и быть включён для выдачи.")
                     .reply_markup(menu::server_card_menu(id)).await?;
+            }
+        }
+        Action::ServerDeployAsk(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                if server.is_local {
+                    bot.send_message(
+                        chat,
+                        "Этот сервер локальный — удалённая установка ему не нужна.",
+                    )
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+                } else if !matches!(server.protocol.as_str(), "legacy" | "amneziawg-1") {
+                    bot.send_message(chat, "Автоустановка в 0.18.0 поддерживает AWG 1.0. Укажите протокол amneziawg-1 в паспорте VPS.")
+                        .reply_markup(menu::server_card_menu(id)).await?;
+                } else {
+                    bot.send_message(chat, format!("🚀 Установка AWG 1.0 на {}\n\nОтправьте одним сообщением:\nroot | ПАРОЛЬ\n\nСообщение будет сразу удалено, пароль не сохраняется и используется только для первичного входа. После этого бот установит отдельный SSH-ключ.", server.public_ip)).await?;
+                    dialogue
+                        .update(State::AwaitingServerDeployCredentials { server_id: id })
+                        .await?;
+                }
             }
         }
         Action::AdminCreate => {
@@ -5300,11 +5402,7 @@ async fn callback_handler(
             if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
             }
-            let servers = settings
-                .available_vpn_servers()
-                .into_iter()
-                .filter(|server| server.is_local)
-                .collect::<Vec<_>>();
+            let servers = settings.available_vpn_servers().collect::<Vec<_>>();
             bot.send_message(chat, "🔄 Замена ключа и локации\n\nСначала будет создан новый ключ. Старый удалится только после успешного выпуска нового. Выберите доступную локацию:")
                 .reply_markup(menu::customer_move_servers_menu(&name, &servers, &settings))
                 .await?;
@@ -5314,8 +5412,7 @@ async fn callback_handler(
                 return Ok(());
             }
             let Some(server) = settings.vpn_server(server_id).filter(|server| {
-                server.is_local
-                    && server.enabled_for_provisioning
+                server.enabled_for_provisioning
                     && settings.server_client_count(server.id) < server.capacity
             }) else {
                 bot.send_message(chat, "Локация заполнена или недоступна.")
@@ -5336,10 +5433,23 @@ async fn callback_handler(
                     .map_err(|error| crate::error::Error::Parse(error.to_string()))?
                     .remove(0);
             let expiry = vpn.client_expiry(&name);
-            let replacement = vpn.add(&new_name, None, settings.psk_default()).await?;
+            let replacement = if server.is_local {
+                vpn.add(&new_name, None, settings.psk_default()).await?
+            } else {
+                vpn.remote_add(&server, &new_name).await?
+            };
             if let Some(expires_at) = expiry {
-                if let Err(error) = vpn.set_client_expiry(&new_name, Some(expires_at)).await {
-                    let _ = vpn.remove(&new_name).await;
+                let result = if server.is_local {
+                    vpn.set_client_expiry(&new_name, Some(expires_at)).await
+                } else {
+                    vpn.remote_set_expiry(&server, &new_name, expires_at).await
+                };
+                if let Err(error) = result {
+                    if server.is_local {
+                        let _ = vpn.remove(&new_name).await;
+                    } else {
+                        let _ = vpn.remote_remove(&server, &new_name).await;
+                    }
                     return Err(error.into());
                 }
             }
@@ -5349,7 +5459,11 @@ async fn callback_handler(
             let Some(replacement_id) =
                 settings.create_key_replacement(uid, &name, &new_name, server_id, now_epoch())
             else {
-                let _ = vpn.remove(&new_name).await;
+                if server.is_local {
+                    let _ = vpn.remove(&new_name).await;
+                } else {
+                    let _ = vpn.remote_remove(&server, &new_name).await;
+                }
                 bot.send_message(chat, "Для этого ключа уже выполняется замена.")
                     .await?;
                 return Ok(());
@@ -5371,7 +5485,11 @@ async fn callback_handler(
             else {
                 return Ok(());
             };
-            match vpn.remove(&old).await {
+            let removal = match settings.client_vpn_server(&old) {
+                Some(server) if !server.is_local => vpn.remote_remove(&server, &old).await,
+                _ => vpn.remove(&old).await,
+            };
+            match removal {
                 Ok(()) => {
                     bot.send_message(
                         chat,
@@ -5401,7 +5519,14 @@ async fn callback_handler(
             else {
                 return Ok(());
             };
-            let _ = vpn.remove(&new).await;
+            match settings.client_vpn_server(&new) {
+                Some(server) if !server.is_local => {
+                    let _ = vpn.remote_remove(&server, &new).await;
+                }
+                _ => {
+                    let _ = vpn.remove(&new).await;
+                }
+            }
             bot.send_message(
                 chat,
                 format!("❌ Замена отменена. Старый ключ «{old}» сохранён и продолжает работать."),
@@ -7478,6 +7603,7 @@ mod tests {
                 ServerEnroll(_) => {}
                 ServerEnrollRevoke(_) => {}
                 ServerSetDefault(_) => {}
+                ServerDeployAsk(_) => {}
                 AdminCreate => {}
                 AdminOwners => {}
                 AdminOwnersPage(_) => {}
@@ -7800,6 +7926,7 @@ mod tests {
             (Action::ServerEnroll(1), true, false),
             (Action::ServerEnrollRevoke(1), true, false),
             (Action::ServerSetDefault(1), true, false),
+            (Action::ServerDeployAsk(1), true, false),
             (Action::AdminCreate, true, false),
             (Action::AdminOwners, true, false),
             (Action::AdminFinance, true, false),

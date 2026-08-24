@@ -75,6 +75,42 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         }
     }
 
+    for server in store
+        .vpn_servers()
+        .into_iter()
+        .filter(|server| !server.is_local)
+    {
+        match vpn.remote_status(&server).await {
+            Ok(true) => {
+                let became_ready = server.status != "online";
+                store.set_server_status(server.id, "online", now);
+                if server.status == "maintenance" {
+                    store.set_server_provisioning(server.id, true, now);
+                    store.set_default_vpn_server(server.id);
+                }
+                if became_ready {
+                    notify_admins(&bot, cfg, format!("✅ VPS «{}» готов\nAWG 1.0 работает, сервер включён для выдачи и назначен основным.", server.name)).await;
+                }
+            }
+            Ok(false) => {
+                if server.status != "maintenance" {
+                    store.set_server_status(server.id, "warning", now);
+                }
+            }
+            Err(error) => {
+                if server.status == "online" {
+                    store.set_server_status(server.id, "offline", now);
+                    notify_admins(
+                        &bot,
+                        cfg,
+                        format!("🚨 VPS «{}» недоступен: {error}", server.name),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
     for server in store.vpn_servers() {
         let Some(paid_until) = server.paid_until else {
             continue;

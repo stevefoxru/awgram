@@ -4,9 +4,11 @@ pub mod validate;
 pub mod wire;
 
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use crate::config::Config;
 use crate::error::Result;
+use base64::Engine;
 use model::{AddResult, Client};
 use runner::{run, RunSpec};
 
@@ -17,7 +19,194 @@ pub struct Vpn {
     clients_dir: PathBuf,
 }
 
+pub struct DeployRequest<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub user: &'a str,
+    pub password: &'a str,
+    pub server_id: i64,
+    pub protocol: &'a str,
+}
+
 impl Vpn {
+    async fn remote_node_command(
+        &self,
+        server: &crate::store::VpnServer,
+        args: &[&str],
+    ) -> Result<String> {
+        if server.is_local
+            || !server
+                .public_ip
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-'))
+        {
+            return Err(crate::error::Error::Parse(
+                "некорректный удалённый сервер".into(),
+            ));
+        }
+        let key = PathBuf::from("/var/lib/awgram/node_id_ed25519");
+        let known_hosts = PathBuf::from("/var/lib/awgram/node_known_hosts");
+        let key_arg = key.to_string_lossy().into_owned();
+        let known_hosts_arg = format!("UserKnownHostsFile={}", known_hosts.display());
+        let destination = format!("root@{}", server.public_ip);
+        let mut command = tokio::process::Command::new("ssh");
+        command.args([
+            "-i",
+            &key_arg,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            &known_hosts_arg,
+            &destination,
+        ]);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
+            .await
+            .map_err(|_| crate::error::Error::Timeout)??;
+        if !output.status.success() {
+            return Err(crate::error::Error::ScriptFailed {
+                code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    pub async fn remote_status(&self, server: &crate::store::VpnServer) -> Result<bool> {
+        let output = self.remote_node_command(server, &["status"]).await?;
+        let value: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        Ok(value.get("ok").and_then(serde_json::Value::as_bool) == Some(true))
+    }
+
+    pub async fn remote_add(
+        &self,
+        server: &crate::store::VpnServer,
+        name: &str,
+    ) -> Result<AddResult> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let output = self.remote_node_command(server, &["add", &name]).await?;
+        let value: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let conf = value
+            .get("conf_b64")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if conf.is_empty() {
+            return Err(crate::error::Error::Parse(
+                "узел не вернул конфигурацию".into(),
+            ));
+        }
+        let dir = self.clients_dir.join("remote").join(server.id.to_string());
+        std::fs::create_dir_all(&dir)?;
+        let conf_path = dir.join(format!("{name}.conf"));
+        std::fs::write(
+            &conf_path,
+            base64::engine::general_purpose::STANDARD
+                .decode(conf)
+                .map_err(|e| crate::error::Error::Parse(e.to_string()))?,
+        )?;
+        let qr_path = dir.join(format!("{name}.png"));
+        let qr = value
+            .get("qr_b64")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !qr.is_empty() {
+            std::fs::write(
+                &qr_path,
+                base64::engine::general_purpose::STANDARD
+                    .decode(qr)
+                    .map_err(|e| crate::error::Error::Parse(e.to_string()))?,
+            )?;
+        }
+        Ok(AddResult {
+            name,
+            conf_path: conf_path.to_string_lossy().into_owned(),
+            qr_path: if qr.is_empty() {
+                String::new()
+            } else {
+                qr_path.to_string_lossy().into_owned()
+            },
+            uri: String::new(),
+        })
+    }
+
+    pub async fn remote_remove(&self, server: &crate::store::VpnServer, name: &str) -> Result<()> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        self.remote_node_command(server, &["remove", &name]).await?;
+        Ok(())
+    }
+
+    pub async fn remote_set_expiry(
+        &self,
+        server: &crate::store::VpnServer,
+        name: &str,
+        expires_at: i64,
+    ) -> Result<()> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let expiry = expires_at.to_string();
+        self.remote_node_command(server, &["set-expiry", &name, &expiry])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn deploy_node(&self, request: DeployRequest<'_>) -> Result<String> {
+        if request.password.is_empty()
+            || request.user != "root"
+            || !matches!(request.protocol, "legacy" | "amneziawg-1")
+        {
+            return Err(crate::error::Error::Parse(
+                "некорректные параметры развёртывания".into(),
+            ));
+        }
+        let helper = "/usr/local/libexec/awgram-deployctl";
+        let port = request.port.to_string();
+        let server_id = request.server_id.to_string();
+        let mut command = tokio::process::Command::new(if self.sudo_prefix.is_empty() {
+            helper
+        } else {
+            &self.sudo_prefix
+        });
+        if !self.sudo_prefix.is_empty() {
+            command.arg(helper);
+        }
+        command
+            .args([request.host, &port, request.user, &server_id, "legacy"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
+        use tokio::io::AsyncWriteExt;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(request.password.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+        }
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| crate::error::Error::Timeout)??;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() {
+            Ok(stdout)
+        } else {
+            Err(crate::error::Error::ScriptFailed {
+                code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            })
+        }
+    }
     pub fn from_config(cfg: &Config) -> Vpn {
         Vpn {
             script: cfg.manage_script.clone(),

@@ -18,6 +18,7 @@ UNIT_FILE="/etc/systemd/system/awgram.service"
 SUDOERS_FILE="/etc/sudoers.d/awgram"
 CLIENTCTL_PATH="/usr/local/libexec/awgram-clientctl"
 UPDATECTL_PATH="/usr/local/libexec/awgram-updatectl"
+DEPLOYCTL_PATH="/usr/local/libexec/awgram-deployctl"
 SVC_USER="awgram"
 
 UI_LANG=""; MODE=""; TOKEN=""; ADMINS=""; MANAGE_SCRIPT=""; CLIENTS_DIR=""
@@ -310,6 +311,8 @@ EOF
 ensure_deps() {
   local pkgs=()
   command -v curl >/dev/null 2>&1 || pkgs+=(curl ca-certificates)
+  command -v ssh >/dev/null 2>&1 || pkgs+=(openssh-client)
+  command -v sshpass >/dev/null 2>&1 || pkgs+=(sshpass)
   if [ "$MODE" = "hardened" ]; then
     command -v visudo  >/dev/null 2>&1 || pkgs+=(sudo)
     command -v setfacl >/dev/null 2>&1 || pkgs+=(acl)
@@ -522,6 +525,37 @@ AWGRAM_UPDATECTL
   chown root:root "$UPDATECTL_PATH"
 }
 
+install_deployctl() {
+  install -d -m 755 /usr/local/libexec
+  cat > "$DEPLOYCTL_PATH" <<'AWGRAM_DEPLOYCTL'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# = 5 ]] || { echo 'usage: awgram-deployctl HOST PORT root SERVER_ID legacy' >&2; exit 2; }
+host="$1"; port="$2"; user="$3"; server_id="$4"; protocol="$5"
+[[ "$host" =~ ^[A-Za-z0-9.-]+$ && "$port" =~ ^[0-9]+$ && "$user" = root && "$server_id" =~ ^[1-9][0-9]*$ && "$protocol" = legacy ]] || { echo 'invalid deployment parameters' >&2; exit 2; }
+IFS= read -r password
+[[ -n "$password" ]] || { echo 'empty password' >&2; exit 2; }
+command -v sshpass >/dev/null || { echo 'sshpass is required' >&2; exit 3; }
+key=/var/lib/awgram/node_id_ed25519
+known_hosts=/var/lib/awgram/node_known_hosts
+touch "$known_hosts"
+if [[ ! -f "$key" ]]; then
+  ssh-keygen -q -t ed25519 -N '' -C awgram-controller -f "$key"
+  chown "${SUDO_USER:-root}:${SUDO_USER:-root}" "$key" "$key.pub" 2>/dev/null || true
+  chmod 600 "$key"; chmod 644 "$key.pub"
+fi
+pub64="$(base64 -w0 < "$key.pub")"
+export SSHPASS="$password"
+sshpass -e ssh -p "$port" -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts" -o PasswordAuthentication=yes -o PubkeyAuthentication=no "$user@$host" \
+  "curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/node-bootstrap.sh | bash -s -- --server-id '$server_id' --protocol legacy --controller-key-b64 '$pub64'"
+unset SSHPASS password
+owner="${SUDO_USER:-root}"; chown "$owner:$owner" "$key" "$key.pub" "$known_hosts" 2>/dev/null || true
+printf '{"ok":true,"server_id":%s,"stage":"bootstrap_started"}\n' "$server_id"
+AWGRAM_DEPLOYCTL
+  chmod 750 "$DEPLOYCTL_PATH"
+  chown root:root "$DEPLOYCTL_PATH"
+}
+
 install_unit() {
   local user_line=""
   [ "$MODE" = "hardened" ] && user_line="User=$SVC_USER"
@@ -669,6 +703,7 @@ cmd_install() {
   install_binary "$staged"
   install_clientctl
   install_updatectl
+  install_deployctl
   # конфигурация и запуск
   write_config
   [ -z "$TOKEN" ] || write_env_token
@@ -778,7 +813,7 @@ cmd_help() {
 # ---------- hardened mode setup ----------
 write_sudoers() {
   local tmp; tmp="$(mktemp)"
-  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" "$UPDATECTL_PATH" > "$tmp"
+  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start, %s *\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" "$UPDATECTL_PATH" "$DEPLOYCTL_PATH" > "$tmp"
   chmod 440 "$tmp"
   visudo -c -f "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die err_sudoers; }
   mv -f "$tmp" "$SUDOERS_FILE"
@@ -845,6 +880,7 @@ cmd_update() {
   install_binary "$staged"
   install_clientctl
   install_updatectl
+  install_deployctl
   if [ "$MODE" = "hardened" ]; then write_sudoers; fi
   if is_systemd; then
     systemctl restart awgram 2>/dev/null || true

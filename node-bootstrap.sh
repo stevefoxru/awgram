@@ -1,32 +1,66 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-SERVER_ID=""
-TOKEN=""
-PROTOCOL=""
-CONFIG_DIR="/etc/awgram-node"
-
-die() { printf 'ERR %s\n' "$*" >&2; exit 1; }
-
-while (($#)); do
-  case "$1" in
-    --server-id) SERVER_ID="${2:-}"; shift 2 ;;
-    --token) TOKEN="${2:-}"; shift 2 ;;
-    --protocol) PROTOCOL="${2:-}"; shift 2 ;;
-    *) die "Неизвестный параметр: $1" ;;
-  esac
-done
-
-[[ "$SERVER_ID" =~ ^[1-9][0-9]*$ ]] || die "Некорректный server-id"
-[[ "$TOKEN" =~ ^awn_[0-9a-f]{64}$ ]] || die "Некорректный или повреждённый токен"
-case "$PROTOCOL" in modern|legacy) ;; *) die "Протокол должен быть modern или legacy" ;; esac
-[[ "$(id -u)" = 0 ]] || die "Запустите команду через sudo"
-
-umask 077
-install -d -m 700 "$CONFIG_DIR"
-printf 'SERVER_ID=%s\nPROTOCOL=%s\n' "$SERVER_ID" "$PROTOCOL" > "$CONFIG_DIR/node.conf"
-printf '%s\n' "$TOKEN" > "$CONFIG_DIR/enrollment.token"
-chmod 600 "$CONFIG_DIR/node.conf" "$CONFIG_DIR/enrollment.token"
-
-printf 'OK Узел awgram подготовлен: server-id=%s, protocol=%s\n' "$SERVER_ID" "$PROTOCOL"
-printf 'Токен сохранён с правами root-only и будет удалён после обмена на постоянную идентичность узла.\n'
+SERVER_ID=""; PROTOCOL=""; CONTROLLER_KEY_B64=""; AWG_PORT=39743; AWG_SUBNET="10.10.10.1/24"
+COMMIT=b9c8ea0464dfa955892f0b136804822a5906963c
+INSTALL_SHA=6f345dcc7553dcc8b595d1e828fc5c010c8a96f110999b0a39a8944ddc1b7566
+MANAGE_SHA=4381e847d625712ac52527257069bd646c65b643a7e738588e7dfebcde0384c0
+die(){ printf 'ERR %s\n' "$*" >&2; exit 1; }
+while (($#)); do case "$1" in
+ --server-id) SERVER_ID="${2:-}";shift 2;; --protocol) PROTOCOL="${2:-}";shift 2;;
+ --controller-key-b64) CONTROLLER_KEY_B64="${2:-}";shift 2;; --port) AWG_PORT="${2:-}";shift 2;;
+ --subnet) AWG_SUBNET="${2:-}";shift 2;; *) die "Неизвестный параметр: $1";; esac; done
+[[ "$(id -u)" = 0 && "$SERVER_ID" =~ ^[1-9][0-9]*$ && "$PROTOCOL" = legacy ]] || die "Некорректные параметры"
+key="$(printf '%s' "$CONTROLLER_KEY_B64"|base64 -d 2>/dev/null)" || die "Повреждён ключ"
+[[ "$key" = ssh-ed25519\ * ]] || die "Неверный ключ контроллера"
+install -d -m 700 /etc/awgram-node /root/.ssh /root/awg /usr/local/libexec
+printf 'SERVER_ID=%s\nPROTOCOL=legacy\n' "$SERVER_ID">/etc/awgram-node/node.conf
+printf "export AWG_PORT=%s\nexport AWG_TUNNEL_SUBNET='%s'\nexport DISABLE_IPV6=1\nexport ALLOWED_IPS_MODE=1\nexport ALLOWED_IPS='0.0.0.0/0'\n" "$AWG_PORT" "$AWG_SUBNET">/root/awg/awgsetup_cfg.init
+chmod 600 /etc/awgram-node/node.conf /root/awg/awgsetup_cfg.init
+cat >/usr/local/libexec/awgram-nodectl <<'NODECTL'
+#!/usr/bin/env bash
+set -euo pipefail
+set -- ${SSH_ORIGINAL_COMMAND:-${*:-status}}; a="${1:-status}"; n="${2:-}"; e="${3:-}"
+valid(){ [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]]; }
+case "$a" in
+ status) [[ -f /etc/awgram-node/ready ]]&&systemctl is-active --quiet awg-quick@awg0&&printf '{"ok":true,"status":"online"}\n'||printf '{"ok":false,"status":"installing"}\n';;
+ add) valid "$n"||exit 2; [[ -f /etc/awgram-node/ready ]]||exit 3; bash /root/awg/manage_amneziawg.sh add "$n">/dev/null; systemctl restart awg-quick@awg0; c=/root/awg/$n.conf; [[ -f "$c" ]]||exit 4; printf '{"ok":true,"name":"%s","conf_b64":"%s","qr_b64":"%s"}\n' "$n" "$(base64 -w0<"$c")" "$([[ -f /root/awg/$n.png ]]&&base64 -w0</root/awg/$n.png||true)";;
+ remove) valid "$n"||exit 2; bash /root/awg/manage_amneziawg.sh remove "$n">/dev/null||true; systemctl restart awg-quick@awg0; printf '{"ok":true}\n';;
+ set-expiry) valid "$n"||exit 2; [[ "$e" =~ ^[0-9]+$ ]]||exit 2; install -d -m700 /etc/awgram-node/expiry; printf '%s\n' "$e">"/etc/awgram-node/expiry/$n"; printf '{"ok":true}\n';;
+ enforce) now=$(date +%s); for f in /etc/awgram-node/expiry/*; do [[ -f "$f" ]]||continue; read -r until<"$f"; if [[ "$until" =~ ^[0-9]+$ ]]&&((until<=now)); then x=${f##*/}; bash /root/awg/manage_amneziawg.sh remove "$x">/dev/null||true; rm -f "$f"; fi; done; systemctl restart awg-quick@awg0; printf '{"ok":true}\n';;
+ *) exit 2;; esac
+NODECTL
+chmod 700 /usr/local/libexec/awgram-nodectl
+forced="command=\"/usr/local/libexec/awgram-nodectl\",no-agent-forwarding,no-port-forwarding,no-pty,no-user-rc,no-X11-forwarding $key"
+touch /root/.ssh/authorized_keys;chmod 600 /root/.ssh/authorized_keys;grep -Fqx "$forced" /root/.ssh/authorized_keys||printf '%s\n' "$forced">>/root/.ssh/authorized_keys
+cat >/usr/local/libexec/awgram-node-install <<RUNNER
+#!/usr/bin/env bash
+set -euo pipefail
+b=https://raw.githubusercontent.com/bivlked/amneziawg-installer/$COMMIT
+curl -fLsS "\$b/install_amneziawg.sh" -o /root/install_amneziawg-v1.sh
+echo '$INSTALL_SHA  /root/install_amneziawg-v1.sh'|sha256sum -c -
+curl -fLsS "\$b/manage_amneziawg.sh" -o /root/awg/manage_amneziawg.legacy
+echo '$MANAGE_SHA  /root/awg/manage_amneziawg.legacy'|sha256sum -c -
+chmod 700 /root/install_amneziawg-v1.sh /root/awg/manage_amneziawg.legacy
+sed -i "s#https://raw.githubusercontent.com/bivlked/amneziawg-installer/main/manage_amneziawg.sh#\$b/manage_amneziawg.sh#" /root/install_amneziawg-v1.sh
+sed -i 's#read -p "Перезагрузить сейчас? \[y/N\]: " confirm < /dev/tty#confirm=y#' /root/install_amneziawg-v1.sh
+bash /root/install_amneziawg-v1.sh --port=$AWG_PORT --subnet=$AWG_SUBNET --disallow-ipv6 --route-all --no-color
+install -m700 /root/awg/manage_amneziawg.legacy /root/awg/manage_amneziawg.sh
+systemctl restart awg-quick@awg0;touch /etc/awgram-node/ready;systemctl disable awgram-node-install.service
+RUNNER
+chmod 700 /usr/local/libexec/awgram-node-install
+cat >/etc/systemd/system/awgram-node-install.service <<'UNIT'
+[Unit]
+Description=awgram automatic AmneziaWG installation
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/awgram-node-install
+TimeoutStartSec=infinity
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload;systemctl enable awgram-node-install.service
+printf '*/5 * * * * root /usr/local/libexec/awgram-nodectl enforce >/dev/null 2>&1\n'>/etc/cron.d/awgram-node-expiry
+systemd-run --quiet --collect --unit=awgram-node-install-now /usr/local/libexec/awgram-node-install
+printf 'OK bootstrap запущен; server-id=%s\n' "$SERVER_ID"
