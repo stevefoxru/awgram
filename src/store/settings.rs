@@ -119,6 +119,12 @@ impl Store {
     pub fn set_runtime_version(&self, version: &str) {
         self.set_json("runtime_version", &version.to_string());
     }
+    pub fn default_vpn_server(&self) -> Option<i64> {
+        self.get_json("default_vpn_server")
+    }
+    pub fn set_default_vpn_server(&self, server_id: i64) {
+        self.set_json("default_vpn_server", &server_id);
+    }
     pub fn tariff_price_kopecks(&self, months: i64) -> Option<i64> {
         let defaults = [20_000, 60_000, 100_000, 200_000];
         let prices = self

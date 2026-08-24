@@ -35,6 +35,7 @@ pub enum Action {
     ServerPassportAsk(i64),
     ServerEnroll(i64),
     ServerEnrollRevoke(i64),
+    ServerSetDefault(i64),
     AdminCreate,
     AdminOwners,
     AdminOwnersPage(usize),
@@ -163,6 +164,8 @@ pub enum Action {
     CustomerKey(String),
     CustomerMove(String),
     CustomerMoveServer(String, i64),
+    CustomerMoveConfirm(i64),
+    CustomerMoveCancel(i64),
     CustomerRefresh(String),
     CustomerRefreshRun(String),
     Renew(String),
@@ -286,6 +289,14 @@ fn parse_callback(data: &str) -> Action {
                     }
                     _ => Action::Unknown,
                 }
+            } else if let Some(v) = data.strip_prefix("move:confirm:") {
+                v.parse()
+                    .map(Action::CustomerMoveConfirm)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("move:cancel:") {
+                v.parse()
+                    .map(Action::CustomerMoveCancel)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("device:label:") {
                 Action::DeviceLabelAsk(v.to_string())
             } else if let Some(v) = data.strip_prefix("support:take:") {
@@ -398,6 +409,10 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:enroll:revoke:") {
                 v.parse()
                     .map(Action::ServerEnrollRevoke)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:default:") {
+                v.parse()
+                    .map(Action::ServerSetDefault)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
@@ -1232,6 +1247,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | CustomerKey(_)
         | CustomerMove(_)
         | CustomerMoveServer(_, _)
+        | CustomerMoveConfirm(_)
+        | CustomerMoveCancel(_)
         | CustomerRefresh(_)
         | CustomerRefreshRun(_)
         | Renew(_)
@@ -1326,6 +1343,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerPassportAsk(_)
         | ServerEnroll(_)
         | ServerEnrollRevoke(_)
+        | ServerSetDefault(_)
         | AdminCreate
         | AdminOwners
         | AdminOwnersPage(_)
@@ -4031,6 +4049,20 @@ async fn callback_handler(
             .reply_markup(menu::server_card_menu(id))
             .await?;
         }
+        Action::ServerSetDefault(id) => {
+            let ready = settings
+                .vpn_server(id)
+                .is_some_and(|server| server.status == "online" && server.enabled_for_provisioning);
+            if ready {
+                settings.set_default_vpn_server(id);
+                bot.send_message(chat, "✅ Сервер назначен основным для новых ключей.")
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+            } else {
+                bot.send_message(chat, "Сначала сервер должен подключиться, пройти проверку и быть включён для выдачи.")
+                    .reply_markup(menu::server_card_menu(id)).await?;
+            }
+        }
         Action::AdminCreate => {
             bot.send_message(chat,"➕ Создание ключей\n\nВыберите одиночное создание или пакет. После создания ключ можно привязать к пользователю и группе из его карточки.").reply_markup(menu::admin_create_menu()).await?;
         }
@@ -5311,13 +5343,17 @@ async fn callback_handler(
                     return Err(error.into());
                 }
             }
-            if let Err(error) = vpn.remove(&name).await {
-                let _ = vpn.remove(&new_name).await;
-                return Err(error.into());
-            }
             settings.assign_client_group(&new_name, None, now_epoch());
             settings.assign_client_owner(&new_name, Some(uid));
             settings.assign_client_server(&new_name, server_id, &server.protocol);
+            let Some(replacement_id) =
+                settings.create_key_replacement(uid, &name, &new_name, server_id, now_epoch())
+            else {
+                let _ = vpn.remove(&new_name).await;
+                bot.send_message(chat, "Для этого ключа уже выполняется замена.")
+                    .await?;
+                return Ok(());
+            };
             settings.log_event(
                 now_epoch(),
                 EventKind::Regen,
@@ -5325,8 +5361,53 @@ async fn callback_handler(
                 Some(uid),
                 Some(&format!("replaced={name} server={server_id}")),
             );
-            bot.send_message(chat, format!("✅ Старый ключ «{name}» удалён. Новый ключ «{new_name}» создан в локации {} ({}) и сохранил прежний срок.", server.location, server.protocol)).await?;
+            bot.send_message(chat, format!("✅ Новый ключ «{new_name}» готов: {} ({}).\n\nДобавьте его в приложение и проверьте подключение. Старый ключ «{name}» пока продолжает работать.", server.location, server.protocol))
+                .reply_markup(menu::replacement_confirm_menu(replacement_id)).await?;
             render::send_client_files(&bot, chat, lang, &replacement).await?;
+        }
+        Action::CustomerMoveConfirm(id) => {
+            let Some((old, new)) =
+                settings.decide_key_replacement(id, uid, "confirmed", now_epoch())
+            else {
+                return Ok(());
+            };
+            match vpn.remove(&old).await {
+                Ok(()) => {
+                    bot.send_message(
+                        chat,
+                        format!(
+                            "✅ Подключение заменено. Новый ключ: «{new}». Старый ключ удалён."
+                        ),
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?
+                }
+                Err(error) => {
+                    bot.send_message(chat,"Новый ключ сохранён, но старый не удалось удалить автоматически. Администратор получил уведомление.").await?;
+                    for owner in &cfg.admin_ids {
+                        let _ = bot
+                            .send_message(
+                                ChatId(*owner),
+                                format!("🚨 Замена #{id}: не удалось удалить «{old}»: {error}"),
+                            )
+                            .await;
+                    }
+                }
+            };
+        }
+        Action::CustomerMoveCancel(id) => {
+            let Some((old, new)) =
+                settings.decide_key_replacement(id, uid, "cancelled", now_epoch())
+            else {
+                return Ok(());
+            };
+            let _ = vpn.remove(&new).await;
+            bot.send_message(
+                chat,
+                format!("❌ Замена отменена. Старый ключ «{old}» сохранён и продолжает работать."),
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
         }
         Action::CustomerRefresh(name) => {
             if settings.client_owner(&name) == Some(uid) {
@@ -7396,6 +7477,7 @@ mod tests {
                 ServerPassportAsk(_) => {}
                 ServerEnroll(_) => {}
                 ServerEnrollRevoke(_) => {}
+                ServerSetDefault(_) => {}
                 AdminCreate => {}
                 AdminOwners => {}
                 AdminOwnersPage(_) => {}
@@ -7519,6 +7601,8 @@ mod tests {
                 CustomerKey(_) => {}
                 CustomerMove(_) => {}
                 CustomerMoveServer(_, _) => {}
+                CustomerMoveConfirm(_) => {}
+                CustomerMoveCancel(_) => {}
                 CustomerRefresh(_) => {}
                 CustomerRefreshRun(_) => {}
                 Renew(_) => {}
@@ -7715,6 +7799,7 @@ mod tests {
             (Action::ServerPassportAsk(1), true, false),
             (Action::ServerEnroll(1), true, false),
             (Action::ServerEnrollRevoke(1), true, false),
+            (Action::ServerSetDefault(1), true, false),
             (Action::AdminCreate, true, false),
             (Action::AdminOwners, true, false),
             (Action::AdminFinance, true, false),

@@ -216,6 +216,7 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             ),
         ],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
+        vec![cb("⭐ Сделать основным", &format!("server:default:{id}"))],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),
             cb("🏠 Админ-панель", "admin:dashboard"),
@@ -615,6 +616,14 @@ pub fn customer_refresh_confirm_menu(name: &str) -> InlineKeyboardMarkup {
             &format!("refreshgo:{name}"),
         )],
         vec![cb("⬅️ Назад к ключу", &format!("mykey:{name}"))],
+    ])
+}
+
+pub fn replacement_confirm_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("✅ Новый ключ работает", &format!("move:confirm:{id}"))],
+        vec![cb("❌ Не подключается", &format!("move:cancel:{id}"))],
+        vec![cb("📖 Как установить", "guide:awg")],
     ])
 }
 

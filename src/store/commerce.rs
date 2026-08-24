@@ -117,6 +117,38 @@ pub struct LegacyRequest {
 }
 
 impl Store {
+    pub fn create_key_replacement(
+        &self,
+        user_id: i64,
+        old: &str,
+        new: &str,
+        server_id: i64,
+        now: i64,
+    ) -> Option<i64> {
+        self.with_conn(|c| {
+            c.execute("INSERT INTO key_replacements(user_id,old_client,new_client,target_server_id,created_at) VALUES(?1,?2,?3,?4,?5)",rusqlite::params![user_id,old,new,server_id,now])?;
+            Ok(c.last_insert_rowid())
+        }).ok()
+    }
+
+    pub fn decide_key_replacement(
+        &self,
+        id: i64,
+        user_id: i64,
+        status: &str,
+        now: i64,
+    ) -> Option<(String, String)> {
+        if !matches!(status, "confirmed" | "cancelled") {
+            return None;
+        }
+        self.with_conn(|c| {
+            let tx=c.unchecked_transaction()?;
+            let pair=tx.query_row("SELECT old_client,new_client FROM key_replacements WHERE id=?1 AND user_id=?2 AND status='pending'",rusqlite::params![id,user_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            tx.execute("UPDATE key_replacements SET status=?3,decided_at=?4 WHERE id=?1 AND user_id=?2 AND status='pending'",rusqlite::params![id,user_id,status,now])?;
+            tx.commit()?;
+            Ok(pair)
+        }).ok()
+    }
     /// Резервирует самостоятельное обновление не чаще одного раза в 10 минут.
     pub fn claim_client_self_refresh(&self, name: &str, user_id: i64, now: i64) -> bool {
         if self.client_owner(name) != Some(user_id) {

@@ -408,6 +408,22 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_star_orders_user ON star_orders(user_id,created_at);
     CREATE INDEX idx_star_orders_status ON star_orders(status,created_at);
     "#,
+    // v16: двухфазная пользовательская замена ключа.
+    r#"
+    CREATE TABLE key_replacements(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        old_client TEXT NOT NULL,
+        new_client TEXT NOT NULL,
+        target_server_id INTEGER NOT NULL REFERENCES vpn_servers(id),
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER
+    );
+    CREATE UNIQUE INDEX idx_key_replacements_pending_old
+      ON key_replacements(old_client) WHERE status='pending';
+    CREATE INDEX idx_key_replacements_expiry ON key_replacements(status,created_at);
+    "#,
 ];
 
 pub struct Store {
@@ -495,7 +511,7 @@ mod tests {
     fn open_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
-        assert_eq!(store.schema_version(), 15);
+        assert_eq!(store.schema_version(), 16);
     }
 
     #[test]
@@ -504,12 +520,12 @@ mod tests {
         let path = dir.path().join("awgram.db");
         drop(Store::open(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 15);
+        assert_eq!(store.schema_version(), 16);
     }
 
     #[test]
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 15);
+        assert_eq!(store.schema_version(), 16);
     }
 }
