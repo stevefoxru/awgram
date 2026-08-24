@@ -89,7 +89,7 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                     store.set_default_vpn_server(server.id);
                 }
                 if became_ready {
-                    notify_admins(&bot, cfg, format!("✅ VPS «{}» готов\nAWG 1.0 работает, сервер включён для выдачи и назначен основным.", server.name)).await;
+                    notify_admins(bot, cfg, format!("✅ VPS «{}» готов\nAWG 1.0 работает, сервер включён для выдачи и назначен основным.", server.name)).await;
                 }
             }
             Ok(false) => {
@@ -101,7 +101,7 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                 if server.status == "online" {
                     store.set_server_status(server.id, "offline", now);
                     notify_admins(
-                        &bot,
+                        bot,
                         cfg,
                         format!("🚨 VPS «{}» недоступен: {error}", server.name),
                     )
