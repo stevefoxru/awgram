@@ -33,6 +33,7 @@ pub enum EventKind {
     Support,
     Broadcast,
     RoleChange,
+    Migration,
 }
 
 impl EventKind {
@@ -61,6 +62,7 @@ impl EventKind {
             EventKind::Support => "support",
             EventKind::Broadcast => "broadcast",
             EventKind::RoleChange => "role_change",
+            EventKind::Migration => "migration",
         }
     }
 }

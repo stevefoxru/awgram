@@ -119,6 +119,13 @@ impl Store {
     pub fn set_runtime_version(&self, version: &str) {
         self.set_json("runtime_version", &version.to_string());
     }
+    pub fn local_migration_notice_sent(&self) -> bool {
+        self.get_json("local_migration_notice_sent")
+            .unwrap_or(false)
+    }
+    pub fn set_local_migration_notice_sent(&self, value: bool) {
+        self.set_json("local_migration_notice_sent", &value);
+    }
     pub fn default_vpn_server(&self) -> Option<i64> {
         self.get_json("default_vpn_server")
     }

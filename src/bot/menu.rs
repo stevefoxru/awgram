@@ -234,7 +234,21 @@ pub fn vpn_service_menu() -> InlineKeyboardMarkup {
         vec![cb("🔬 Подробная диагностика", "diagnose")],
         vec![cb("🔁 Перезапустить VPN", "restart")],
         vec![cb("🧰 Восстановить модуль", "repair")],
+        vec![cb(
+            "🔀 Переход локального сервера на AWG 1.0",
+            "migration:local",
+        )],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn local_migration_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🧪 Предварительная проверка", "migration:preflight")],
+        vec![cb("🚨 Начать миграцию", "migration:start")],
+        vec![cb("📍 Статус миграции", "migration:status")],
+        vec![cb("↩️ Аварийный откат к AWG 2.0", "migration:rollback")],
+        vec![cb("⬅️ Управление VPN", "admin:vpn")],
     ])
 }
 
@@ -2082,8 +2096,27 @@ mod tests {
         assert!(create.contains(&"add".to_string()));
         assert!(create.contains(&"addbulk".to_string()));
         let vpn = all_callback_data(&vpn_service_menu());
-        for expected in ["check", "diagnose", "restart", "repair", "admin:dashboard"] {
+        for expected in [
+            "check",
+            "diagnose",
+            "restart",
+            "repair",
+            "migration:local",
+            "admin:dashboard",
+        ] {
             assert!(vpn.contains(&expected.to_string()), "missing {expected}");
+        }
+        let migration = all_callback_data(&local_migration_menu());
+        for expected in [
+            "migration:preflight",
+            "migration:start",
+            "migration:status",
+            "migration:rollback",
+        ] {
+            assert!(
+                migration.contains(&expected.to_string()),
+                "missing {expected}"
+            );
         }
         assert!(all_callback_data(&finance_menu()).contains(&"admin:dashboard".to_string()));
         assert!(

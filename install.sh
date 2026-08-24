@@ -19,6 +19,7 @@ SUDOERS_FILE="/etc/sudoers.d/awgram"
 CLIENTCTL_PATH="/usr/local/libexec/awgram-clientctl"
 UPDATECTL_PATH="/usr/local/libexec/awgram-updatectl"
 DEPLOYCTL_PATH="/usr/local/libexec/awgram-deployctl"
+MIGRATECTL_PATH="/usr/local/libexec/awgram-migratectl"
 SVC_USER="awgram"
 
 UI_LANG=""; MODE=""; TOKEN=""; ADMINS=""; MANAGE_SCRIPT=""; CLIENTS_DIR=""
@@ -556,6 +557,124 @@ AWGRAM_DEPLOYCTL
   chown root:root "$DEPLOYCTL_PATH"
 }
 
+install_migratectl() {
+  install -d -m 755 /usr/local/libexec
+  cat > "$MIGRATECTL_PATH" <<'AWGRAM_MIGRATECTL'
+#!/usr/bin/env bash
+set -euo pipefail
+cmd="${1:-status}"
+base=/var/lib/awgram/local-migration
+state="$base/status"
+commit=b9c8ea0464dfa955892f0b136804822a5906963c
+install_sha=6f345dcc7553dcc8b595d1e828fc5c010c8a96f110999b0a39a8944ddc1b7566
+manage_sha=4381e847d625712ac52527257069bd646c65b643a7e738588e7dfebcde0384c0
+json(){ printf '{"ok":%s,"status":"%s","details":"%s"}\n' "$1" "$2" "${3//\"/\\\"}"; }
+die(){ json false failed "$*"; exit 1; }
+preflight(){
+  [[ "$(id -u)" = 0 ]] || die 'нужны права root'
+  [[ -f /etc/os-release ]] || die 'не удалось определить ОС'
+  . /etc/os-release
+  [[ "${ID:-}" = ubuntu && "${VERSION_ID:-}" = 24.04 ]] || die 'поддерживается только Ubuntu 24.04'
+  command -v systemctl >/dev/null && command -v curl >/dev/null && command -v tar >/dev/null || die 'нет systemctl, curl или tar'
+  [[ -f /root/awg/manage_amneziawg.sh && -f /etc/amnezia/amneziawg/awg0.conf ]] || die 'действующая локальная AmneziaWG не найдена'
+  free=$(df -Pm / | awk 'NR==2{print $4}')
+  [[ "${free:-0}" -ge 3072 ]] || die 'нужно не менее 3 ГБ свободного места'
+  curl -fLsS --connect-timeout 10 "https://raw.githubusercontent.com/bivlked/amneziawg-installer/$commit/install_amneziawg.sh" -o /dev/null || die 'GitHub недоступен'
+  json true ready 'проверка пройдена'
+}
+case "$cmd" in
+ preflight) preflight ;;
+ status)
+   if [[ -f "$state" ]]; then s=$(head -1 "$state"); json true "$s" "$(tail -n +2 "$state"|tr '\n' ' ')"; else json true idle 'миграция не запускалась'; fi
+   ;;
+ start)
+   preflight >/dev/null
+   [[ ! -e "$base/active" ]] || die 'миграция уже запущена'
+   install -d -m700 "$base"
+   touch "$base/active"
+   printf 'preparing\nСоздаётся резервная копия\n'>"$state"
+   files=(/root/awg /etc/amnezia)
+   [[ -d /etc/awgram ]]&&files+=(/etc/awgram)
+   for f in /var/lib/awgram/*.db /var/lib/awgram/*.db-wal /var/lib/awgram/*.db-shm; do [[ -f "$f" ]]&&files+=("$f"); done
+   tar -czf "$base/system-backup.tar.gz" "${files[@]}" 2>/dev/null || { rm -f "$base/active"; die 'не удалось создать backup'; }
+   awk '/^#_Name[[:space:]]*=/{sub(/^#_Name[[:space:]]*=[[:space:]]*/,"");print}' /etc/amnezia/amneziawg/awg0.conf | sort -u >"$base/clients"
+   : >"$base/expiry.tsv"
+   while IFS= read -r n; do [[ "$n" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]] || die "некорректное имя $n"; e=''; [[ -f "/root/awg/expiry/$n" ]]&&e=$(tr -dc 0-9<"/root/awg/expiry/$n"); printf '%s\t%s\n' "$n" "$e">>"$base/expiry.tsv"; done <"$base/clients"
+   cp -a /root/awg "$base/legacy-awg"
+   cp -a /etc/amnezia/amneziawg "$base/legacy-server"
+   port=$(sed -n 's/^[[:space:]]*export AWG_PORT=//p' /root/awg/awgsetup_cfg.init|tr -dc 0-9|head -1); port=${port:-39743}
+   subnet=$(sed -n "s/^[[:space:]]*export AWG_TUNNEL_SUBNET=['\"]\{0,1\}\([^'\"]*\).*/\1/p" /root/awg/awgsetup_cfg.init|head -1); subnet=${subnet:-10.9.9.1/24}
+   printf 'AWG_PORT=%s\nAWG_SUBNET=%s\n' "$port" "$subnet">"$base/options"
+   b="https://raw.githubusercontent.com/bivlked/amneziawg-installer/$commit"
+   curl -fLsS "$b/install_amneziawg.sh" -o "$base/install.sh"
+   echo "$install_sha  $base/install.sh"|sha256sum -c - >/dev/null || die 'checksum установщика не совпал'
+   curl -fLsS "$b/manage_amneziawg.sh" -o "$base/manage.sh"
+   echo "$manage_sha  $base/manage.sh"|sha256sum -c - >/dev/null || die 'checksum manage не совпал'
+   sed -i "s#https://raw.githubusercontent.com/bivlked/amneziawg-installer/main/manage_amneziawg.sh#$b/manage_amneziawg.sh#" "$base/install.sh"
+   sed -i 's#read -p "Перезагрузить сейчас? \[y/N\]: " confirm < /dev/tty#confirm=y#' "$base/install.sh"
+   cat >/usr/local/libexec/awgram-local-migrate-runner <<'RUNNER'
+#!/usr/bin/env bash
+set -euo pipefail
+base=/var/lib/awgram/local-migration; . "$base/options"
+printf 'installing\nУстановка AWG 1.0; сервер может перезагрузиться\n'>"$base/status"
+if [[ ! -e "$base/old-layout-moved" ]]; then
+  systemctl stop awg-quick@awg0 2>/dev/null||true
+  rm -rf /root/awg /etc/amnezia/amneziawg
+  install -d -m700 /root/awg
+  printf "export AWG_PORT=%s\nexport AWG_TUNNEL_SUBNET='%s'\nexport DISABLE_IPV6=1\nexport ALLOWED_IPS_MODE=1\nexport ALLOWED_IPS='0.0.0.0/0'\n" "$AWG_PORT" "$AWG_SUBNET">/root/awg/awgsetup_cfg.init
+  touch "$base/old-layout-moved"
+fi
+bash "$base/install.sh" --port="$AWG_PORT" --subnet="$AWG_SUBNET" --disallow-ipv6 --route-all --no-color
+install -m700 "$base/manage.sh" /root/awg/manage_amneziawg.sh
+printf 'restoring\nВосстанавливаются ключи\n'>"$base/status"
+while IFS=$'\t' read -r n e; do
+  grep -q "^#_Name = $n$" /etc/amnezia/amneziawg/awg0.conf || bash /root/awg/manage_amneziawg.sh --no-color add "$n" >/dev/null
+  [[ -f "/root/awg/$n.conf" ]] || { printf 'failed\nНе удалось восстановить ключ %s\n' "$n">"$base/status"; exit 1; }
+  if [[ -n "$e" ]]; then install -d -m700 /root/awg/expiry; printf '%s\n' "$e">"/root/awg/expiry/$n"; fi
+done <"$base/expiry.tsv"
+systemctl restart awg-quick@awg0
+systemctl is-active --quiet awg-quick@awg0
+printf 'complete\nAWG 1.0 установлена, ключи восстановлены; пользователям нужны новые конфигурации\n'>"$base/status"
+rm -f "$base/active"
+systemctl disable awgram-local-migrate.service >/dev/null 2>&1||true
+RUNNER
+   chmod 700 /usr/local/libexec/awgram-local-migrate-runner
+   cat >/etc/systemd/system/awgram-local-migrate.service <<'UNIT'
+[Unit]
+Description=awgram local AWG 2 to AWG 1 migration
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/awgram-local-migrate-runner
+TimeoutStartSec=infinity
+[Install]
+WantedBy=multi-user.target
+UNIT
+   systemctl daemon-reload; systemctl enable awgram-local-migrate.service >/dev/null
+   printf 'scheduled\nМиграция запланирована\n'>"$state"
+   systemctl start --no-block awgram-local-migrate.service
+   json true scheduled 'миграция запущена'
+   ;;
+ rollback)
+   [[ -d "$base/legacy-awg" && -d "$base/legacy-server" ]] || die 'резервная копия для отката не найдена'
+   systemctl disable --now awgram-local-migrate.service >/dev/null 2>&1||true
+   systemctl stop awg-quick@awg0 2>/dev/null||true
+   [[ -d /root/awg ]]&&mv /root/awg "$base/failed-awg-$(date +%s)"
+   [[ -d /etc/amnezia/amneziawg ]]&&mv /etc/amnezia/amneziawg "$base/failed-server-$(date +%s)"
+   cp -a "$base/legacy-awg" /root/awg
+   install -d /etc/amnezia; cp -a "$base/legacy-server" /etc/amnezia/amneziawg
+   systemctl restart awg-quick@awg0
+   printf 'rolled_back\nВосстановлена конфигурация AWG 2.0\n'>"$state"; rm -f "$base/active"
+   json true rolled_back 'конфигурация AWG 2.0 восстановлена'
+   ;;
+ *) die 'usage: awgram-migratectl preflight|start|status|rollback' ;;
+esac
+AWGRAM_MIGRATECTL
+  chmod 750 "$MIGRATECTL_PATH"
+  chown root:root "$MIGRATECTL_PATH"
+}
+
 install_unit() {
   local user_line=""
   [ "$MODE" = "hardened" ] && user_line="User=$SVC_USER"
@@ -704,6 +823,7 @@ cmd_install() {
   install_clientctl
   install_updatectl
   install_deployctl
+  install_migratectl
   # конфигурация и запуск
   write_config
   [ -z "$TOKEN" ] || write_env_token
@@ -813,7 +933,7 @@ cmd_help() {
 # ---------- hardened mode setup ----------
 write_sudoers() {
   local tmp; tmp="$(mktemp)"
-  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start, %s *\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" "$UPDATECTL_PATH" "$DEPLOYCTL_PATH" > "$tmp"
+  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start, %s *, %s *\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" "$UPDATECTL_PATH" "$DEPLOYCTL_PATH" "$MIGRATECTL_PATH" > "$tmp"
   chmod 440 "$tmp"
   visudo -c -f "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die err_sudoers; }
   mv -f "$tmp" "$SUDOERS_FILE"
@@ -879,6 +999,7 @@ cmd_update() {
     install_clientctl
     install_updatectl
     install_deployctl
+    install_migratectl
     if [ "$MODE" = "hardened" ]; then write_sudoers; fi
     update_setup_script "$tag"
     [ ! -f "$SETUP_CONF" ] || save_setup_conf
@@ -890,6 +1011,7 @@ cmd_update() {
   install_clientctl
   install_updatectl
   install_deployctl
+  install_migratectl
   if [ "$MODE" = "hardened" ]; then write_sudoers; fi
   if is_systemd; then
     systemctl restart awgram 2>/dev/null || true

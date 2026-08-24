@@ -111,6 +111,48 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         }
     }
 
+    if !store.local_migration_notice_sent()
+        && vpn
+            .local_legacy_migration("status")
+            .await
+            .is_ok_and(|value| value.contains("\"status\":\"complete\""))
+    {
+        let mut users = 0usize;
+        let mut files = 0usize;
+        for user_id in store.all_user_ids() {
+            let names = store.user_client_names(user_id);
+            if names.is_empty() {
+                continue;
+            }
+            let chat = ChatId(user_id);
+            if bot.send_message(chat, "🔄 Сервер переведён на AmneziaWG 1.0\n\nСтарые подключения больше не работают. Удалите старый профиль из приложения и импортируйте новые конфигурации ниже.").await.is_ok() {
+                users += 1;
+            }
+            for name in names {
+                if let Ok(result) = vpn.existing_files(&name) {
+                    if crate::bot::render::send_client_files(
+                        bot,
+                        chat,
+                        store.lang(user_id),
+                        &result,
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        files += 1;
+                    }
+                }
+            }
+        }
+        store.set_local_migration_notice_sent(true);
+        notify_admins(
+            bot,
+            cfg,
+            format!("✅ Локальная миграция на AWG 1.0 завершена\nНовые конфигурации отправлены: пользователей {users}, ключей {files}."),
+        )
+        .await;
+    }
+
     for server in store.vpn_servers() {
         let Some(paid_until) = server.paid_until else {
             continue;

@@ -37,6 +37,11 @@ pub enum Action {
     ServerEnrollRevoke(i64),
     ServerSetDefault(i64),
     ServerDeployAsk(i64),
+    LocalMigration,
+    LocalMigrationPreflight,
+    LocalMigrationStart,
+    LocalMigrationStatus,
+    LocalMigrationRollback,
     AdminCreate,
     AdminOwners,
     AdminOwnersPage(usize),
@@ -190,6 +195,11 @@ fn parse_callback(data: &str) -> Action {
         "admin:dashboard" => Action::AdminDashboard,
         "admin:vpn" => Action::AdminVpn,
         "admin:servers" => Action::AdminServers,
+        "migration:local" => Action::LocalMigration,
+        "migration:preflight" => Action::LocalMigrationPreflight,
+        "migration:start" => Action::LocalMigrationStart,
+        "migration:status" => Action::LocalMigrationStatus,
+        "migration:rollback" => Action::LocalMigrationRollback,
         "admin:keys" => Action::AdminKeys,
         "admin:users" => Action::AdminUsersHub,
         "admin:communication" => Action::AdminCommunication,
@@ -1363,6 +1373,11 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerEnrollRevoke(_)
         | ServerSetDefault(_)
         | ServerDeployAsk(_)
+        | LocalMigration
+        | LocalMigrationPreflight
+        | LocalMigrationStart
+        | LocalMigrationStatus
+        | LocalMigrationRollback
         | AdminCreate
         | AdminOwners
         | AdminOwnersPage(_)
@@ -2957,6 +2972,62 @@ async fn message_handler(
         }
         return Ok(());
     }
+    if let State::AwaitingLocalMigrationConfirm { operation } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let expected = if operation == "start" {
+            "MIGRATE AWG1"
+        } else {
+            "ROLLBACK AWG2"
+        };
+        if msg.text().unwrap_or_default().trim() != expected {
+            bot.send_message(
+                msg.chat.id,
+                format!("Подтверждение не совпало. Для продолжения отправьте точно: {expected}"),
+            )
+            .await?;
+            return Ok(());
+        }
+        dialogue.update(State::Idle).await?;
+        let command = if operation == "start" {
+            "start"
+        } else {
+            "rollback"
+        };
+        bot.send_message(msg.chat.id, "⏳ Запускаю защищённую системную операцию…")
+            .await?;
+        match vpn.local_legacy_migration(command).await {
+            Ok(output) => {
+                if command == "start" {
+                    settings.set_local_migration_notice_sent(false);
+                }
+                settings.log_event(
+                    now_epoch(),
+                    EventKind::Migration,
+                    None,
+                    Some(uid),
+                    Some(&format!("local migration {command}")),
+                );
+                let text = if command == "start" {
+                    "🚨 Миграция запущена. VPN будет временно недоступен, сервер дважды перезагрузится. Не запускайте повторную установку. После возвращения бота откройте «Статус миграции»."
+                } else {
+                    "✅ Команда отката выполнена. Проверьте состояние AWG 2.0."
+                };
+                bot.send_message(msg.chat.id, format!("{text}\n\nОтвет helper: {output}"))
+                    .reply_markup(menu::local_migration_menu())
+                    .await?;
+            }
+            Err(error) => {
+                tracing::error!(%error, command, "local migration operation failed");
+                bot.send_message(msg.chat.id, format!("❌ Операция не запущена: {error}"))
+                    .reply_markup(menu::local_migration_menu())
+                    .await?;
+            }
+        }
+        return Ok(());
+    }
     if role == Role::Denied && settings.user_blocked(uid) {
         if msg.text() == Some("🆘 Поддержка") {
             bot.send_message(msg.chat.id, "Выберите тему обращения:")
@@ -4164,6 +4235,59 @@ async fn callback_handler(
                         .await?;
                 }
             }
+        }
+        Action::LocalMigration => {
+            bot.send_message(chat, "🔀 Миграция локального сервера: AWG 2.0 → AWG 1.0\n\nОперация перевыпустит все VPN-конфигурации, временно остановит VPN и дважды перезагрузит сервер. Владельцы, группы и сроки сохраняются по прежним именам ключей. Старые пользовательские конфигурации перестанут работать.\n\nСначала обязательно выполните предварительную проверку.")
+                .reply_markup(menu::local_migration_menu()).await?;
+        }
+        Action::LocalMigrationPreflight => {
+            match vpn.local_legacy_migration("preflight").await {
+                Ok(output) => {
+                    bot.send_message(
+                        chat,
+                        format!("✅ Предварительная проверка пройдена.\n\n{output}"),
+                    )
+                    .reply_markup(menu::local_migration_menu())
+                    .await?
+                }
+                Err(error) => {
+                    bot.send_message(chat, format!("❌ Миграцию начинать нельзя: {error}"))
+                        .reply_markup(menu::local_migration_menu())
+                        .await?
+                }
+            };
+        }
+        Action::LocalMigrationStart => {
+            bot.send_message(chat, "🚨 Последнее предупреждение\n\nБудет создан системный backup, затем действующая AWG 2.0 остановится. Сервер перезагрузится до двух раз, а все пользователи должны будут получить новые конфигурации.\n\nДля запуска отправьте отдельным сообщением точно:\nMIGRATE AWG1")
+                .await?;
+            dialogue
+                .update(State::AwaitingLocalMigrationConfirm {
+                    operation: "start".into(),
+                })
+                .await?;
+        }
+        Action::LocalMigrationStatus => {
+            match vpn.local_legacy_migration("status").await {
+                Ok(output) => {
+                    bot.send_message(chat, format!("📍 Состояние локальной миграции\n\n{output}"))
+                        .reply_markup(menu::local_migration_menu())
+                        .await?
+                }
+                Err(error) => {
+                    bot.send_message(chat, format!("❌ Не удалось получить статус: {error}"))
+                        .reply_markup(menu::local_migration_menu())
+                        .await?
+                }
+            };
+        }
+        Action::LocalMigrationRollback => {
+            bot.send_message(chat, "↩️ Аварийный откат остановит текущую AWG 1.0 и восстановит сохранённые каталоги AWG 2.0. Используйте его только если миграция завершилась ошибкой.\n\nДля отката отправьте точно:\nROLLBACK AWG2")
+                .await?;
+            dialogue
+                .update(State::AwaitingLocalMigrationConfirm {
+                    operation: "rollback".into(),
+                })
+                .await?;
         }
         Action::AdminCreate => {
             bot.send_message(chat,"➕ Создание ключей\n\nВыберите одиночное создание или пакет. После создания ключ можно привязать к пользователю и группе из его карточки.").reply_markup(menu::admin_create_menu()).await?;
@@ -7082,6 +7206,23 @@ mod tests {
         assert_eq!(parse_callback("bk:restore:2"), Action::Restore(2));
         assert_eq!(parse_callback("bk:dl:1"), Action::BackupDownload(1));
         assert_eq!(parse_callback("bk:card:0"), Action::BackupCard(0));
+        assert_eq!(parse_callback("migration:local"), Action::LocalMigration);
+        assert_eq!(
+            parse_callback("migration:preflight"),
+            Action::LocalMigrationPreflight
+        );
+        assert_eq!(
+            parse_callback("migration:start"),
+            Action::LocalMigrationStart
+        );
+        assert_eq!(
+            parse_callback("migration:status"),
+            Action::LocalMigrationStatus
+        );
+        assert_eq!(
+            parse_callback("migration:rollback"),
+            Action::LocalMigrationRollback
+        );
         assert_eq!(parse_callback("check"), Action::Check);
         assert_eq!(parse_callback("garbage"), Action::Unknown);
     }
@@ -7604,6 +7745,11 @@ mod tests {
                 ServerEnrollRevoke(_) => {}
                 ServerSetDefault(_) => {}
                 ServerDeployAsk(_) => {}
+                LocalMigration => {}
+                LocalMigrationPreflight => {}
+                LocalMigrationStart => {}
+                LocalMigrationStatus => {}
+                LocalMigrationRollback => {}
                 AdminCreate => {}
                 AdminOwners => {}
                 AdminOwnersPage(_) => {}
@@ -7927,6 +8073,11 @@ mod tests {
             (Action::ServerEnrollRevoke(1), true, false),
             (Action::ServerSetDefault(1), true, false),
             (Action::ServerDeployAsk(1), true, false),
+            (Action::LocalMigration, true, false),
+            (Action::LocalMigrationPreflight, true, false),
+            (Action::LocalMigrationStart, true, false),
+            (Action::LocalMigrationStatus, true, false),
+            (Action::LocalMigrationRollback, true, false),
             (Action::AdminCreate, true, false),
             (Action::AdminOwners, true, false),
             (Action::AdminFinance, true, false),

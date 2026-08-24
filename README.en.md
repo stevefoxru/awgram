@@ -164,6 +164,12 @@ To provision a separate AWG 1.0 node, create a VPS passport with the
 password is used in process memory only; subsequent access uses a dedicated
 SSH key restricted to the node management command set.
 
+The local server can be migrated via “Admin → Servers → VPN management →
+Migrate local server to AWG 1.0”. It requires Ubuntu 24.04, at least 3 GB of
+free space, and the explicit `MIGRATE AWG1` confirmation. The workflow creates
+a backup, survives the required reboots, and distributes replacement client
+configurations after completion. Existing client configurations stop working.
+
 - **Supported installer version:
   [v5.25.0](https://github.com/bivlked/amneziawg-installer/releases/tag/v5.25.0)**
   (`--json` contract verified). Minimum is

@@ -664,6 +664,35 @@ impl Vpn {
         }
     }
 
+    pub async fn local_legacy_migration(&self, command: &str) -> Result<String> {
+        if !matches!(command, "preflight" | "start" | "status" | "rollback") {
+            return Err(crate::error::Error::Parse(
+                "неизвестная команда локальной миграции".into(),
+            ));
+        }
+        let helper = std::path::Path::new("/usr/local/libexec/awgram-migratectl");
+        if !helper.is_file() {
+            return Err(crate::error::Error::Parse(
+                "не установлен awgram-migratectl; обновите бот через install.sh".into(),
+            ));
+        }
+        let spec = RunSpec {
+            script: helper,
+            sudo_prefix: &self.sudo_prefix,
+            timeout_secs: 300,
+            extra_env: &[],
+        };
+        let (out, code) = run(&spec, &[command]).await?;
+        if code == 0 {
+            Ok(out)
+        } else {
+            Err(crate::error::Error::ScriptFailed {
+                code: Some(code),
+                stderr: out,
+            })
+        }
+    }
+
     /// Свободные адреса в подсети сервера для превентивной проверки массовой
     /// генерации. `total` = usable-хостов v4-подсети (минус network+broadcast),
     /// `free` = total − 1 (сервер) − existing. Берёт первый IPv4 из
