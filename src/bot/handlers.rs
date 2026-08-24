@@ -790,7 +790,7 @@ async fn provision_customer_key(
         vpn.add(&name, Some(expiry), settings.psk_default()).await?
     } else {
         let result = vpn.remote_add(&server, &name).await?;
-        let seconds = parse_duration(expiry)
+        let seconds = duration_seconds(expiry)
             .ok_or_else(|| crate::error::Error::Parse("неверный срок тарифа".into()))?;
         if let Err(error) = vpn
             .remote_set_expiry(&server, &name, now_epoch() + seconds)
@@ -5402,7 +5402,7 @@ async fn callback_handler(
             if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
             }
-            let servers = settings.available_vpn_servers().collect::<Vec<_>>();
+            let servers = settings.available_vpn_servers();
             bot.send_message(chat, "🔄 Замена ключа и локации\n\nСначала будет создан новый ключ. Старый удалится только после успешного выпуска нового. Выберите доступную локацию:")
                 .reply_markup(menu::customer_move_servers_menu(&name, &servers, &settings))
                 .await?;
