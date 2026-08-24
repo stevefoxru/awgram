@@ -12,10 +12,14 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
-async fn notify_admins(bot: &Bot, cfg: &Config, text: String) {
+async fn notify_admins(bot: &Bot, cfg: &Config, text: String) -> bool {
+    let mut delivered = false;
     for id in &cfg.admin_ids {
-        let _ = bot.send_message(ChatId(*id), &text).await;
+        if bot.send_message(ChatId(*id), &text).await.is_ok() {
+            delivered = true;
+        }
     }
+    delivered
 }
 
 fn vpn_problem(report: &crate::vpn::wire::CheckReport) -> Option<String> {
@@ -146,6 +150,17 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
 }
 
 pub async fn run(bot: Bot, cfg: Arc<Config>, vpn: Arc<Vpn>, store: Arc<Store>) {
+    let version = env!("CARGO_PKG_VERSION");
+    let previous = store.runtime_version();
+    if previous.as_deref() != Some(version) {
+        let text = previous.map_or_else(
+            || format!("✅ Бот успешно запущен после установки или обновления.\nВерсия: v{version}"),
+            |old| format!("✅ Бот успешно обновлён\n\nv{old} → v{version}\nСлужба запущена и принимает команды."),
+        );
+        if notify_admins(&bot, &cfg, text).await {
+            store.set_runtime_version(version);
+        }
+    }
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
     loop {
         interval.tick().await;

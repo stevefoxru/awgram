@@ -113,6 +113,12 @@ impl Store {
     pub fn set_payment_instructions(&self, value: &str) {
         self.set_json("payment_instructions", &value.to_string());
     }
+    pub fn runtime_version(&self) -> Option<String> {
+        self.get_json("runtime_version")
+    }
+    pub fn set_runtime_version(&self, version: &str) {
+        self.set_json("runtime_version", &version.to_string());
+    }
     pub fn tariff_price_kopecks(&self, months: i64) -> Option<i64> {
         let defaults = [20_000, 60_000, 100_000, 200_000];
         let prices = self
@@ -431,6 +437,14 @@ mod tests {
         assert_eq!(s.current_group(42), Some(7));
         s.set_current_group(42, 9);
         assert_eq!(s.current_group(42), Some(9));
+    }
+
+    #[test]
+    fn runtime_version_roundtrip() {
+        let store = Store::open_in_memory();
+        assert_eq!(store.runtime_version(), None);
+        store.set_runtime_version("0.17.1");
+        assert_eq!(store.runtime_version().as_deref(), Some("0.17.1"));
     }
 
     #[test]
