@@ -5380,7 +5380,7 @@ async fn callback_handler(
                         ),
                     )
                     .reply_markup(menu::customer_keyboard())
-                    .await?
+                    .await?;
                 }
                 Err(error) => {
                     bot.send_message(chat,"Новый ключ сохранён, но старый не удалось удалить автоматически. Администратор получил уведомление.").await?;
