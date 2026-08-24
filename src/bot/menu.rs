@@ -216,7 +216,6 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             ),
         ],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
-        vec![cb("⭐ Сделать основным", &format!("server:default:{id}"))],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),
             cb("🏠 Админ-панель", "admin:dashboard"),
