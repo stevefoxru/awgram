@@ -208,7 +208,7 @@ fn run() -> NodeResponse {
         message: "command completed".into(),
         data: serde_json::from_str(&stdout)
             .ok()
-            .or_else(|| Some(serde_json::Value::String(stdout))),
+            .or(Some(serde_json::Value::String(stdout))),
     }
 }
 
