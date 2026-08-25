@@ -461,7 +461,10 @@ mod tests {
     #[test]
     fn migration_v2_applied() {
         let store = Store::open_in_memory();
-        assert_eq!(store.schema_version(), 16);
+        assert_eq!(
+            store.schema_version(),
+            crate::store::MIGRATIONS.len() as i64
+        );
     }
 
     #[test]
@@ -487,7 +490,10 @@ mod tests {
             .unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version(), 16);
+        assert_eq!(
+            store.schema_version(),
+            crate::store::MIGRATIONS.len() as i64
+        );
         assert_eq!(store.client_group("alice"), None);
         let g = store.create_group("g", 0).unwrap();
         store.assign_client_group("alice", Some(g), 100);
