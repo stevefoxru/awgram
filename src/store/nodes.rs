@@ -95,9 +95,10 @@ impl Store {
                 "SELECT id,node_id,server_id,protocol,driver,status,is_default
                  FROM vpn_instances WHERE server_id=?1 ORDER BY is_default DESC,id",
             )?;
-            statement
+            let instances = statement
                 .query_map([server_id], instance_from_row)?
-                .collect()
+                .collect();
+            instances
         })
         .unwrap_or_default()
     }
