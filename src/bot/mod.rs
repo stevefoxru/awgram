@@ -128,6 +128,14 @@ pub enum State {
     },
     AwaitingLegacyPrice,
     AwaitingServerAdd,
+    AwaitingServerWizardName,
+    AwaitingServerWizardAddress {
+        name: String,
+    },
+    AwaitingServerWizardDetails {
+        name: String,
+        public_ip: String,
+    },
     AwaitingServerBilling {
         server_id: i64,
     },

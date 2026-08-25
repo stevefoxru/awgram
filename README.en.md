@@ -9,6 +9,10 @@ them manually.
 Plain `http://` panels are supported, but the password travels without TLS.
 Restrict the panel port to the bot server IP and enable HTTPS when possible.
 
+A new VPS can be added through the step-by-step server wizard. After entering
+its name, IP, location, and provider, choose automatic AWG 1.0 installation,
+connect an existing panel, or generate a one-time bootstrap command.
+
 [🇷🇺 Русский](README.md) · 🇬🇧 English
 
 [![CI](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml)

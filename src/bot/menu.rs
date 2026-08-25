@@ -195,11 +195,29 @@ pub fn servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup
         })
         .collect::<Vec<_>>();
     rows.push(vec![
-        cb("➕ Добавить паспорт VPS", "server:add"),
+        cb("➕ Подключить новый сервер", "server:add"),
         cb("💳 Календарь оплаты", "server:billing"),
     ]);
     rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
     InlineKeyboardMarkup::new(rows)
+}
+
+pub fn server_setup_method_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "🚀 Установить AWG 1.0 автоматически",
+            &format!("server:deploy:{id}"),
+        )],
+        vec![cb(
+            "🔐 Подключить существующую панель",
+            &format!("server:panel:{id}"),
+        )],
+        vec![cb(
+            "🔗 Подключить bootstrap-командой",
+            &format!("server:enroll:{id}"),
+        )],
+        vec![cb("⏭ Настроить позже", &format!("server:{id}"))],
+    ])
 }
 
 pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
@@ -2180,6 +2198,19 @@ mod tests {
             "server:diagnose:42",
             "server:panel:42",
             "server:panel:sync:42",
+        ] {
+            assert!(data.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn server_setup_wizard_offers_all_connection_methods() {
+        let data = all_callback_data(&server_setup_method_menu(42));
+        for expected in [
+            "server:deploy:42",
+            "server:panel:42",
+            "server:enroll:42",
+            "server:42",
         ] {
             assert!(data.contains(&expected.to_string()), "missing {expected}");
         }

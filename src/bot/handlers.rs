@@ -2953,6 +2953,101 @@ async fn message_handler(
         }
         return Ok(());
     }
+    if matches!(&state, State::AwaitingServerWizardName) {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let name = msg.text().unwrap_or_default().trim();
+        if name.is_empty() || name.chars().count() > 64 {
+            bot.send_message(
+                msg.chat.id,
+                "Название должно содержать от 1 до 64 символов.",
+            )
+            .await?;
+        } else {
+            dialogue
+                .update(State::AwaitingServerWizardAddress {
+                    name: name.to_owned(),
+                })
+                .await?;
+            bot.send_message(
+                msg.chat.id,
+                "Шаг 2 из 3. Отправьте публичный IP-адрес нового VPS.",
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    if let State::AwaitingServerWizardAddress { name } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let public_ip = msg.text().unwrap_or_default().trim();
+        if public_ip.parse::<std::net::IpAddr>().is_err() {
+            bot.send_message(
+                msg.chat.id,
+                "Нужен корректный IPv4 или IPv6 без http:// и номера порта.",
+            )
+            .await?;
+        } else {
+            dialogue
+                .update(State::AwaitingServerWizardDetails {
+                    name,
+                    public_ip: public_ip.to_owned(),
+                })
+                .await?;
+            bot.send_message(
+                msg.chat.id,
+                "Шаг 3 из 3. Отправьте:\nЛОКАЦИЯ | ХОСТЕР\n\nПример: Amsterdam | Hoster",
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    if let State::AwaitingServerWizardDetails { name, public_ip } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let parts = msg
+            .text()
+            .unwrap_or_default()
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+            bot.send_message(msg.chat.id, "Неверный формат. Отправьте: ЛОКАЦИЯ | ХОСТЕР")
+                .await?;
+            return Ok(());
+        }
+        let created = settings.add_vpn_server(
+            &crate::store::NewVpnServer {
+                name: &name,
+                hostname: &public_ip,
+                public_ip: &public_ip,
+                provider: parts[1],
+                location: parts[0],
+                protocol: "amneziawg-1",
+                opened_at: Some(now_epoch()),
+                is_local: false,
+            },
+            uid,
+            now_epoch(),
+        );
+        dialogue.update(State::Idle).await?;
+        if let Some(id) = created {
+            bot.send_message(msg.chat.id, format!("✅ Сервер «{name}» добавлен.\n\nВыберите способ подключения. До успешной проверки сервер не участвует в выдаче новых ключей."))
+                .reply_markup(menu::server_setup_method_menu(id))
+                .await?;
+        } else {
+            bot.send_message(msg.chat.id, "❌ Не удалось создать сервер.")
+                .reply_markup(menu::servers_menu(&settings.vpn_servers()))
+                .await?;
+        }
+        return Ok(());
+    }
     if matches!(&state, State::AwaitingServerAdd) {
         if !role.is_owner() {
             dialogue.update(State::Idle).await?;
@@ -4369,8 +4464,8 @@ async fn callback_handler(
             }
         }
         Action::ServerAdd => {
-            bot.send_message(chat,"➕ Новый паспорт VPS\n\nОтправьте одной строкой:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПротокол: modern, legacy, amneziawg-2, amneziawg-1, amneziawg-panel, wireguard, openvpn или outline.\nПример:\nNetherlands #1 | nl1.example.com | 192.0.2.10 | Hoster | Amsterdam | amneziawg-panel | 2026-03-15").await?;
-            dialogue.update(State::AwaitingServerAdd).await?;
+            bot.send_message(chat,"🧭 Мастер подключения нового сервера\n\nШаг 1 из 3. Отправьте понятное название сервера, например: Netherlands 3.0\n\nПосле создания мастер предложит автоматическую установку AWG 1.0, подключение панели или безопасную bootstrap-команду.").await?;
+            dialogue.update(State::AwaitingServerWizardName).await?;
         }
         Action::ServerCard(id) => {
             if let Some(server) = settings.vpn_server(id) {

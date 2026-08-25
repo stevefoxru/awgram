@@ -9,6 +9,10 @@
 Панель по `http://` поддерживается, но пароль передаётся по сети без TLS.
 Ограничьте порт панели по IP сервера бота и по возможности включите HTTPS.
 
+Новый VPS добавляется через пошаговый мастер в разделе серверов. После ввода
+названия, IP, локации и хостера можно сразу установить AWG 1.0, подключить
+существующую панель либо получить одноразовую bootstrap-команду.
+
 🇷🇺 Русский · [🇬🇧 English](README.en.md)
 
 [![CI](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml)
