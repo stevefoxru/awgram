@@ -60,9 +60,12 @@ import_data(){
   TMP="$(mktemp -d)"; install -d -m700 "$TMP/payload"
   openssl enc -d -aes-256-cbc -pbkdf2 -in "$archive" -out "$TMP/payload.tar.gz"
   tar -xzf "$TMP/payload.tar.gz" -C "$TMP/payload"
-  [ -s "$TMP/payload/awgram.db" ]&&[ -s "$TMP/payload/env" ]||die 'архив повреждён'
+  if [ ! -s "$TMP/payload/awgram.db" ] || [ ! -s "$TMP/payload/env" ]; then
+    die 'архив повреждён'
+  fi
   admins="$(sed -n 's/^admin_ids[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$TMP/payload/config.toml"|tr -d ' ')"
-  token="$(sed -n 's/^AWGRAM_TOKEN=//p' "$TMP/payload/env")"; [ -n "$admins" ]&&[ -n "$token" ]||die 'нет token/admin_ids'
+  token="$(sed -n 's/^AWGRAM_TOKEN=//p' "$TMP/payload/env")"
+  if [ -z "$admins" ] || [ -z "$token" ]; then die 'нет token/admin_ids'; fi
   curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/install.sh -o "$TMP/install.sh"
   bash "$TMP/install.sh" install --yes --no-systemd --mode hardened --controller-only --token "$token" --admins "$admins"
   systemctl stop awgram
