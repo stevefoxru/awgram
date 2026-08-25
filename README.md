@@ -19,6 +19,10 @@
 VPN-инстансов и драйверов на одном физическом VPS; старые узлы продолжают
 работать через совместимый ограниченный SSH-мост.
 
+Проект поддерживает исключительно AmneziaWG: AWG 1.0, AWG 2.0 и AWG-панели.
+Обычный WireGuard, OpenVPN и Outline намеренно не устанавливаются и не
+используются.
+
 🇷🇺 Русский · [🇬🇧 English](README.en.md)
 
 [![CI](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml)

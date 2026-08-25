@@ -491,6 +491,17 @@ pub(crate) const MIGRATIONS: &[&str] = &[
      WHERE server_id IS NOT NULL;
     CREATE INDEX idx_clients_instance ON clients(instance_id,removed_at);
     "#,
+    // v18: продукт намеренно ограничен семейством AmneziaWG. Устаревшие
+    // паспорта других протоколов сохраняются для аудита, но автоматически
+    // исключаются из выдачи без удаления ключей или истории.
+    r#"
+    UPDATE vpn_servers
+       SET enabled_for_provisioning=0,status='maintenance',updated_at=strftime('%s','now')
+     WHERE protocol NOT IN ('modern','legacy','amneziawg-2','amneziawg-1','amneziawg-panel');
+    UPDATE vpn_instances
+       SET status='unsupported',updated_at=strftime('%s','now')
+     WHERE protocol NOT IN ('modern','legacy','amneziawg-2','amneziawg-1','amneziawg-panel');
+    "#,
 ];
 
 pub struct Store {

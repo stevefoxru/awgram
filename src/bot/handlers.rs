@@ -3107,7 +3107,7 @@ async fn message_handler(
                 .reply_markup(menu::server_card_menu(id))
                 .await?;
         } else {
-            bot.send_message(msg.chat.id,"Не удалось сохранить. Протокол: modern, legacy, amneziawg-2, amneziawg-1, amneziawg-panel, wireguard, openvpn или outline.").await?;
+            bot.send_message(msg.chat.id,"Не удалось сохранить. Допустимы только: amneziawg-2, amneziawg-1 или amneziawg-panel.").await?;
         }
         return Ok(());
     }
@@ -3203,7 +3203,7 @@ async fn message_handler(
                 .reply_markup(menu::server_card_menu(server_id))
                 .await?;
         } else {
-            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Проверьте дату и протокол: modern, legacy, amneziawg-2, amneziawg-1, amneziawg-panel, wireguard, openvpn или outline.").await?;
+            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Допустимы только: amneziawg-2, amneziawg-1 или amneziawg-panel.").await?;
         }
         return Ok(());
     }
@@ -4693,7 +4693,7 @@ async fn callback_handler(
         }
         Action::ServerPassportAsk(id) => {
             if let Some(server) = settings.vpn_server(id) {
-                bot.send_message(chat,format!("✏️ Редактирование паспорта\n\nОтправьте:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПротокол: modern, legacy, amneziawg-2, amneziawg-1, amneziawg-panel, wireguard, openvpn или outline.\n\nТекущие данные:\n{} | {} | {} | {} | {} | {} | {}",server.name,server.hostname,server.public_ip,server.provider,server.location,server.protocol,server.opened_at.map(crate::calendar::format_date).unwrap_or_else(||"YYYY-MM-DD".into()))).await?;
+                bot.send_message(chat,format!("✏️ Редактирование паспорта\n\nОтправьте:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПоддерживаются только: amneziawg-2, amneziawg-1 и amneziawg-panel.\n\nТекущие данные:\n{} | {} | {} | {} | {} | {} | {}",server.name,server.hostname,server.public_ip,server.provider,server.location,server.protocol,server.opened_at.map(crate::calendar::format_date).unwrap_or_else(||"YYYY-MM-DD".into()))).await?;
                 dialogue
                     .update(State::AwaitingServerPassport { server_id: id })
                     .await?;

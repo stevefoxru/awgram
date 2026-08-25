@@ -11,7 +11,7 @@ while (($#)); do case "$1" in
  --node-secret-b64) NODE_SECRET_B64="${2:-}";shift 2;;
  --subnet) AWG_SUBNET="${2:-}";shift 2;; *) die "Неизвестный параметр: $1";; esac; done
 [[ "$(id -u)" = 0 && "$SERVER_ID" =~ ^[1-9][0-9]*$ && "$NODE_ID" =~ ^[1-9][0-9]*$ ]] || die "Некорректные параметры"
-[[ "$PROTOCOL" =~ ^(amneziawg-1|amneziawg-2|wireguard|openvpn|outline)$ ]] || die "Протокол пока не поддерживается bootstrap"
+[[ "$PROTOCOL" =~ ^(amneziawg-1|amneziawg-2)$ ]] || die "Поддерживаются только AmneziaWG 1.0 и 2.0"
 key="$(printf '%s' "$CONTROLLER_KEY_B64"|base64 -d 2>/dev/null)" || die "Повреждён ключ"
 [[ "$key" = ssh-ed25519\ * ]] || die "Неверный ключ контроллера"
 secret="$(printf '%s' "$NODE_SECRET_B64"|base64 -d 2>/dev/null)" || die "Повреждён секрет узла"

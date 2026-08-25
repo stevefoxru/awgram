@@ -19,6 +19,10 @@ allowlisted commands. The data model supports multiple VPN instances and
 drivers per physical VPS, while existing nodes retain the restricted SSH
 compatibility fallback.
 
+The project exclusively supports the AmneziaWG family: AWG 1.0, AWG 2.0, and
+AWG panels. Plain WireGuard, OpenVPN, and Outline are intentionally not
+installed or used.
+
 [🇷🇺 Русский](README.md) · 🇬🇧 English
 
 [![CI](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml)

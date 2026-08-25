@@ -505,6 +505,7 @@ impl Store {
             .into_iter()
             .filter(|server| {
                 server.enabled_for_provisioning
+                    && valid_protocol(&server.protocol)
                     && server.status != "offline"
                     && self.server_client_count(server.id) < server.capacity
             })

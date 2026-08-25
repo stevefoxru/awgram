@@ -257,7 +257,7 @@ mod tests {
                     public_ip: "192.0.2.8",
                     provider: "Hoster",
                     location: "Amsterdam",
-                    protocol: "wireguard",
+                    protocol: "amneziawg-2",
                     opened_at: None,
                     is_local: false,
                 },
@@ -269,12 +269,12 @@ mod tests {
         assert_eq!(node.transport, "restricted_ssh");
         let instances = store.vpn_instances_for_server(server_id);
         assert_eq!(instances.len(), 1);
-        assert_eq!(instances[0].protocol, "wireguard");
+        assert_eq!(instances[0].protocol, "amneziawg-2");
         assert!(instances[0].is_default);
         assert!(store.set_node_secret(server_id, "encrypted", 105));
         assert_eq!(store.node_secret(server_id).as_deref(), Some("encrypted"));
         let job = store
-            .create_installation_job(server_id, "wireguard", "install", 1, 110)
+            .create_installation_job(server_id, "amneziawg-2", "install", 1, 110)
             .unwrap();
         assert!(store.update_installation_job(
             job,
