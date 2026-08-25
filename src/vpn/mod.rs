@@ -14,7 +14,7 @@ use crate::error::Result;
 use base64::Engine;
 use model::{AddResult, Client};
 use node_api::{NodeCommand, NodeResponse, SignedNodeRequest};
-use rand::Rng;
+use rand::RngExt;
 use runner::{run, RunSpec};
 
 pub struct Vpn {
