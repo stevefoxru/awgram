@@ -85,6 +85,10 @@ impl Vpn {
         Ok(value.get("ok").and_then(serde_json::Value::as_bool) == Some(true))
     }
 
+    pub async fn remote_diagnose(&self, server: &crate::store::VpnServer) -> Result<String> {
+        self.remote_node_command(server, &["diagnose"]).await
+    }
+
     pub async fn remote_legacy_migration(
         &self,
         server: &crate::store::VpnServer,

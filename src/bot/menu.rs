@@ -219,6 +219,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             "🚀 Установить VPN на VPS",
             &format!("server:deploy:{id}"),
         )],
+        vec![
+            cb("🩺 Проверить", &format!("server:check:{id}")),
+            cb("🔬 Диагностика", &format!("server:diagnose:{id}")),
+        ],
         vec![cb(
             "🔀 Перевести AWG 2.0 → 1.0",
             &format!("server:migrate:{id}"),
@@ -2153,6 +2157,14 @@ mod tests {
             all_callback_data(&settings_menu(Lang::Ru, false, false, true, true, true))
                 .contains(&"admin:dashboard".to_string())
         );
+    }
+
+    #[test]
+    fn server_card_exposes_remote_install_and_health_actions() {
+        let data = all_callback_data(&server_card_menu(42));
+        for expected in ["server:deploy:42", "server:check:42", "server:diagnose:42"] {
+            assert!(data.contains(&expected.to_string()), "missing {expected}");
+        }
     }
 
     #[test]

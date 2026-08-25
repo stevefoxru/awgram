@@ -86,28 +86,51 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
             Ok(true) => {
                 let became_ready = server.status != "online";
                 store.set_server_status(server.id, "online", now);
+                let monitor_key = format!("vpn-server-{}", server.id);
+                let recovered = store.update_monitor_state(&monitor_key, "ok", None, now);
                 if server.status == "maintenance" {
                     store.set_server_provisioning(server.id, true, now);
                     store.set_default_vpn_server(server.id);
                 }
-                if became_ready {
+                if became_ready && recovered {
                     notify_admins(bot, cfg, format!("✅ VPS «{}» готов\nAWG 1.0 работает, сервер включён для выдачи и назначен основным.", server.name)).await;
                 }
             }
             Ok(false) => {
                 if server.status != "maintenance" {
                     store.set_server_status(server.id, "warning", now);
+                    let monitor_key = format!("vpn-server-{}", server.id);
+                    if store.update_monitor_state(
+                        &monitor_key,
+                        "error",
+                        Some("SSH доступен, VPN-служба неактивна"),
+                        now,
+                    ) {
+                        notify_admins(
+                            bot,
+                            cfg,
+                            format!(
+                                "🚨 VPS «{}» доступен, но VPN-служба не работает.",
+                                server.name
+                            ),
+                        )
+                        .await;
+                    }
                 }
             }
             Err(error) => {
-                if server.status == "online" {
+                if server.status != "maintenance" {
                     store.set_server_status(server.id, "offline", now);
-                    notify_admins(
-                        bot,
-                        cfg,
-                        format!("🚨 VPS «{}» недоступен: {error}", server.name),
-                    )
-                    .await;
+                    let monitor_key = format!("vpn-server-{}", server.id);
+                    let details = error.to_string();
+                    if store.update_monitor_state(&monitor_key, "error", Some(&details), now) {
+                        notify_admins(
+                            bot,
+                            cfg,
+                            format!("🚨 VPS «{}» недоступен: {error}", server.name),
+                        )
+                        .await;
+                    }
                 }
             }
         }

@@ -43,6 +43,8 @@ pub enum Action {
     ServerEnrollRevoke(i64),
     ServerSetDefault(i64),
     ServerDeployAsk(i64),
+    ServerCheck(i64),
+    ServerDiagnose(i64),
     LocalMigration,
     LocalMigrationPreflight,
     LocalMigrationStart,
@@ -458,6 +460,14 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:deploy:") {
                 v.parse()
                     .map(Action::ServerDeployAsk)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:check:") {
+                v.parse()
+                    .map(Action::ServerCheck)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:diagnose:") {
+                v.parse()
+                    .map(Action::ServerDiagnose)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
@@ -1407,6 +1417,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerEnrollRevoke(_)
         | ServerSetDefault(_)
         | ServerDeployAsk(_)
+        | ServerCheck(_)
+        | ServerDiagnose(_)
         | LocalMigration
         | LocalMigrationPreflight
         | LocalMigrationStart
@@ -4327,7 +4339,7 @@ async fn callback_handler(
                     .reply_markup(menu::server_card_menu(id))
                     .await?;
                 } else if !matches!(server.protocol.as_str(), "legacy" | "amneziawg-1") {
-                    bot.send_message(chat, "Автоустановка в 0.18.0 поддерживает AWG 1.0. Укажите протокол amneziawg-1 в паспорте VPS.")
+                    bot.send_message(chat, "Автоустановка поддерживает только AWG 1.0. Укажите протокол amneziawg-1 в паспорте VPS.")
                         .reply_markup(menu::server_card_menu(id)).await?;
                 } else {
                     bot.send_message(chat, format!("🚀 Установка AWG 1.0 на {}\n\nОтправьте одним сообщением:\nroot | ПАРОЛЬ\n\nСообщение будет сразу удалено, пароль не сохраняется и используется только для первичного входа. После этого бот установит отдельный SSH-ключ.", server.public_ip)).await?;
@@ -4335,6 +4347,39 @@ async fn callback_handler(
                         .update(State::AwaitingServerDeployCredentials { server_id: id })
                         .await?;
                 }
+            }
+        }
+        Action::ServerCheck(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                let result = if server.is_local {
+                    vpn.check().await.map(|report| report.ok)
+                } else {
+                    vpn.remote_status(&server).await
+                };
+                let text = match result {
+                    Ok(true) => format!("✅ «{}» доступен, VPN-служба активна.", server.name),
+                    Ok(false) => format!("⚠️ «{}» доступен, но VPN-служба не готова.", server.name),
+                    Err(error) => format!("❌ «{}» недоступен: {error}", server.name),
+                };
+                bot.send_message(chat, text)
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+            }
+        }
+        Action::ServerDiagnose(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                let result = if server.is_local {
+                    vpn.diagnose().await
+                } else {
+                    vpn.remote_diagnose(&server).await
+                };
+                let text = match result {
+                    Ok(output) => format!("🔬 Диагностика «{}»\n\n{}", server.name, truncate_for_message(output)),
+                    Err(error) => format!("❌ Диагностика «{}» недоступна: {error}\n\nЕсли узел подключён давно, обновите SSH-мост командой transfer.sh bridge.", server.name),
+                };
+                bot.send_message(chat, text)
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
             }
         }
         Action::LocalMigration => {
@@ -7728,6 +7773,10 @@ mod tests {
             ServerPassportAsk(1),
             ServerEnroll(1),
             ServerEnrollRevoke(1),
+            ServerSetDefault(1),
+            ServerDeployAsk(1),
+            ServerCheck(1),
+            ServerDiagnose(1),
             AdminCreate,
             AdminOwners,
             AdminFinance,
@@ -7861,6 +7910,8 @@ mod tests {
                 ServerEnrollRevoke(_) => {}
                 ServerSetDefault(_) => {}
                 ServerDeployAsk(_) => {}
+                ServerCheck(_) => {}
+                ServerDiagnose(_) => {}
                 LocalMigration => {}
                 LocalMigrationPreflight => {}
                 LocalMigrationStart => {}
@@ -8195,6 +8246,8 @@ mod tests {
             (Action::ServerEnrollRevoke(1), true, false),
             (Action::ServerSetDefault(1), true, false),
             (Action::ServerDeployAsk(1), true, false),
+            (Action::ServerCheck(1), true, false),
+            (Action::ServerDiagnose(1), true, false),
             (Action::LocalMigration, true, false),
             (Action::LocalMigrationPreflight, true, false),
             (Action::LocalMigrationStart, true, false),
