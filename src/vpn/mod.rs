@@ -1,4 +1,5 @@
 pub mod model;
+pub mod panel;
 pub mod runner;
 pub mod validate;
 pub mod wire;
@@ -17,6 +18,7 @@ pub struct Vpn {
     sudo_prefix: String,
     timeout_secs: u64,
     clients_dir: PathBuf,
+    panel_key_path: PathBuf,
 }
 
 pub struct DeployRequest<'a> {
@@ -312,7 +314,139 @@ impl Vpn {
             sudo_prefix: cfg.sudo_prefix.clone(),
             timeout_secs: cfg.op_timeout_secs,
             clients_dir: cfg.clients_dir.clone(),
+            panel_key_path: cfg
+                .db_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/var/lib/awgram"))
+                .join("panel.key"),
         }
+    }
+
+    pub fn protect_panel_password(&self, password: &str) -> Result<String> {
+        panel::protect_password(&self.panel_key_path, password)
+    }
+
+    pub fn reveal_panel_password(&self, encrypted: &str) -> Result<String> {
+        panel::reveal_password(&self.panel_key_path, encrypted)
+    }
+
+    pub async fn test_panel(&self, url: &str, password: &str) -> Result<Vec<panel::PanelClient>> {
+        panel::list(url, password).await
+    }
+
+    fn panel_auth(
+        &self,
+        server: &crate::store::VpnServer,
+        encrypted_password: &str,
+    ) -> Result<(String, String)> {
+        if server.protocol != "amneziawg-panel" || server.is_local {
+            return Err(crate::error::Error::Parse(
+                "сервер не подключён как панель".into(),
+            ));
+        }
+        let url = server
+            .panel_url
+            .clone()
+            .ok_or_else(|| crate::error::Error::Parse("URL панели не настроен".into()))?;
+        Ok((url, self.reveal_panel_password(encrypted_password)?))
+    }
+
+    pub async fn panel_clients(
+        &self,
+        server: &crate::store::VpnServer,
+        encrypted_password: &str,
+    ) -> Result<Vec<panel::PanelClient>> {
+        let (url, password) = self.panel_auth(server, encrypted_password)?;
+        panel::list(&url, &password).await
+    }
+
+    async fn save_panel_configuration(
+        &self,
+        server: &crate::store::VpnServer,
+        encrypted_password: &str,
+        client: &panel::PanelClient,
+    ) -> Result<AddResult> {
+        let (url, password) = self.panel_auth(server, encrypted_password)?;
+        let contents = panel::configuration(&url, &password, &client.id).await?;
+        let dir = self.clients_dir.join("panel").join(server.id.to_string());
+        std::fs::create_dir_all(&dir)?;
+        let conf_path = dir.join(format!("{}.conf", client.name));
+        std::fs::write(&conf_path, contents)?;
+        Ok(AddResult {
+            name: client.name.clone(),
+            conf_path: conf_path.to_string_lossy().into_owned(),
+            qr_path: String::new(),
+            uri: String::new(),
+        })
+    }
+
+    pub async fn panel_add(
+        &self,
+        server: &crate::store::VpnServer,
+        encrypted_password: &str,
+        name: &str,
+    ) -> Result<AddResult> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let (url, password) = self.panel_auth(server, encrypted_password)?;
+        let client = panel::create(&url, &password, &name).await?;
+        self.save_panel_configuration(server, encrypted_password, &client)
+            .await
+    }
+
+    pub async fn panel_existing_files(
+        &self,
+        server: &crate::store::VpnServer,
+        encrypted_password: &str,
+        name: &str,
+    ) -> Result<AddResult> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let client = self
+            .panel_clients(server, encrypted_password)
+            .await?
+            .into_iter()
+            .find(|client| client.name == name)
+            .ok_or_else(|| crate::error::Error::ClientNotFound(name.clone()))?;
+        self.save_panel_configuration(server, encrypted_password, &client)
+            .await
+    }
+
+    pub async fn panel_remove(
+        &self,
+        server: &crate::store::VpnServer,
+        encrypted_password: &str,
+        name: &str,
+    ) -> Result<()> {
+        let (url, password) = self.panel_auth(server, encrypted_password)?;
+        let client = panel::list(&url, &password)
+            .await?
+            .into_iter()
+            .find(|client| client.name == name)
+            .ok_or_else(|| crate::error::Error::ClientNotFound(name.into()))?;
+        panel::delete(&url, &password, &client.id).await
+    }
+
+    pub async fn panel_set_expiry(
+        &self,
+        server: &crate::store::VpnServer,
+        encrypted_password: &str,
+        name: &str,
+        expires_at: i64,
+    ) -> Result<()> {
+        let (url, password) = self.panel_auth(server, encrypted_password)?;
+        let client = panel::list(&url, &password)
+            .await?
+            .into_iter()
+            .find(|client| client.name == name)
+            .ok_or_else(|| crate::error::Error::ClientNotFound(name.into()))?;
+        panel::set_expiry(
+            &url,
+            &password,
+            &client.id,
+            &crate::calendar::format_date(expires_at),
+        )
+        .await
     }
 
     fn spec(&self) -> RunSpec<'_> {
@@ -1094,6 +1228,7 @@ impl Vpn {
             sudo_prefix: String::new(),
             timeout_secs: 5,
             clients_dir,
+            panel_key_path: tempfile::tempdir().unwrap().path().join("panel.key"),
         }
     }
 }
@@ -1118,6 +1253,7 @@ mod tests {
             sudo_prefix: String::new(),
             timeout_secs: 5,
             clients_dir: dir.path().to_path_buf(),
+            panel_key_path: dir.path().join("panel.key"),
         };
         (dir, vpn)
     }
@@ -1283,6 +1419,7 @@ echo '{{"command":"add","ok":true,"added":1,"failed":0,"applied":true,"results":
             sudo_prefix: String::new(),
             timeout_secs: 5,
             clients_dir: dir.path().to_path_buf(),
+            panel_key_path: dir.path().join("panel.key"),
         };
         let res = vpn.add("alice", None, false).await.unwrap();
         assert_eq!(res.conf_path, "/tmp/zz/alice.conf");
@@ -1311,6 +1448,7 @@ echo '{"command":"add","ok":true,"added":1,"failed":0,"applied":true,"results":[
             sudo_prefix: String::new(),
             timeout_secs: 5,
             clients_dir: dir.path().to_path_buf(),
+            panel_key_path: dir.path().join("panel.key"),
         };
         let res = vpn.add("alice", None, false).await.unwrap();
         assert_eq!(res.uri, "");
@@ -1884,6 +2022,7 @@ echo '{{"command":"add","ok":true,"added":2,"failed":1,"applied":true,"results":
             sudo_prefix: String::new(),
             timeout_secs: 5,
             clients_dir: dir.path().to_path_buf(),
+            panel_key_path: dir.path().join("panel.key"),
         };
         let res = vpn
             .add_many(

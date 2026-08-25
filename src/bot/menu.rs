@@ -220,6 +220,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             &format!("server:deploy:{id}"),
         )],
         vec![
+            cb("🔐 Подключить панель", &format!("server:panel:{id}")),
+            cb("🔄 Синхронизировать", &format!("server:panel:sync:{id}")),
+        ],
+        vec![
             cb("🩺 Проверить", &format!("server:check:{id}")),
             cb("🔬 Диагностика", &format!("server:diagnose:{id}")),
         ],
@@ -2170,7 +2174,13 @@ mod tests {
     #[test]
     fn server_card_exposes_remote_install_and_health_actions() {
         let data = all_callback_data(&server_card_menu(42));
-        for expected in ["server:deploy:42", "server:check:42", "server:diagnose:42"] {
+        for expected in [
+            "server:deploy:42",
+            "server:check:42",
+            "server:diagnose:42",
+            "server:panel:42",
+            "server:panel:sync:42",
+        ] {
             assert!(data.contains(&expected.to_string()), "missing {expected}");
         }
     }

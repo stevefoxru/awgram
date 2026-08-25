@@ -48,6 +48,7 @@ export_data(){
   sqlite3 "$TMP/payload/awgram.db" "UPDATE vpn_servers SET is_local=0,status='online' WHERE is_local=1;"
   cp -a "$CFG/env" "$CFG/config.toml" "$STATE/node_id_ed25519" "$STATE/node_id_ed25519.pub" "$TMP/payload/"
   [ -f "$STATE/node_known_hosts" ]&&cp -a "$STATE/node_known_hosts" "$TMP/payload/"
+  [ -f "$STATE/panel.key" ]&&cp -a "$STATE/panel.key" "$TMP/payload/"
   [ -d "$STATE/clients" ]&&cp -a "$STATE/clients" "$TMP/payload/"
   sqlite3 "$STATE/awgram.db" "SELECT public_ip FROM vpn_servers WHERE is_local=1 LIMIT 1;">"$TMP/payload/source-ip"
   [ -s "$TMP/payload/source-ip" ]||hostname -I|awk '{print $1}'>"$TMP/payload/source-ip"
@@ -79,6 +80,7 @@ import_data(){
   install -m640 "$TMP/payload/awgram.db" "$STATE/awgram.db"; install -m600 "$TMP/payload/env" "$CFG/env"
   install -m600 "$TMP/payload/node_id_ed25519" "$STATE/node_id_ed25519"; install -m644 "$TMP/payload/node_id_ed25519.pub" "$STATE/node_id_ed25519.pub"
   [ -f "$TMP/payload/node_known_hosts" ]&&install -m600 "$TMP/payload/node_known_hosts" "$STATE/node_known_hosts"
+  [ -f "$TMP/payload/panel.key" ]&&install -m600 "$TMP/payload/panel.key" "$STATE/panel.key"
   [ -d "$TMP/payload/clients" ]&&cp -a "$TMP/payload/clients/." "$STATE/clients/"
   source_ip="$(cat "$TMP/payload/source-ip")"; touch "$STATE/node_known_hosts"
   ssh-keyscan -H "$source_ip" >>"$STATE/node_known_hosts" 2>/dev/null||die 'старая VPS недоступна по SSH'

@@ -82,7 +82,17 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         .into_iter()
         .filter(|server| !server.is_local)
     {
-        match vpn.remote_status(&server).await {
+        let remote_health = if server.protocol == "amneziawg-panel" {
+            match store.panel_password(server.id) {
+                Some(secret) => vpn.panel_clients(&server, &secret).await.map(|_| true),
+                None => Err(crate::error::Error::Parse(
+                    "пароль панели не настроен".into(),
+                )),
+            }
+        } else {
+            vpn.remote_status(&server).await
+        };
+        match remote_health {
             Ok(true) => {
                 if server.status == "maintenance" {
                     // Миграция/установка требует ручной проверки тестового

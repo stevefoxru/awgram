@@ -47,6 +47,8 @@ pub enum Action {
     ServerDeployAsk(i64),
     ServerCheck(i64),
     ServerDiagnose(i64),
+    ServerPanelConnect(i64),
+    ServerPanelSync(i64),
     LocalMigration,
     LocalMigrationPreflight,
     LocalMigrationStart,
@@ -479,6 +481,14 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::ServerDiagnose)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:panel:sync:") {
+                v.parse()
+                    .map(Action::ServerPanelSync)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:panel:") {
+                v.parse()
+                    .map(Action::ServerPanelConnect)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
                     .map(Action::ServerEnroll)
@@ -815,6 +825,114 @@ fn customer_base_name(user: &crate::store::UserRow) -> String {
     base
 }
 
+fn panel_secret(
+    settings: &Store,
+    server: &crate::store::VpnServer,
+) -> crate::error::Result<String> {
+    settings
+        .panel_password(server.id)
+        .ok_or_else(|| crate::error::Error::Parse("пароль панели не настроен".into()))
+}
+
+async fn nonlocal_add(
+    vpn: &Vpn,
+    settings: &Store,
+    server: &crate::store::VpnServer,
+    name: &str,
+) -> crate::error::Result<crate::vpn::model::AddResult> {
+    if server.protocol == "amneziawg-panel" {
+        vpn.panel_add(server, &panel_secret(settings, server)?, name)
+            .await
+    } else {
+        vpn.remote_add(server, name).await
+    }
+}
+
+async fn nonlocal_files(
+    vpn: &Vpn,
+    settings: &Store,
+    server: &crate::store::VpnServer,
+    name: &str,
+) -> crate::error::Result<crate::vpn::model::AddResult> {
+    if server.protocol == "amneziawg-panel" {
+        vpn.panel_existing_files(server, &panel_secret(settings, server)?, name)
+            .await
+    } else {
+        vpn.remote_existing_files(server, name).await
+    }
+}
+
+async fn nonlocal_remove(
+    vpn: &Vpn,
+    settings: &Store,
+    server: &crate::store::VpnServer,
+    name: &str,
+) -> crate::error::Result<()> {
+    if server.protocol == "amneziawg-panel" {
+        vpn.panel_remove(server, &panel_secret(settings, server)?, name)
+            .await
+    } else {
+        vpn.remote_remove(server, name).await
+    }
+}
+
+async fn nonlocal_set_expiry(
+    vpn: &Vpn,
+    settings: &Store,
+    server: &crate::store::VpnServer,
+    name: &str,
+    expires_at: i64,
+) -> crate::error::Result<()> {
+    if server.protocol == "amneziawg-panel" {
+        vpn.panel_set_expiry(server, &panel_secret(settings, server)?, name, expires_at)
+            .await
+    } else {
+        vpn.remote_set_expiry(server, name, expires_at).await
+    }
+}
+
+async fn nonlocal_refresh(
+    vpn: &Vpn,
+    settings: &Store,
+    server: &crate::store::VpnServer,
+    name: &str,
+) -> crate::error::Result<crate::vpn::model::AddResult> {
+    if server.protocol == "amneziawg-panel" {
+        nonlocal_files(vpn, settings, server, name).await
+    } else {
+        vpn.remote_regen(server, name).await
+    }
+}
+
+async fn client_files(
+    vpn: &Vpn,
+    settings: &Store,
+    name: &str,
+) -> crate::error::Result<crate::vpn::model::AddResult> {
+    match settings.client_vpn_server(name) {
+        Some(server) if !server.is_local => nonlocal_files(vpn, settings, &server, name).await,
+        _ => vpn.existing_files(name),
+    }
+}
+
+async fn client_remove(vpn: &Vpn, settings: &Store, name: &str) -> crate::error::Result<()> {
+    match settings.client_vpn_server(name) {
+        Some(server) if !server.is_local => nonlocal_remove(vpn, settings, &server, name).await,
+        _ => vpn.remove(name).await,
+    }
+}
+
+async fn client_refresh(
+    vpn: &Vpn,
+    settings: &Store,
+    name: &str,
+) -> crate::error::Result<crate::vpn::model::AddResult> {
+    match settings.client_vpn_server(name) {
+        Some(server) if !server.is_local => nonlocal_refresh(vpn, settings, &server, name).await,
+        _ => vpn.regen_client(name).await,
+    }
+}
+
 async fn provision_customer_key(
     vpn: &Vpn,
     settings: &Store,
@@ -847,14 +965,13 @@ async fn provision_customer_key(
     let result = if server.is_local {
         vpn.add(&name, Some(expiry), settings.psk_default()).await?
     } else {
-        let result = vpn.remote_add(&server, &name).await?;
+        let result = nonlocal_add(vpn, settings, &server, &name).await?;
         let seconds = duration_seconds(expiry)
             .ok_or_else(|| crate::error::Error::Parse("неверный срок тарифа".into()))?;
-        if let Err(error) = vpn
-            .remote_set_expiry(&server, &name, now_epoch() + seconds)
-            .await
+        if let Err(error) =
+            nonlocal_set_expiry(vpn, settings, &server, &name, now_epoch() + seconds).await
         {
-            let _ = vpn.remote_remove(&server, &name).await;
+            let _ = nonlocal_remove(vpn, settings, &server, &name).await;
             return Err(error);
         }
         result
@@ -865,7 +982,7 @@ async fn provision_customer_key(
         if server.is_local {
             let _ = vpn.remove(&name).await;
         } else {
-            let _ = vpn.remote_remove(&server, &name).await;
+            let _ = nonlocal_remove(vpn, settings, &server, &name).await;
         }
         return Err(crate::error::Error::Parse(
             "не удалось закрепить ключ за сервером".to_string(),
@@ -1431,6 +1548,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerDeployAsk(_)
         | ServerCheck(_)
         | ServerDiagnose(_)
+        | ServerPanelConnect(_)
+        | ServerPanelSync(_)
         | LocalMigration
         | LocalMigrationPreflight
         | LocalMigrationStart
@@ -2867,7 +2986,7 @@ async fn message_handler(
                 .reply_markup(menu::server_card_menu(id))
                 .await?;
         } else {
-            bot.send_message(msg.chat.id,"Не удалось сохранить. Протокол: modern, legacy, amneziawg-2, amneziawg-1, wireguard, openvpn или outline.").await?;
+            bot.send_message(msg.chat.id,"Не удалось сохранить. Протокол: modern, legacy, amneziawg-2, amneziawg-1, amneziawg-panel, wireguard, openvpn или outline.").await?;
         }
         return Ok(());
     }
@@ -2963,8 +3082,80 @@ async fn message_handler(
                 .reply_markup(menu::server_card_menu(server_id))
                 .await?;
         } else {
-            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Проверьте дату и протокол: modern, legacy, amneziawg-2, amneziawg-1, wireguard, openvpn или outline.").await?;
+            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Проверьте дату и протокол: modern, legacy, amneziawg-2, amneziawg-1, amneziawg-panel, wireguard, openvpn или outline.").await?;
         }
+        return Ok(());
+    }
+    if let State::AwaitingPanelCredentials { server_id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let raw = msg.text().unwrap_or_default();
+        let mut parts = raw.splitn(2, '|').map(str::trim);
+        let url = parts.next().unwrap_or_default().to_owned();
+        let mut password = parts.next().unwrap_or_default().to_owned();
+        let _ = bot.delete_message(msg.chat.id, msg.id).await;
+        let Some(server) = settings
+            .vpn_server(server_id)
+            .filter(|server| !server.is_local)
+        else {
+            password.clear();
+            dialogue.update(State::Idle).await?;
+            bot.send_message(msg.chat.id, "Удалённый сервер не найден.")
+                .await?;
+            return Ok(());
+        };
+        if url.is_empty() || password.is_empty() {
+            password.clear();
+            bot.send_message(msg.chat.id, "Неверный формат. Отправьте: URL | ПАРОЛЬ")
+                .await?;
+            return Ok(());
+        }
+        bot.send_message(msg.chat.id, "⏳ Проверяю панель и пароль…")
+            .await?;
+        let checked = vpn.test_panel(&url, &password).await;
+        match checked {
+            Ok(clients) => {
+                let encrypted = match vpn.protect_panel_password(&password) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        password.clear();
+                        dialogue.update(State::Idle).await?;
+                        bot.send_message(
+                            msg.chat.id,
+                            format!("❌ Не удалось безопасно сохранить пароль: {error}"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                password.clear();
+                if !settings.set_panel_credentials(server.id, &url, &encrypted, now_epoch()) {
+                    bot.send_message(msg.chat.id, "❌ Не удалось сохранить подключение панели.")
+                        .await?;
+                } else {
+                    let imported = settings.sync_panel_clients(
+                        server.id,
+                        &clients
+                            .iter()
+                            .map(|client| (client.name.clone(), client.address.clone()))
+                            .collect::<Vec<_>>(),
+                        now_epoch(),
+                    );
+                    bot.send_message(msg.chat.id, format!("✅ Панель подключена. Найдено клиентов: {}; синхронизировано: {imported}.\n\n{}", clients.len(), if url.starts_with("http://") {"⚠️ Используется незашифрованный HTTP. Ограничьте порт панели по IP сервера бота."} else {"Соединение защищено HTTPS."}))
+                        .reply_markup(menu::server_card_menu(server.id))
+                        .await?;
+                }
+            }
+            Err(error) => {
+                password.clear();
+                bot.send_message(msg.chat.id, format!("❌ Панель не подключена: {error}"))
+                    .reply_markup(menu::server_card_menu(server.id))
+                    .await?;
+            }
+        }
+        dialogue.update(State::Idle).await?;
         return Ok(());
     }
     if let State::AwaitingServerDeployCredentials { server_id } = state.clone() {
@@ -4178,7 +4369,7 @@ async fn callback_handler(
             }
         }
         Action::ServerAdd => {
-            bot.send_message(chat,"➕ Новый паспорт VPS\n\nОтправьте одной строкой:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПротокол: modern, legacy, amneziawg-2, amneziawg-1, wireguard, openvpn или outline.\nПример:\nNetherlands #1 | nl1.example.com | 192.0.2.10 | Hoster | Amsterdam | amneziawg-2 | 2026-03-15").await?;
+            bot.send_message(chat,"➕ Новый паспорт VPS\n\nОтправьте одной строкой:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПротокол: modern, legacy, amneziawg-2, amneziawg-1, amneziawg-panel, wireguard, openvpn или outline.\nПример:\nNetherlands #1 | nl1.example.com | 192.0.2.10 | Hoster | Amsterdam | amneziawg-panel | 2026-03-15").await?;
             dialogue.update(State::AwaitingServerAdd).await?;
         }
         Action::ServerCard(id) => {
@@ -4368,7 +4559,7 @@ async fn callback_handler(
         }
         Action::ServerPassportAsk(id) => {
             if let Some(server) = settings.vpn_server(id) {
-                bot.send_message(chat,format!("✏️ Редактирование паспорта\n\nОтправьте:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПротокол: modern, legacy, amneziawg-2, amneziawg-1, wireguard, openvpn или outline.\n\nТекущие данные:\n{} | {} | {} | {} | {} | {} | {}",server.name,server.hostname,server.public_ip,server.provider,server.location,server.protocol,server.opened_at.map(crate::calendar::format_date).unwrap_or_else(||"YYYY-MM-DD".into()))).await?;
+                bot.send_message(chat,format!("✏️ Редактирование паспорта\n\nОтправьте:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПротокол: modern, legacy, amneziawg-2, amneziawg-1, amneziawg-panel, wireguard, openvpn или outline.\n\nТекущие данные:\n{} | {} | {} | {} | {} | {} | {}",server.name,server.hostname,server.public_ip,server.provider,server.location,server.protocol,server.opened_at.map(crate::calendar::format_date).unwrap_or_else(||"YYYY-MM-DD".into()))).await?;
                 dialogue
                     .update(State::AwaitingServerPassport { server_id: id })
                     .await?;
@@ -4440,6 +4631,13 @@ async fn callback_handler(
             if let Some(server) = settings.vpn_server(id) {
                 let result = if server.is_local {
                     vpn.check().await.map(|report| report.ok)
+                } else if server.protocol == "amneziawg-panel" {
+                    match settings.panel_password(id) {
+                        Some(secret) => vpn.panel_clients(&server, &secret).await.map(|_| true),
+                        None => Err(crate::error::Error::Parse(
+                            "пароль панели не настроен".into(),
+                        )),
+                    }
                 } else {
                     vpn.remote_status(&server).await
                 };
@@ -4457,6 +4655,16 @@ async fn callback_handler(
             if let Some(server) = settings.vpn_server(id) {
                 let result = if server.is_local {
                     vpn.diagnose().await
+                } else if server.protocol == "amneziawg-panel" {
+                    match settings.panel_password(id) {
+                        Some(secret) => vpn
+                            .panel_clients(&server, &secret)
+                            .await
+                            .map(|clients| format!("panel=online\nclients={}", clients.len())),
+                        None => Err(crate::error::Error::Parse(
+                            "пароль панели не настроен".into(),
+                        )),
+                    }
                 } else {
                     vpn.remote_diagnose(&server).await
                 };
@@ -4465,6 +4673,60 @@ async fn callback_handler(
                     Err(error) => format!("❌ Диагностика «{}» недоступна: {error}\n\nЕсли узел подключён давно, обновите SSH-мост командой transfer.sh bridge.", server.name),
                 };
                 bot.send_message(chat, text)
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+            }
+        }
+        Action::ServerPanelConnect(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                if server.is_local {
+                    bot.send_message(chat, "Панель можно подключить только к удалённому серверу.")
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                } else {
+                    bot.send_message(chat, format!("🔐 Подключение панели для «{}»\n\nОтправьте одним сообщением:\nURL | ПАРОЛЬ\n\nПример: http://panel.example:1240 | пароль\n\nСообщение будет сразу удалено. В базе сохранится только зашифрованный пароль.", server.name)).await?;
+                    dialogue
+                        .update(State::AwaitingPanelCredentials { server_id: id })
+                        .await?;
+                }
+            }
+        }
+        Action::ServerPanelSync(id) => {
+            if let Some(server) = settings
+                .vpn_server(id)
+                .filter(|server| server.protocol == "amneziawg-panel")
+            {
+                let result = match settings.panel_password(id) {
+                    Some(secret) => vpn.panel_clients(&server, &secret).await,
+                    None => Err(crate::error::Error::Parse(
+                        "пароль панели не настроен".into(),
+                    )),
+                };
+                match result {
+                    Ok(clients) => {
+                        let synced = settings.sync_panel_clients(
+                            id,
+                            &clients
+                                .iter()
+                                .map(|client| (client.name.clone(), client.address.clone()))
+                                .collect::<Vec<_>>(),
+                            now_epoch(),
+                        );
+                        bot.send_message(chat, format!("✅ Синхронизация завершена. В панели: {}; обновлено в боте: {synced}.\n\nНовые импортированные ключи не получают владельца автоматически — назначьте его в карточке ключа.", clients.len()))
+                            .reply_markup(menu::server_card_menu(id))
+                            .await?;
+                    }
+                    Err(error) => {
+                        bot.send_message(
+                            chat,
+                            format!("❌ Синхронизация панели не удалась: {error}"),
+                        )
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                    }
+                }
+            } else {
+                bot.send_message(chat, "Сначала подключите панель к этому серверу.")
                     .reply_markup(menu::server_card_menu(id))
                     .await?;
             }
@@ -5740,7 +6002,9 @@ async fn callback_handler(
             .reply_markup(menu::customer_key_menu(&name))
             .await?;
             let files = match settings.client_vpn_server(&name) {
-                Some(server) if !server.is_local => vpn.remote_existing_files(&server, &name).await,
+                Some(server) if !server.is_local => {
+                    nonlocal_files(&vpn, &settings, &server, &name).await
+                }
                 _ => vpn.existing_files(&name),
             };
             match files {
@@ -5778,11 +6042,9 @@ async fn callback_handler(
             let user = settings
                 .user(uid)
                 .ok_or_else(|| crate::error::Error::Parse("пользователь не найден".into()))?;
-            let existing = vpn
-                .list()
-                .await?
+            let existing = settings
+                .active_client_names()
                 .into_iter()
-                .map(|client| client.name)
                 .collect::<std::collections::HashSet<_>>();
             let new_name =
                 crate::vpn::validate::gen_available_names(&customer_base_name(&user), 1, &existing)
@@ -5792,19 +6054,19 @@ async fn callback_handler(
             let replacement = if server.is_local {
                 vpn.add(&new_name, None, settings.psk_default()).await?
             } else {
-                vpn.remote_add(&server, &new_name).await?
+                nonlocal_add(&vpn, &settings, &server, &new_name).await?
             };
             if let Some(expires_at) = expiry {
                 let result = if server.is_local {
                     vpn.set_client_expiry(&new_name, Some(expires_at)).await
                 } else {
-                    vpn.remote_set_expiry(&server, &new_name, expires_at).await
+                    nonlocal_set_expiry(&vpn, &settings, &server, &new_name, expires_at).await
                 };
                 if let Err(error) = result {
                     if server.is_local {
                         let _ = vpn.remove(&new_name).await;
                     } else {
-                        let _ = vpn.remote_remove(&server, &new_name).await;
+                        let _ = nonlocal_remove(&vpn, &settings, &server, &new_name).await;
                     }
                     return Err(error.into());
                 }
@@ -5818,7 +6080,7 @@ async fn callback_handler(
                 if server.is_local {
                     let _ = vpn.remove(&new_name).await;
                 } else {
-                    let _ = vpn.remote_remove(&server, &new_name).await;
+                    let _ = nonlocal_remove(&vpn, &settings, &server, &new_name).await;
                 }
                 bot.send_message(chat, "Для этого ключа уже выполняется замена.")
                     .await?;
@@ -5842,7 +6104,9 @@ async fn callback_handler(
                 return Ok(());
             };
             let removal = match settings.client_vpn_server(&old) {
-                Some(server) if !server.is_local => vpn.remote_remove(&server, &old).await,
+                Some(server) if !server.is_local => {
+                    nonlocal_remove(&vpn, &settings, &server, &old).await
+                }
                 _ => vpn.remove(&old).await,
             };
             match removal {
@@ -5877,7 +6141,7 @@ async fn callback_handler(
             };
             match settings.client_vpn_server(&new) {
                 Some(server) if !server.is_local => {
-                    let _ = vpn.remote_remove(&server, &new).await;
+                    let _ = nonlocal_remove(&vpn, &settings, &server, &new).await;
                 }
                 _ => {
                     let _ = vpn.remove(&new).await;
@@ -5913,7 +6177,9 @@ async fn callback_handler(
                 .await
                 .ok();
             let refreshed = match settings.client_vpn_server(&name) {
-                Some(server) if !server.is_local => vpn.remote_regen(&server, &name).await,
+                Some(server) if !server.is_local => {
+                    nonlocal_refresh(&vpn, &settings, &server, &name).await
+                }
                 _ => vpn.regen_client(&name).await,
             };
             match refreshed {
@@ -6182,7 +6448,7 @@ async fn callback_handler(
         Action::SendConf(name) => {
             // 📄 Конфиг — только .conf, без QR/ссылки (фильтр выдачи не применяется:
             // это ручная повторная выдача конкретного артефакта).
-            match vpn.existing_files(&name) {
+            match client_files(&vpn, &settings, &name).await {
                 Ok(res) => {
                     if let Err(e) = bot
                         .send_document(chat, InputFile::file(&res.conf_path))
@@ -6199,7 +6465,7 @@ async fn callback_handler(
         }
         Action::SendQr(name) => {
             // 🖼 QR — опционален (qrencode может отсутствовать на сервере).
-            match vpn.existing_files(&name) {
+            match client_files(&vpn, &settings, &name).await {
                 Ok(res) if std::path::Path::new(&res.qr_path).exists() => {
                     if let Err(e) = bot.send_photo(chat, InputFile::file(&res.qr_path)).await {
                         let err = crate::error::Error::Telegram(e.to_string());
@@ -6216,7 +6482,7 @@ async fn callback_handler(
         }
         Action::SendLink(name) => {
             // 🔗 Ссылка vpn:// — опциональна (qrencode генерирует её заодно с QR).
-            match vpn.existing_files(&name) {
+            match client_files(&vpn, &settings, &name).await {
                 Ok(res) if !res.uri.is_empty() => {
                     bot.send_message(chat, i18n::import_link(lang, &res.uri))
                         .parse_mode(ParseMode::Html)
@@ -6233,7 +6499,7 @@ async fn callback_handler(
         Action::SendAll(name) => {
             // 📦 Всё — безусловная выдача conf+QR+ссылка (фильтр настроек игнорируется:
             // пользователь явно запросил всё через карточку клиента).
-            match vpn.existing_files(&name) {
+            match client_files(&vpn, &settings, &name).await {
                 Ok(res) => {
                     if let Err(e) = render::send_client_files(&bot, chat, lang, &res).await {
                         bot.send_message(chat, i18n::error_text(lang, &e)).await?;
@@ -6254,7 +6520,7 @@ async fn callback_handler(
             )
             .await;
         }
-        Action::ConfirmDelete(name) => match vpn.remove(&name).await {
+        Action::ConfirmDelete(name) => match client_remove(&vpn, &settings, &name).await {
             Ok(()) => {
                 settings.log_event(
                     now_epoch(),
@@ -6286,7 +6552,7 @@ async fn callback_handler(
         }
         Action::Regen(name) => {
             let waiting = bot.send_message(chat, i18n::regen_running(lang)).await.ok();
-            match vpn.regen_client(&name).await {
+            match client_refresh(&vpn, &settings, &name).await {
                 Ok(res) => {
                     settings.log_event(now_epoch(), EventKind::Regen, Some(&name), Some(uid), None);
                     if let Err(e) = render::send_client_files(&bot, chat, lang, &res).await {
@@ -7057,7 +7323,7 @@ async fn callback_handler(
                 .ok();
             let mut failed = 0usize;
             for c in &clients {
-                match vpn.remove(c).await {
+                match client_remove(&vpn, &settings, c).await {
                     Ok(()) => {
                         settings.log_event(
                             now_epoch(),
@@ -7207,7 +7473,7 @@ async fn callback_handler(
                 .ok();
             let (mut ok, mut failed) = (0usize, 0usize);
             for c in &clients {
-                match vpn.regen_client(c).await {
+                match client_refresh(&vpn, &settings, c).await {
                     Ok(_) => {
                         ok += 1;
                         settings.log_event(
@@ -7867,6 +8133,8 @@ mod tests {
             ServerDeployAsk(1),
             ServerCheck(1),
             ServerDiagnose(1),
+            ServerPanelConnect(1),
+            ServerPanelSync(1),
             AdminCreate,
             AdminOwners,
             AdminFinance,
@@ -8004,6 +8272,8 @@ mod tests {
                 ServerDeployAsk(_) => {}
                 ServerCheck(_) => {}
                 ServerDiagnose(_) => {}
+                ServerPanelConnect(_) => {}
+                ServerPanelSync(_) => {}
                 LocalMigration => {}
                 LocalMigrationPreflight => {}
                 LocalMigrationStart => {}
@@ -8342,6 +8612,8 @@ mod tests {
             (Action::ServerDeployAsk(1), true, false),
             (Action::ServerCheck(1), true, false),
             (Action::ServerDiagnose(1), true, false),
+            (Action::ServerPanelConnect(1), true, false),
+            (Action::ServerPanelSync(1), true, false),
             (Action::LocalMigration, true, false),
             (Action::LocalMigrationPreflight, true, false),
             (Action::LocalMigrationStart, true, false),

@@ -1,5 +1,14 @@
 # awgram
 
+The bot can connect an existing AmneziaWG panel (wg-easy API v14) from a
+remote VPN server card: enter `URL | PASSWORD`, then choose “Synchronize”. The
+password is encrypted with a separate local key. Existing bot ownership is
+preserved; newly imported keys remain unassigned until an administrator links
+them manually.
+
+Plain `http://` panels are supported, but the password travels without TLS.
+Restrict the panel port to the bot server IP and enable HTTPS when possible.
+
 [🇷🇺 Русский](README.md) · 🇬🇧 English
 
 [![CI](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml)

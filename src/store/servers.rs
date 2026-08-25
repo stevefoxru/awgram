@@ -297,6 +297,89 @@ impl Store {
         .unwrap_or_default()
     }
 
+    pub fn set_panel_credentials(
+        &self,
+        id: i64,
+        url: &str,
+        encrypted_password: &str,
+        now: i64,
+    ) -> bool {
+        let key = format!("panel_password_{id}");
+        let Ok(secret) = serde_json::to_string(encrypted_password) else {
+            return false;
+        };
+        self.with_conn(|c| {
+            let transaction = c.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE vpn_servers
+                 SET panel_url=?2,protocol='amneziawg-panel',status='online',
+                     enabled_for_provisioning=1,updated_at=?3
+                 WHERE id=?1 AND is_local=0",
+                rusqlite::params![id, url.trim_end_matches('/'), now],
+            )?;
+            if changed != 1 {
+                return Ok(false);
+            }
+            transaction.execute(
+                "INSERT INTO settings(key,value) VALUES(?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                rusqlite::params![key, secret],
+            )?;
+            transaction.commit()?;
+            Ok(true)
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn panel_password(&self, id: i64) -> Option<String> {
+        let key = format!("panel_password_{id}");
+        self.with_conn(|c| {
+            c.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str(&value).ok())
+    }
+
+    pub fn sync_panel_clients(
+        &self,
+        server_id: i64,
+        clients: &[(String, String)],
+        now: i64,
+    ) -> usize {
+        self.with_conn(|c| {
+            let transaction = c.unchecked_transaction()?;
+            let mut changed = 0usize;
+            for (name, address) in clients {
+                let valid_name = name.len() <= 64
+                    && name
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    && name
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'));
+                if !valid_name {
+                    continue;
+                }
+                changed += transaction.execute(
+                    "INSERT INTO clients(name,ip,first_seen,last_seen,server_id,protocol,removed_at)
+                     VALUES(?1,?2,?3,?3,?4,'amneziawg-panel',NULL)
+                     ON CONFLICT(name) DO UPDATE SET
+                       ip=excluded.ip,last_seen=excluded.last_seen,server_id=excluded.server_id,
+                       protocol='amneziawg-panel',removed_at=NULL",
+                    rusqlite::params![name, address, now, server_id],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed)
+        })
+        .unwrap_or(0)
+    }
+
     pub fn approve_server_legacy_migration(&self, id: i64, now: i64) -> bool {
         self.with_conn(|c| {
             let transaction = c.unchecked_transaction()?;
@@ -399,7 +482,14 @@ impl Store {
 pub fn valid_protocol(value: &str) -> bool {
     matches!(
         value,
-        "modern" | "legacy" | "amneziawg-2" | "amneziawg-1" | "wireguard" | "openvpn" | "outline"
+        "modern"
+            | "legacy"
+            | "amneziawg-2"
+            | "amneziawg-1"
+            | "amneziawg-panel"
+            | "wireguard"
+            | "openvpn"
+            | "outline"
     )
 }
 
@@ -521,5 +611,48 @@ mod tests {
             store.client_vpn_server("test_key").unwrap().protocol,
             "amneziawg-1"
         );
+    }
+
+    #[test]
+    fn panel_credentials_and_sync_preserve_existing_owner() {
+        let store = Store::open_in_memory();
+        let id = store
+            .add_vpn_server(
+                &NewVpnServer {
+                    name: "Panel",
+                    hostname: "panel.example",
+                    public_ip: "192.0.2.50",
+                    provider: "Hoster",
+                    location: "Amsterdam",
+                    protocol: "amneziawg-panel",
+                    opened_at: None,
+                    is_local: false,
+                },
+                1,
+                100,
+            )
+            .unwrap();
+        store.upsert_user(7, Some("alice"), "Alice", None, 100);
+        store.assign_client_group("old", None, 100);
+        store.assign_client_owner("old", Some(7));
+        assert!(store.set_panel_credentials(id, "http://panel:1240/", "ciphertext", 101));
+        assert_eq!(store.panel_password(id).as_deref(), Some("ciphertext"));
+        assert_eq!(
+            store.sync_panel_clients(
+                id,
+                &[
+                    ("old".into(), "10.8.0.2".into()),
+                    ("new".into(), "10.8.0.3".into())
+                ],
+                102,
+            ),
+            2
+        );
+        let server = store.vpn_server(id).unwrap();
+        assert_eq!(server.protocol, "amneziawg-panel");
+        assert!(server.enabled_for_provisioning);
+        assert_eq!(server.panel_url.as_deref(), Some("http://panel:1240"));
+        assert_eq!(store.client_owner("old"), Some(7));
+        assert_eq!(store.client_owner("new"), None);
     }
 }

@@ -137,6 +137,9 @@ pub enum State {
     AwaitingServerDeployCredentials {
         server_id: i64,
     },
+    AwaitingPanelCredentials {
+        server_id: i64,
+    },
     AwaitingLocalMigrationConfirm {
         operation: String,
     },
