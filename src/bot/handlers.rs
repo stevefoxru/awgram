@@ -33,6 +33,8 @@ pub enum Action {
     RemoteMigration(i64),
     RemoteMigrationPreflight(i64),
     RemoteMigrationStatus(i64),
+    RemoteMigrationTest(i64),
+    RemoteMigrationApprove(i64),
     RemoteMigrationAsk(i64),
     RemoteMigrationRun(i64),
     RemoteMigrationRollback(i64),
@@ -275,6 +277,14 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:migrate:status:") {
                 v.parse()
                     .map(Action::RemoteMigrationStatus)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:migrate:test:") {
+                v.parse()
+                    .map(Action::RemoteMigrationTest)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:migrate:approve:") {
+                v.parse()
+                    .map(Action::RemoteMigrationApprove)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:migrate:ask:") {
                 v.parse()
@@ -1407,6 +1417,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | RemoteMigration(_)
         | RemoteMigrationPreflight(_)
         | RemoteMigrationStatus(_)
+        | RemoteMigrationTest(_)
+        | RemoteMigrationApprove(_)
         | RemoteMigrationAsk(_)
         | RemoteMigrationRun(_)
         | RemoteMigrationRollback(_)
@@ -4204,6 +4216,72 @@ async fn callback_handler(
                     .await?;
             }
         }
+        Action::RemoteMigrationTest(id) => {
+            if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
+                let status = vpn.remote_legacy_migration(&server, "status").await;
+                if !status
+                    .as_ref()
+                    .is_ok_and(|output| output.contains("\"status\":\"complete\""))
+                {
+                    let details = status
+                        .map(|output| output)
+                        .unwrap_or_else(|error| error.to_string());
+                    bot.send_message(chat, format!("⏳ Тестовый конфиг пока недоступен: миграция не завершена.\n\n{details}"))
+                        .reply_markup(menu::remote_migration_menu(id))
+                        .await?;
+                } else if let Some(name) = settings.server_client_names(id).into_iter().next() {
+                    match vpn.remote_existing_files(&server, &name).await {
+                        Ok(result) => {
+                            bot.send_message(chat, format!("🧪 Тестовый ключ «{name}» с сервера «{}».\n\nИмпортируйте новый профиль отдельно и проверьте внешний IP, DNS, сайты, Wi‑Fi и мобильную сеть. До подтверждения сервер остаётся в maintenance.", server.name)).await?;
+                            if let Err(error) =
+                                render::send_client_files(&bot, chat, lang, &result).await
+                            {
+                                bot.send_message(chat, i18n::error_text(lang, &error))
+                                    .await?;
+                            }
+                        }
+                        Err(error) => {
+                            bot.send_message(
+                                chat,
+                                format!("❌ Не удалось получить тестовый конфиг «{name}»: {error}"),
+                            )
+                            .reply_markup(menu::remote_migration_menu(id))
+                            .await?;
+                        }
+                    }
+                } else {
+                    bot.send_message(chat, "На этом сервере нет привязанных ключей для теста.")
+                        .reply_markup(menu::remote_migration_menu(id))
+                        .await?;
+                }
+            }
+        }
+        Action::RemoteMigrationApprove(id) => {
+            if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
+                let complete = vpn
+                    .remote_legacy_migration(&server, "status")
+                    .await
+                    .is_ok_and(|output| output.contains("\"status\":\"complete\""));
+                let healthy = vpn.remote_status(&server).await.unwrap_or(false);
+                if complete && healthy && settings.approve_server_legacy_migration(id, now_epoch())
+                {
+                    settings.log_event(
+                        now_epoch(),
+                        EventKind::Migration,
+                        None,
+                        Some(uid),
+                        Some(&format!("remote migration approved server={id}")),
+                    );
+                    bot.send_message(chat, format!("✅ AWG 1.0 на «{}» подтверждена. Сервер включён для новых ключей, но не назначен основным. Рассылка пользователям не запускалась.", server.name))
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                } else {
+                    bot.send_message(chat, "❌ Подтверждение отклонено: миграция ещё не завершена, VPN не отвечает или сервер уже вышел из maintenance.")
+                        .reply_markup(menu::remote_migration_menu(id))
+                        .await?;
+                }
+            }
+        }
         Action::RemoteMigrationAsk(id) => {
             if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
                 bot.send_message(chat, format!("🚨 Последнее предупреждение\n\nБудет мигрирован только сервер «{}» ({}). VPN временно отключится, старые конфигурации клиентов станут недействительными. Убедитесь, что snapshot VPS и доступ к веб-консоли готовы.", server.name, server.public_ip))
@@ -4225,7 +4303,15 @@ async fn callback_handler(
                         );
                         format!("🚨 Миграция запущена. Сервер может дважды перезагрузиться. Не запускайте её повторно; проверяйте кнопку «Статус».\n\n{output}")
                     }
-                    Err(error) => format!("❌ Не удалось запустить миграцию: {error}"),
+                    Err(error) => {
+                        settings.set_server_status(id, &server.status, now_epoch());
+                        settings.set_server_provisioning(
+                            id,
+                            server.enabled_for_provisioning,
+                            now_epoch(),
+                        );
+                        format!("❌ Не удалось запустить миграцию: {error}")
+                    }
                 };
                 bot.send_message(chat, text)
                     .reply_markup(menu::remote_migration_menu(id))
@@ -4235,7 +4321,10 @@ async fn callback_handler(
         Action::RemoteMigrationRollback(id) => {
             if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
                 let text = match vpn.remote_legacy_migration(&server, "rollback").await {
-                    Ok(output) => format!("✅ Команда аварийного отката выполнена.\n\n{output}"),
+                    Ok(output) => {
+                        settings.finish_server_legacy_rollback(id, now_epoch());
+                        format!("✅ AWG 2.0 восстановлена. Сервер снова включён для выдачи; старые пользовательские конфигурации должны работать.\n\n{output}")
+                    }
                     Err(error) => format!("❌ Откат не выполнен: {error}"),
                 };
                 bot.send_message(chat, text)
@@ -7674,6 +7763,7 @@ mod tests {
             menu::admin_system_hub(),
             menu::servers_menu(&[]),
             menu::server_card_menu(1),
+            menu::remote_migration_menu(1),
             menu::vpn_service_menu(),
             menu::admin_create_menu(),
             menu::admin_roles_menu(),
@@ -7765,6 +7855,8 @@ mod tests {
             RemoteMigration(1),
             RemoteMigrationPreflight(1),
             RemoteMigrationStatus(1),
+            RemoteMigrationTest(1),
+            RemoteMigrationApprove(1),
             RemoteMigrationAsk(1),
             RemoteMigrationRun(1),
             RemoteMigrationRollback(1),
@@ -7900,6 +7992,8 @@ mod tests {
                 RemoteMigration(_) => {}
                 RemoteMigrationPreflight(_) => {}
                 RemoteMigrationStatus(_) => {}
+                RemoteMigrationTest(_) => {}
+                RemoteMigrationApprove(_) => {}
                 RemoteMigrationAsk(_) => {}
                 RemoteMigrationRun(_) => {}
                 RemoteMigrationRollback(_) => {}
@@ -8236,6 +8330,8 @@ mod tests {
             (Action::RemoteMigration(1), true, false),
             (Action::RemoteMigrationPreflight(1), true, false),
             (Action::RemoteMigrationStatus(1), true, false),
+            (Action::RemoteMigrationTest(1), true, false),
+            (Action::RemoteMigrationApprove(1), true, false),
             (Action::RemoteMigrationAsk(1), true, false),
             (Action::RemoteMigrationRun(1), true, false),
             (Action::RemoteMigrationRollback(1), true, false),

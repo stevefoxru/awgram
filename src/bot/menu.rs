@@ -244,6 +244,14 @@ pub fn remote_migration_menu(id: i64) -> InlineKeyboardMarkup {
         )],
         vec![cb("📍 Статус", &format!("server:migrate:status:{id}"))],
         vec![cb(
+            "🧪 Получить тестовый конфиг",
+            &format!("server:migrate:test:{id}"),
+        )],
+        vec![cb(
+            "✅ Тест работает — включить",
+            &format!("server:migrate:approve:{id}"),
+        )],
+        vec![cb(
             "🚨 Начать миграцию",
             &format!("server:migrate:ask:{id}"),
         )],
@@ -2163,6 +2171,18 @@ mod tests {
     fn server_card_exposes_remote_install_and_health_actions() {
         let data = all_callback_data(&server_card_menu(42));
         for expected in ["server:deploy:42", "server:check:42", "server:diagnose:42"] {
+            assert!(data.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn remote_migration_requires_test_before_manual_enablement() {
+        let data = all_callback_data(&remote_migration_menu(42));
+        for expected in [
+            "server:migrate:test:42",
+            "server:migrate:approve:42",
+            "server:migrate:rollback:42",
+        ] {
             assert!(data.contains(&expected.to_string()), "missing {expected}");
         }
     }

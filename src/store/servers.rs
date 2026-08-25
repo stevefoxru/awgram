@@ -286,6 +286,58 @@ impl Store {
         .unwrap_or(0)
     }
 
+    pub fn server_client_names(&self, id: i64) -> Vec<String> {
+        self.with_conn(|c| {
+            let mut statement = c.prepare(
+                "SELECT name FROM clients WHERE server_id=?1 AND removed_at IS NULL ORDER BY name",
+            )?;
+            let rows = statement.query_map([id], |row| row.get(0))?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn approve_server_legacy_migration(&self, id: i64, now: i64) -> bool {
+        self.with_conn(|c| {
+            let transaction = c.unchecked_transaction()?;
+            let server_changed = transaction.execute(
+                "UPDATE vpn_servers
+                 SET protocol='amneziawg-1',status='online',enabled_for_provisioning=1,updated_at=?2
+                 WHERE id=?1 AND is_local=0 AND status='maintenance'",
+                rusqlite::params![id, now],
+            )?;
+            if server_changed != 1 {
+                return Ok(false);
+            }
+            transaction.execute(
+                "UPDATE clients SET protocol='amneziawg-1' WHERE server_id=?1 AND removed_at IS NULL",
+                [id],
+            )?;
+            transaction.commit()?;
+            Ok(true)
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn finish_server_legacy_rollback(&self, id: i64, now: i64) -> bool {
+        self.with_conn(|c| {
+            let transaction = c.unchecked_transaction()?;
+            let server_changed = transaction.execute(
+                "UPDATE vpn_servers
+                 SET protocol='amneziawg-2',status='online',enabled_for_provisioning=1,updated_at=?2
+                 WHERE id=?1 AND is_local=0",
+                rusqlite::params![id, now],
+            )?;
+            transaction.execute(
+                "UPDATE clients SET protocol='amneziawg-2' WHERE server_id=?1 AND removed_at IS NULL",
+                [id],
+            )?;
+            transaction.commit()?;
+            Ok(server_changed == 1)
+        })
+        .unwrap_or(false)
+    }
+
     pub fn available_vpn_servers(&self) -> Vec<VpnServer> {
         self.vpn_servers()
             .into_iter()
@@ -426,5 +478,48 @@ mod tests {
         assert!(store.vpn_server(id).is_some());
         assert_eq!(store.remove_empty_local_vpn_servers(), 1);
         assert!(store.vpn_server(id).is_none());
+    }
+
+    #[test]
+    fn approving_remote_migration_updates_server_and_clients_atomically() {
+        let store = Store::open_in_memory();
+        let id = store
+            .add_vpn_server(
+                &NewVpnServer {
+                    name: "nl26",
+                    hostname: "nl26",
+                    public_ip: "192.0.2.26",
+                    provider: "Hoster",
+                    location: "Amsterdam",
+                    protocol: "amneziawg-2",
+                    opened_at: None,
+                    is_local: false,
+                },
+                1,
+                100,
+            )
+            .unwrap();
+        store.ensure_user(7, "ru");
+        store
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO clients(name,ip,first_seen,last_seen) VALUES('test_key','',100,100)",
+                    [],
+                )
+            })
+            .unwrap();
+        store.assign_client_owner("test_key", Some(7));
+        assert!(store.assign_client_server("test_key", id, "amneziawg-2"));
+        assert!(store.set_server_status(id, "maintenance", 101));
+        assert!(store.approve_server_legacy_migration(id, 102));
+        let server = store.vpn_server(id).unwrap();
+        assert_eq!(server.protocol, "amneziawg-1");
+        assert_eq!(server.status, "online");
+        assert!(server.enabled_for_provisioning);
+        assert_eq!(store.server_client_names(id), vec!["test_key"]);
+        assert_eq!(
+            store.client_vpn_server("test_key").unwrap().protocol,
+            "amneziawg-1"
+        );
     }
 }

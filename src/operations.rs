@@ -84,16 +84,29 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     {
         match vpn.remote_status(&server).await {
             Ok(true) => {
+                if server.status == "maintenance" {
+                    // Миграция/установка требует ручной проверки тестового
+                    // конфига. Health-check не должен сам включать выдачу или
+                    // назначать непроверенный узел основным.
+                    store.update_monitor_state(
+                        &format!("vpn-server-{}-maintenance", server.id),
+                        "ready",
+                        Some("VPN отвечает; ожидается ручная проверка"),
+                        now,
+                    );
+                    continue;
+                }
                 let became_ready = server.status != "online";
                 store.set_server_status(server.id, "online", now);
                 let monitor_key = format!("vpn-server-{}", server.id);
                 let recovered = store.update_monitor_state(&monitor_key, "ok", None, now);
-                if server.status == "maintenance" {
-                    store.set_server_provisioning(server.id, true, now);
-                    store.set_default_vpn_server(server.id);
-                }
                 if became_ready && recovered {
-                    notify_admins(bot, cfg, format!("✅ VPS «{}» готов\nAWG 1.0 работает, сервер включён для выдачи и назначен основным.", server.name)).await;
+                    notify_admins(
+                        bot,
+                        cfg,
+                        format!("✅ VPS «{}» снова доступен.", server.name),
+                    )
+                    .await;
                 }
             }
             Ok(false) => {
