@@ -85,3 +85,4 @@ jobs:
             dist/awgram-linux-arm64.sha256
             install.sh
             node-bootstrap.sh
+            transfer.sh

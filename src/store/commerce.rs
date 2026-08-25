@@ -1257,6 +1257,16 @@ impl Store {
         })
         .unwrap_or_default()
     }
+
+    pub fn active_client_names(&self) -> Vec<String> {
+        self.with_conn(|connection| {
+            let mut statement = connection
+                .prepare("SELECT name FROM clients WHERE removed_at IS NULL ORDER BY name")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
 }
 
 fn ticket_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SupportTicket> {

@@ -23,7 +23,7 @@ MIGRATECTL_PATH="/usr/local/libexec/awgram-migratectl"
 SVC_USER="awgram"
 
 UI_LANG=""; MODE=""; TOKEN=""; ADMINS=""; MANAGE_SCRIPT=""; CLIENTS_DIR=""
-PIN_VERSION=""; ASSUME_YES=0; NO_SYSTEMD=0; BINARY_FILE=""; PURGE=0; CHANNEL=""
+PIN_VERSION=""; ASSUME_YES=0; NO_SYSTEMD=0; BINARY_FILE=""; PURGE=0; CHANNEL=""; CONTROLLER_ONLY=0
 COMMAND=""; HELP_TOPIC=""; PKG=""; ARCH=""; INSTALLED_VERSION=""; TTY_IN=""
 PREV_MODE=""  # режим из setup.conf до этого запуска — для миграции state при смене
 STATE_DIR="/var/lib/awgram"
@@ -295,6 +295,7 @@ load_setup_conf() {
   case "$v" in stable|rc) [ -n "$CHANNEL" ] || CHANNEL="$v" ;; esac
   v="$(sed -n 's/^MANAGE_SCRIPT=//p' "$SETUP_CONF" | head -1)";  [ -n "$MANAGE_SCRIPT" ] || MANAGE_SCRIPT="$v"
   v="$(sed -n 's/^CLIENTS_DIR=//p' "$SETUP_CONF" | head -1)";    [ -n "$CLIENTS_DIR" ] || CLIENTS_DIR="$v"
+  v="$(sed -n 's/^CONTROLLER_ONLY=//p' "$SETUP_CONF" | head -1)"; [ "$v" = 1 ] && CONTROLLER_ONLY=1
 }
 
 save_setup_conf() {
@@ -306,6 +307,7 @@ VERSION=$INSTALLED_VERSION
 CHANNEL=${CHANNEL:-stable}
 MANAGE_SCRIPT=$MANAGE_SCRIPT
 CLIENTS_DIR=$CLIENTS_DIR
+CONTROLLER_ONLY=$CONTROLLER_ONLY
 EOF
 }
 
@@ -427,6 +429,7 @@ sudo_prefix   = "$sudo_prefix"
 op_timeout_secs = 60
 state_file = "$state_file"
 db_path = "$STATE_DIR/awgram.db"
+controller_only = $([ "$CONTROLLER_ONLY" = 1 ] && printf true || printf false)
 EOF
   chmod 640 "$CFG_FILE"
 }
@@ -807,7 +810,19 @@ cmd_install() {
   fi
   [ -n "$ADMINS" ] || ADMINS="$(ask q_admins "")"
   validate_admins || die err_admins
-  [ -n "$MANAGE_SCRIPT" ] || MANAGE_SCRIPT="$(ask q_script "/root/awg/manage_amneziawg.sh")"
+  if [ "$CONTROLLER_ONLY" = 1 ]; then
+    MANAGE_SCRIPT="/usr/local/libexec/awgram-controller-only"
+    CLIENTS_DIR="$STATE_DIR/clients"
+    install -d -m 750 "$CLIENTS_DIR" /usr/local/libexec
+    cat >"$MANAGE_SCRIPT" <<'CONTROLLER'
+#!/usr/bin/env bash
+printf 'ERR local VPN is disabled on this controller; select a remote server\n' >&2
+exit 69
+CONTROLLER
+    chmod 755 "$MANAGE_SCRIPT"
+  else
+    [ -n "$MANAGE_SCRIPT" ] || MANAGE_SCRIPT="$(ask q_script "/root/awg/manage_amneziawg.sh")"
+  fi
   validate_script_path
   [ -n "$CLIENTS_DIR" ] || CLIENTS_DIR="$(dirname "$MANAGE_SCRIPT")"
   validate_path "$CLIENTS_DIR" || die err_bad_path "$CLIENTS_DIR"
@@ -867,6 +882,7 @@ awgram-setup — установка и управление awgram (Telegram-б�
   --admins 1,2,3        Telegram ID администраторов через запятую
   --script-path PATH    путь к manage_amneziawg.sh (по умолчанию /root/awg/manage_amneziawg.sh)
   --clients-dir PATH    каталог client-конфигов (по умолчанию каталог manage-скрипта)
+  --controller-only     установить бот на отдельной VPS без локального VPN
   --version vX.Y.Z      установить конкретный релиз вместо последнего (канал не меняет)
   --channel stable|rc   канал обновлений, доступен с v0.7.0 (запоминается); канал rc
                         видит и стабильные релизы; вернуться: update --channel stable
@@ -905,6 +921,7 @@ Flags (install; config accepts --token/--admins/--script-path):
   --admins 1,2,3        comma-separated Telegram admin IDs
   --script-path PATH    path to manage_amneziawg.sh (default /root/awg/manage_amneziawg.sh)
   --clients-dir PATH    client-config dir (default: the manage-script directory)
+  --controller-only     install the bot on a separate VPS without a local VPN
   --version vX.Y.Z      install a specific release instead of the latest (does not change the channel)
   --channel stable|rc   update channel, available since v0.7.0 (sticky); the rc
                         channel also sees stable releases; to return: update --channel stable
@@ -1177,6 +1194,7 @@ main() {
       --admins)      ADMINS="${2:?--admins}"; shift 2 ;;
       --script-path) MANAGE_SCRIPT="${2:?--script-path}"; shift 2 ;;
       --clients-dir) CLIENTS_DIR="${2:?--clients-dir}"; shift 2 ;;
+      --controller-only) CONTROLLER_ONLY=1; shift ;;
       --version)     PIN_VERSION="${2:?--version}"; shift 2 ;;
       --channel)     CHANNEL="${2:?--channel}"; shift 2
                      case "$CHANNEL" in stable|rc) ;; *) die err_bad_channel "$CHANNEL" ;; esac ;;

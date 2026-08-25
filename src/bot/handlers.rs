@@ -785,11 +785,9 @@ async fn provision_customer_key(
     let user = settings
         .user(user_id)
         .ok_or_else(|| crate::error::Error::Parse("пользователь не зарегистрирован".to_string()))?;
-    let existing = vpn
-        .list()
-        .await?
+    let existing = settings
+        .active_client_names()
         .into_iter()
-        .map(|c| c.name)
         .collect::<std::collections::HashSet<_>>();
     let name = crate::vpn::validate::gen_available_names(&customer_base_name(&user), 1, &existing)
         .map_err(|e| crate::error::Error::Parse(e.to_string()))?
@@ -4708,11 +4706,7 @@ async fn callback_handler(
                 .await?;
         }
         Action::Buy => {
-            let servers = settings
-                .available_vpn_servers()
-                .into_iter()
-                .filter(|server| server.is_local)
-                .collect::<Vec<_>>();
+            let servers = settings.available_vpn_servers();
             bot.send_message(chat, if servers.is_empty() { "Сейчас нет доступных локаций. Администратор уже может проверить лимиты серверов." } else { "Выберите локацию и протокол:" })
                 .reply_markup(menu::buy_servers_menu(&servers, &settings))
                 .await?;
@@ -4721,7 +4715,7 @@ async fn callback_handler(
             let available = settings
                 .available_vpn_servers()
                 .into_iter()
-                .any(|server| server.id == server_id && server.is_local);
+                .any(|server| server.id == server_id);
             if available && settings.set_purchase_server(uid, server_id, now_epoch()) {
                 bot.send_message(chat, "Выберите срок подписки:")
                     .reply_markup(menu::buy_terms_menu([
@@ -4896,8 +4890,7 @@ async fn callback_handler(
             .await?;
         }
         Action::Renew(name) => {
-            if settings.client_owner(&name) == Some(uid) && vpn.exists(&name).await.unwrap_or(false)
-            {
+            if settings.client_owner(&name) == Some(uid) {
                 if settings.is_legacy_client(&name, uid) {
                     let price = settings.legacy_renewal_price_for_user(
                         uid,

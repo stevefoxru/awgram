@@ -105,6 +105,30 @@ Telegram-бот на Rust для управления клиентами [Amnezi
 - 📊 Разделы VPN-, пользовательской, подписочной и тарифной статистики.
 - 📣 Подтверждаемая рассылка по сегментам пользователей.
 - 💾 Ежедневные SQLite-копии в `/var/lib/awgram/backups`.
+- 🚚 Перенос управляющего бота на отдельную VPS без остановки VPN-серверов.
+
+### Перенос бота на отдельную VPS
+
+На действующем сервере скачайте `transfer.sh` из последнего релиза и создайте
+зашифрованный архив:
+
+```bash
+curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/transfer.sh -o /root/transfer.sh
+chmod 700 /root/transfer.sh
+sudo /root/transfer.sh export
+```
+
+Скопируйте `/root/awgram-transfer.enc` на чистую Ubuntu 24.04 VPS. Перед
+импортом остановите только бот на старой VPS (`systemctl stop awgram`) — сам VPN
+продолжит работать. Затем скачайте на новой VPS тот же скрипт и выполните:
+
+```bash
+sudo /root/transfer.sh import /root/awgram-transfer.enc
+```
+
+Импорт устанавливает бот в режиме `--controller-only`, восстанавливает данные
+и проверяет SSH-связь с прежней VPS. При неудаче можно снова запустить старый
+бот командой `systemctl start awgram`.
 - 🚨 Мониторинг AmneziaWG каждые пять минут и аудит операций.
 
 Основные административные операции выполняются кнопками; старые команды

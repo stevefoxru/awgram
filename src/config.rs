@@ -10,6 +10,7 @@ pub struct Config {
     pub op_timeout_secs: u64,
     pub state_file: PathBuf,
     pub db_path: PathBuf,
+    pub controller_only: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -23,6 +24,7 @@ impl std::fmt::Debug for Config {
             .field("op_timeout_secs", &self.op_timeout_secs)
             .field("state_file", &self.state_file)
             .field("db_path", &self.db_path)
+            .field("controller_only", &self.controller_only)
             .finish()
     }
 }
@@ -55,6 +57,8 @@ struct Raw {
     state_file: PathBuf,
     #[serde(default = "default_db_path")]
     db_path: PathBuf,
+    #[serde(default)]
+    controller_only: bool,
 }
 
 fn default_timeout() -> u64 {
@@ -83,7 +87,7 @@ impl Config {
         if raw.admin_ids.is_empty() {
             return Err(ConfigError::NoAdmins);
         }
-        if !raw.manage_script.exists() {
+        if !raw.controller_only && !raw.manage_script.exists() {
             return Err(ConfigError::ScriptNotFound(raw.manage_script));
         }
 
@@ -96,6 +100,7 @@ impl Config {
             op_timeout_secs: raw.op_timeout_secs,
             state_file: raw.state_file,
             db_path: raw.db_path,
+            controller_only: raw.controller_only,
         })
     }
 }
@@ -262,6 +267,24 @@ mod tests {
         );
         let cfg = Config::load(&cfg_path).unwrap();
         assert_eq!(cfg.db_path, PathBuf::from("/custom/awgram.db"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn controller_only_does_not_require_local_manage_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing-manage.sh");
+        let cfg_path = write(
+            &dir,
+            "config.toml",
+            &format!(
+                "bot_token = \"t\"\nadmin_ids = [1]\nmanage_script = \"{}\"\nclients_dir = \"{}\"\ncontroller_only = true\n",
+                missing.display(),
+                dir.path().display()
+            ),
+        );
+        let cfg = Config::load(&cfg_path).unwrap();
+        assert!(cfg.controller_only);
     }
 
     #[test]
