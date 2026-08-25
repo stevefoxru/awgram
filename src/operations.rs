@@ -37,40 +37,42 @@ fn vpn_problem(report: &crate::vpn::wire::CheckReport) -> Option<String> {
 }
 
 async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
-    match vpn.check().await {
-        Ok(report) => {
-            if let Some(details) = vpn_problem(&report) {
-                store.set_local_server_status("warning", now);
+    if !cfg.controller_only {
+        match vpn.check().await {
+            Ok(report) => {
+                if let Some(details) = vpn_problem(&report) {
+                    store.set_local_server_status("warning", now);
+                    if store.update_monitor_state("vpn", "error", Some(&details), now) {
+                        notify_admins(
+                            bot,
+                            cfg,
+                            format!("🚨 Мониторинг: AmneziaWG работает с ошибками\n{details}"),
+                        )
+                        .await;
+                    }
+                } else {
+                    store.set_local_server_status("online", now);
+                    if store.update_monitor_state("vpn", "ok", None, now) {
+                        notify_admins(
+                            bot,
+                            cfg,
+                            "✅ Мониторинг: AmneziaWG снова работает штатно.".into(),
+                        )
+                        .await;
+                    }
+                }
+            }
+            Err(error) => {
+                store.set_local_server_status("offline", now);
+                let details = error.to_string();
                 if store.update_monitor_state("vpn", "error", Some(&details), now) {
                     notify_admins(
                         bot,
                         cfg,
-                        format!("🚨 Мониторинг: AmneziaWG работает с ошибками\n{details}"),
+                        format!("🚨 Мониторинг: ошибка AmneziaWG\n{details}"),
                     )
                     .await;
                 }
-            } else {
-                store.set_local_server_status("online", now);
-                if store.update_monitor_state("vpn", "ok", None, now) {
-                    notify_admins(
-                        bot,
-                        cfg,
-                        "✅ Мониторинг: AmneziaWG снова работает штатно.".into(),
-                    )
-                    .await;
-                }
-            }
-        }
-        Err(error) => {
-            store.set_local_server_status("offline", now);
-            let details = error.to_string();
-            if store.update_monitor_state("vpn", "error", Some(&details), now) {
-                notify_admins(
-                    bot,
-                    cfg,
-                    format!("🚨 Мониторинг: ошибка AmneziaWG\n{details}"),
-                )
-                .await;
             }
         }
     }
@@ -111,7 +113,8 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         }
     }
 
-    if !store.local_migration_notice_sent()
+    if !cfg.controller_only
+        && !store.local_migration_notice_sent()
         && vpn
             .local_legacy_migration("status")
             .await

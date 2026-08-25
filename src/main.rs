@@ -41,27 +41,37 @@ async fn main() {
         }
     };
     store.migrate_state_json(&cfg.state_file);
-    let hostname = std::env::var("HOSTNAME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-        .unwrap_or_else(|| "local-vpn".into());
-    if let Some(id) = store.ensure_local_vpn_server(
-        hostname.trim(),
-        cfg.admin_ids.first().copied().unwrap_or_default(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_secs() as i64)
-            .unwrap_or_default(),
-    ) {
+    if cfg.controller_only {
+        let removed = store.remove_empty_local_vpn_servers();
         tracing::info!(
-            server_id = id,
-            hostname = hostname.trim(),
-            "локальный VPN-сервер зарегистрирован"
+            removed,
+            "запущен режим отдельного контроллера без локального VPN"
         );
+    } else {
+        let hostname = std::env::var("HOSTNAME")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+            .unwrap_or_else(|| "local-vpn".into());
+        if let Some(id) = store.ensure_local_vpn_server(
+            hostname.trim(),
+            cfg.admin_ids.first().copied().unwrap_or_default(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_secs() as i64)
+                .unwrap_or_default(),
+        ) {
+            tracing::info!(
+                server_id = id,
+                hostname = hostname.trim(),
+                "локальный VPN-сервер зарегистрирован"
+            );
+        }
     }
 
-    tokio::spawn(awgram::collector::run(vpn.clone(), store.clone()));
+    if !cfg.controller_only {
+        tokio::spawn(awgram::collector::run(vpn.clone(), store.clone()));
+    }
     tokio::spawn(awgram::subscriptions::run(
         bot.clone(),
         vpn.clone(),

@@ -129,6 +129,23 @@ impl Store {
         .ok()
     }
 
+    /// Removes controller placeholders accidentally created on a host without a
+    /// local VPN. Servers with assigned clients are never touched.
+    pub fn remove_empty_local_vpn_servers(&self) -> usize {
+        self.with_conn(|connection| {
+            connection.execute(
+                "DELETE FROM vpn_servers
+                 WHERE is_local=1
+                   AND NOT EXISTS(
+                     SELECT 1 FROM clients
+                     WHERE clients.server_id=vpn_servers.id AND clients.removed_at IS NULL
+                   )",
+                [],
+            )
+        })
+        .unwrap_or_default()
+    }
+
     pub fn add_vpn_server(&self, value: &NewVpnServer<'_>, actor: i64, now: i64) -> Option<i64> {
         let valid = !value.name.trim().is_empty()
             && !value.hostname.trim().is_empty()
@@ -400,5 +417,14 @@ mod tests {
         assert_eq!(store.vpn_server(id).unwrap().provider, "Hoster");
         assert!(store.set_local_server_status("online", 400));
         assert_eq!(store.vpn_server(id).unwrap().status, "online");
+    }
+
+    #[test]
+    fn controller_cleanup_removes_only_empty_local_server() {
+        let store = Store::open_in_memory();
+        let id = store.ensure_local_vpn_server("controller", 1, 100).unwrap();
+        assert!(store.vpn_server(id).is_some());
+        assert_eq!(store.remove_empty_local_vpn_servers(), 1);
+        assert!(store.vpn_server(id).is_none());
     }
 }
