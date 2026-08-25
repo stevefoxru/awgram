@@ -89,6 +89,11 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                     "пароль панели не настроен".into(),
                 )),
             }
+        } else if let (Some(node), Some(secret)) = (
+            store.vpn_node_for_server(server.id),
+            store.node_secret(server.id),
+        ) {
+            vpn.agent_status(&server, &node, &secret).await
         } else {
             vpn.remote_status(&server).await
         };

@@ -433,7 +433,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE TABLE vpn_nodes(
         id INTEGER PRIMARY KEY,
         server_id INTEGER NOT NULL UNIQUE REFERENCES vpn_servers(id) ON DELETE CASCADE,
-        transport TEXT NOT NULL CHECK(transport IN ('local','restricted_ssh','https_agent','panel_api')),
+        transport TEXT NOT NULL CHECK(transport IN ('local','restricted_ssh','signed_ssh','https_agent','panel_api')),
         status TEXT NOT NULL DEFAULT 'unknown',
         agent_version TEXT,
         public_key_fingerprint TEXT,

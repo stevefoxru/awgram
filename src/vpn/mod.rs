@@ -13,6 +13,8 @@ use crate::config::Config;
 use crate::error::Result;
 use base64::Engine;
 use model::{AddResult, Client};
+use node_api::{NodeCommand, NodeResponse, SignedNodeRequest};
+use rand::Rng;
 use runner::{run, RunSpec};
 
 pub struct Vpn {
@@ -29,10 +31,272 @@ pub struct DeployRequest<'a> {
     pub user: &'a str,
     pub password: &'a str,
     pub server_id: i64,
+    pub node_id: i64,
     pub protocol: &'a str,
+    pub node_secret_b64: &'a str,
+    pub controller_key_b64: &'a str,
 }
 
 impl Vpn {
+    pub fn create_node_secret(&self) -> Result<(String, String)> {
+        let mut secret = [0_u8; 32];
+        rand::rng().fill(&mut secret);
+        let clear = base64::engine::general_purpose::STANDARD.encode(secret);
+        let encrypted = panel::protect_password(&self.panel_key_path, &clear)?;
+        Ok((clear, encrypted))
+    }
+
+    pub fn controller_public_key_b64(&self) -> Result<String> {
+        let key = std::fs::read("/var/lib/awgram/node_id_ed25519.pub")?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(key))
+    }
+
+    async fn agent_command(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        encrypted_secret: &str,
+        payload: NodeCommand,
+    ) -> Result<NodeResponse> {
+        if server.is_local || node.server_id != server.id {
+            return Err(crate::error::Error::Parse("некорректный VPN-узел".into()));
+        }
+        let clear = panel::reveal_password(&self.panel_key_path, encrypted_secret)?;
+        let secret = base64::engine::general_purpose::STANDARD
+            .decode(clear)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or_default();
+        let mut nonce = [0_u8; 18];
+        rand::rng().fill(&mut nonce);
+        let request = SignedNodeRequest::new(
+            node.id,
+            now,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce),
+            payload,
+            &secret,
+        )?;
+        let body = serde_json::to_vec(&request)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let key = PathBuf::from("/var/lib/awgram/node_id_ed25519");
+        let known_hosts = PathBuf::from("/var/lib/awgram/node_known_hosts");
+        let key_arg = key.to_string_lossy().into_owned();
+        let known_hosts_arg = format!("UserKnownHostsFile={}", known_hosts.display());
+        let destination = format!("root@{}", server.public_ip);
+        let mut command = tokio::process::Command::new("ssh");
+        command
+            .args([
+                "-i",
+                &key_arg,
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                &known_hosts_arg,
+                &destination,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
+        use tokio::io::AsyncWriteExt;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&body).await?;
+        }
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| crate::error::Error::Timeout)??;
+        let response: NodeResponse = serde_json::from_slice(&output.stdout)
+            .map_err(|error| crate::error::Error::Parse(format!("ответ агента: {error}")))?;
+        if !output.status.success() || !response.ok {
+            return Err(crate::error::Error::ScriptFailed {
+                code: output.status.code(),
+                stderr: response.message,
+            });
+        }
+        Ok(response)
+    }
+
+    pub async fn agent_status(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+    ) -> Result<bool> {
+        let response = self
+            .agent_command(server, node, secret, NodeCommand::Health)
+            .await?;
+        Ok(response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("ok"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true))
+    }
+
+    pub async fn agent_diagnose(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+    ) -> Result<String> {
+        let response = self
+            .agent_command(server, node, secret, NodeCommand::Diagnose)
+            .await?;
+        Ok(response.data.map_or(response.message, |value| match value {
+            serde_json::Value::String(text) => text,
+            other => other.to_string(),
+        }))
+    }
+
+    async fn agent_client_files(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+        name: &str,
+        operation: &str,
+    ) -> Result<AddResult> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let payload = match operation {
+            "add" => NodeCommand::CreateClient { name: name.clone() },
+            "get" => NodeCommand::GetConfiguration { name: name.clone() },
+            "regen" => NodeCommand::RegenerateClient { name: name.clone() },
+            _ => {
+                return Err(crate::error::Error::Parse(
+                    "неизвестная операция агента".into(),
+                ))
+            }
+        };
+        let response = self.agent_command(server, node, secret, payload).await?;
+        let data = response
+            .data
+            .ok_or_else(|| crate::error::Error::Parse("агент не вернул конфигурацию".into()))?;
+        let conf = data
+            .get("conf_b64")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if conf.is_empty() {
+            return Err(crate::error::Error::Parse(
+                "агент не вернул конфигурацию".into(),
+            ));
+        }
+        let directory = self.clients_dir.join("agent").join(server.id.to_string());
+        std::fs::create_dir_all(&directory)?;
+        let conf_path = directory.join(format!("{name}.conf"));
+        std::fs::write(
+            &conf_path,
+            base64::engine::general_purpose::STANDARD
+                .decode(conf)
+                .map_err(|error| crate::error::Error::Parse(error.to_string()))?,
+        )?;
+        let qr = data
+            .get("qr_b64")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let qr_path = directory.join(format!("{name}.png"));
+        if !qr.is_empty() {
+            std::fs::write(
+                &qr_path,
+                base64::engine::general_purpose::STANDARD
+                    .decode(qr)
+                    .map_err(|error| crate::error::Error::Parse(error.to_string()))?,
+            )?;
+        }
+        Ok(AddResult {
+            name,
+            conf_path: conf_path.to_string_lossy().into_owned(),
+            qr_path: if qr.is_empty() {
+                String::new()
+            } else {
+                qr_path.to_string_lossy().into_owned()
+            },
+            uri: data
+                .get("uri")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .into(),
+        })
+    }
+
+    pub async fn agent_add(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+        name: &str,
+    ) -> Result<AddResult> {
+        self.agent_client_files(server, node, secret, name, "add")
+            .await
+    }
+
+    pub async fn agent_existing_files(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+        name: &str,
+    ) -> Result<AddResult> {
+        self.agent_client_files(server, node, secret, name, "get")
+            .await
+    }
+
+    pub async fn agent_regen(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+        name: &str,
+    ) -> Result<AddResult> {
+        self.agent_client_files(server, node, secret, name, "regen")
+            .await
+    }
+
+    pub async fn agent_remove(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+        name: &str,
+    ) -> Result<()> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        self.agent_command(server, node, secret, NodeCommand::RevokeClient { name })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn agent_set_expiry(
+        &self,
+        server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+        name: &str,
+        expires_at: i64,
+    ) -> Result<()> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        self.agent_command(
+            server,
+            node,
+            secret,
+            NodeCommand::SetClientExpiry {
+                name,
+                expires_at: Some(expires_at),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn remote_node_command(
         &self,
         server: &crate::store::VpnServer,
@@ -274,6 +538,7 @@ impl Vpn {
         }
         let port = request.port.to_string();
         let server_id = request.server_id.to_string();
+        let node_id = request.node_id.to_string();
         let mut command = tokio::process::Command::new(if self.sudo_prefix.is_empty() {
             helper
         } else {
@@ -283,7 +548,14 @@ impl Vpn {
             command.arg(helper);
         }
         command
-            .args([request.host, &port, request.user, &server_id, "legacy"])
+            .args([
+                request.host,
+                &port,
+                request.user,
+                &server_id,
+                &node_id,
+                "amneziawg-1",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -292,6 +564,12 @@ impl Vpn {
         use tokio::io::AsyncWriteExt;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(request.password.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.write_all(request.node_secret_b64.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin
+                .write_all(request.controller_key_b64.as_bytes())
+                .await?;
             stdin.write_all(b"\n").await?;
         }
         let output = tokio::time::timeout(

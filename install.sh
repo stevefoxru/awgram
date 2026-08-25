@@ -534,11 +534,13 @@ install_deployctl() {
   cat > "$DEPLOYCTL_PATH" <<'AWGRAM_DEPLOYCTL'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ $# = 5 ]] || { echo 'usage: awgram-deployctl HOST PORT root SERVER_ID legacy' >&2; exit 2; }
-host="$1"; port="$2"; user="$3"; server_id="$4"; protocol="$5"
-[[ "$host" =~ ^[A-Za-z0-9.-]+$ && "$port" =~ ^[0-9]+$ && "$user" = root && "$server_id" =~ ^[1-9][0-9]*$ && "$protocol" = legacy ]] || { echo 'invalid deployment parameters' >&2; exit 2; }
+[[ $# = 6 ]] || { echo 'usage: awgram-deployctl HOST PORT root SERVER_ID NODE_ID PROTOCOL' >&2; exit 2; }
+host="$1"; port="$2"; user="$3"; server_id="$4"; node_id="$5"; protocol="$6"
+[[ "$host" =~ ^[A-Za-z0-9.-]+$ && "$port" =~ ^[0-9]+$ && "$user" = root && "$server_id" =~ ^[1-9][0-9]*$ && "$node_id" =~ ^[1-9][0-9]*$ && "$protocol" = amneziawg-1 ]] || { echo 'invalid deployment parameters' >&2; exit 2; }
 IFS= read -r password
-[[ -n "$password" ]] || { echo 'empty password' >&2; exit 2; }
+IFS= read -r node_secret_b64
+IFS= read -r controller_key_b64
+[[ -n "$password" && -n "$node_secret_b64" && -n "$controller_key_b64" ]] || { echo 'empty deployment secret' >&2; exit 2; }
 command -v sshpass >/dev/null || { echo 'sshpass is required' >&2; exit 3; }
 key=/var/lib/awgram/node_id_ed25519
 known_hosts=/var/lib/awgram/node_known_hosts
@@ -548,11 +550,10 @@ if [[ ! -f "$key" ]]; then
   chown "${SUDO_USER:-root}:${SUDO_USER:-root}" "$key" "$key.pub" 2>/dev/null || true
   chmod 600 "$key"; chmod 644 "$key.pub"
 fi
-pub64="$(base64 -w0 < "$key.pub")"
 export SSHPASS="$password"
 sshpass -e ssh -p "$port" -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known_hosts" -o PasswordAuthentication=yes -o PubkeyAuthentication=no "$user@$host" \
-  "curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/node-bootstrap.sh | bash -s -- --server-id '$server_id' --protocol legacy --controller-key-b64 '$pub64'"
-unset SSHPASS password
+  "curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/node-bootstrap.sh | bash -s -- --server-id '$server_id' --node-id '$node_id' --protocol '$protocol' --controller-key-b64 '$controller_key_b64' --node-secret-b64 '$node_secret_b64'"
+unset SSHPASS password node_secret_b64 controller_key_b64
 owner="${SUDO_USER:-root}"; chown "$owner:$owner" "$key" "$key.pub" "$known_hosts" 2>/dev/null || true
 printf '{"ok":true,"server_id":%s,"stage":"bootstrap_started"}\n' "$server_id"
 AWGRAM_DEPLOYCTL

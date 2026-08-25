@@ -843,6 +843,11 @@ async fn nonlocal_add(
     if server.protocol == "amneziawg-panel" {
         vpn.panel_add(server, &panel_secret(settings, server)?, name)
             .await
+    } else if let (Some(node), Some(secret)) = (
+        settings.vpn_node_for_server(server.id),
+        settings.node_secret(server.id),
+    ) {
+        vpn.agent_add(server, &node, &secret, name).await
     } else {
         vpn.remote_add(server, name).await
     }
@@ -857,6 +862,11 @@ async fn nonlocal_files(
     if server.protocol == "amneziawg-panel" {
         vpn.panel_existing_files(server, &panel_secret(settings, server)?, name)
             .await
+    } else if let (Some(node), Some(secret)) = (
+        settings.vpn_node_for_server(server.id),
+        settings.node_secret(server.id),
+    ) {
+        vpn.agent_existing_files(server, &node, &secret, name).await
     } else {
         vpn.remote_existing_files(server, name).await
     }
@@ -871,6 +881,11 @@ async fn nonlocal_remove(
     if server.protocol == "amneziawg-panel" {
         vpn.panel_remove(server, &panel_secret(settings, server)?, name)
             .await
+    } else if let (Some(node), Some(secret)) = (
+        settings.vpn_node_for_server(server.id),
+        settings.node_secret(server.id),
+    ) {
+        vpn.agent_remove(server, &node, &secret, name).await
     } else {
         vpn.remote_remove(server, name).await
     }
@@ -886,6 +901,12 @@ async fn nonlocal_set_expiry(
     if server.protocol == "amneziawg-panel" {
         vpn.panel_set_expiry(server, &panel_secret(settings, server)?, name, expires_at)
             .await
+    } else if let (Some(node), Some(secret)) = (
+        settings.vpn_node_for_server(server.id),
+        settings.node_secret(server.id),
+    ) {
+        vpn.agent_set_expiry(server, &node, &secret, name, expires_at)
+            .await
     } else {
         vpn.remote_set_expiry(server, name, expires_at).await
     }
@@ -899,6 +920,11 @@ async fn nonlocal_refresh(
 ) -> crate::error::Result<crate::vpn::model::AddResult> {
     if server.protocol == "amneziawg-panel" {
         nonlocal_files(vpn, settings, server, name).await
+    } else if let (Some(node), Some(secret)) = (
+        settings.vpn_node_for_server(server.id),
+        settings.node_secret(server.id),
+    ) {
+        vpn.agent_regen(server, &node, &secret, name).await
     } else {
         vpn.remote_regen(server, name).await
     }
@@ -3285,6 +3311,15 @@ async fn message_handler(
             ),
         )
         .await?;
+        let Some(node) = settings.vpn_node_for_server(server.id) else {
+            password.clear();
+            dialogue.update(State::Idle).await?;
+            bot.send_message(msg.chat.id, "VPN-узел сервера не найден.")
+                .await?;
+            return Ok(());
+        };
+        let (node_secret, encrypted_secret) = vpn.create_node_secret()?;
+        let controller_key = vpn.controller_public_key_b64()?;
         let result = vpn
             .deploy_node(crate::vpn::DeployRequest {
                 host: &server.public_ip,
@@ -3292,13 +3327,17 @@ async fn message_handler(
                 user,
                 password: &password,
                 server_id: server.id,
+                node_id: node.id,
                 protocol: &server.protocol,
+                node_secret_b64: &node_secret,
+                controller_key_b64: &controller_key,
             })
             .await;
         password.clear();
         dialogue.update(State::Idle).await?;
         match result {
             Ok(_) => {
+                settings.set_node_secret(server.id, &encrypted_secret, now_epoch());
                 settings.set_server_status(server.id, "maintenance", now_epoch());
                 settings.set_server_provisioning(server.id, false, now_epoch());
                 bot.send_message(msg.chat.id, "✅ Установка запущена. Пароль удалён. VPS может перезагрузиться дважды; после готовности включите выдачу и назначьте сервер основным.")
@@ -4668,10 +4707,28 @@ async fn callback_handler(
                         "🏠 Локальный сервер уже подключён напрямую к боту и не требует bootstrap.",
                     )
                     .await?;
-                } else if let Some(issue) = settings.create_server_enrollment(id, uid, now_epoch())
-                {
-                    let command = format!("curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/node-bootstrap.sh | sudo bash -s -- --server-id {} --token {} --protocol {}",server.id,issue.token,server.protocol);
-                    bot.send_message(chat,format!("🔐 Одноразовое подключение сервера\n\nКоманда действует 30 минут и показывается только сейчас. Запустите её от root на VPS {} ({}). Повторное создание автоматически отзывает предыдущий токен.\n\n{}\n\nНа этом этапе команда безопасно зарегистрирует заготовку узла. Пароль SSH боту не передаётся и в базе не хранится.",server.name,server.public_ip,command)).reply_markup(menu::server_card_menu(id)).await?;
+                } else if let (Some(node), Ok((clear_secret, encrypted_secret)), Ok(key)) = (
+                    settings.vpn_node_for_server(id),
+                    vpn.create_node_secret(),
+                    vpn.controller_public_key_b64(),
+                ) {
+                    if !settings.set_node_secret(id, &encrypted_secret, now_epoch()) {
+                        bot.send_message(chat, "❌ Не удалось сохранить учётные данные узла.")
+                            .await?;
+                        return Ok(());
+                    }
+                    let protocol = crate::vpn::driver::Protocol::parse(&server.protocol)
+                        .map(crate::vpn::driver::Protocol::canonical)
+                        .unwrap_or("amneziawg-1");
+                    let command = format!("curl -fsSL https://github.com/stevefoxru/awgram/releases/latest/download/node-bootstrap.sh | sudo bash -s -- --server-id {} --node-id {} --protocol {} --controller-key-b64 {} --node-secret-b64 {}",server.id,node.id,protocol,key,clear_secret);
+                    bot.send_message(chat,format!("🔐 Подключение автономного узла\n\nЗапустите команду от root на VPS {} ({}). Она установит ограниченный агент; произвольная shell-команда контроллеру недоступна. Секрет подписания показывается только внутри этой команды, в базе он хранится зашифрованным. Повторное создание команды заменяет прежний секрет.\n\n{}",server.name,server.public_ip,command)).reply_markup(menu::server_card_menu(id)).await?;
+                } else {
+                    bot.send_message(
+                        chat,
+                        "❌ Не удалось подготовить подключение узла. Проверьте ключ контроллера.",
+                    )
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
                 }
             }
         }
@@ -4733,6 +4790,10 @@ async fn callback_handler(
                             "пароль панели не настроен".into(),
                         )),
                     }
+                } else if let (Some(node), Some(secret)) =
+                    (settings.vpn_node_for_server(id), settings.node_secret(id))
+                {
+                    vpn.agent_status(&server, &node, &secret).await
                 } else {
                     vpn.remote_status(&server).await
                 };
@@ -4760,6 +4821,10 @@ async fn callback_handler(
                             "пароль панели не настроен".into(),
                         )),
                     }
+                } else if let (Some(node), Some(secret)) =
+                    (settings.vpn_node_for_server(id), settings.node_secret(id))
+                {
+                    vpn.agent_diagnose(&server, &node, &secret).await
                 } else {
                     vpn.remote_diagnose(&server).await
                 };

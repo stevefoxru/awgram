@@ -100,6 +100,7 @@ impl DriverCapabilities {
 pub enum NodeTransport {
     Local,
     RestrictedSsh,
+    SignedSsh,
     HttpsAgent,
     PanelApi,
 }
@@ -109,6 +110,7 @@ impl NodeTransport {
         match self {
             Self::Local => "local",
             Self::RestrictedSsh => "restricted_ssh",
+            Self::SignedSsh => "signed_ssh",
             Self::HttpsAgent => "https_agent",
             Self::PanelApi => "panel_api",
         }

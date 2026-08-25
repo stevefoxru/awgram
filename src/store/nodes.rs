@@ -74,6 +74,42 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstallationJob> {
 }
 
 impl Store {
+    pub fn set_node_secret(&self, server_id: i64, encrypted_secret: &str, now: i64) -> bool {
+        let key = format!("node_secret_{server_id}");
+        let Ok(value) = serde_json::to_string(encrypted_secret) else {
+            return false;
+        };
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE vpn_nodes SET transport='signed_ssh',updated_at=?2 WHERE server_id=?1",
+                rusqlite::params![server_id, now],
+            )?;
+            transaction.execute(
+                "INSERT INTO settings(key,value) VALUES(?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                rusqlite::params![key, value],
+            )?;
+            transaction.commit()?;
+            Ok(changed)
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn node_secret(&self, server_id: i64) -> Option<String> {
+        let key = format!("node_secret_{server_id}");
+        self.with_conn(|connection| {
+            connection
+                .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+        })
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str(&value).ok())
+    }
+
     pub fn vpn_node_for_server(&self, server_id: i64) -> Option<VpnNode> {
         self.with_conn(|connection| {
             connection
@@ -235,6 +271,8 @@ mod tests {
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].protocol, "wireguard");
         assert!(instances[0].is_default);
+        assert!(store.set_node_secret(server_id, "encrypted", 105));
+        assert_eq!(store.node_secret(server_id).as_deref(), Some("encrypted"));
         let job = store
             .create_installation_job(server_id, "wireguard", "install", 1, 110)
             .unwrap();
