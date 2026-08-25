@@ -573,7 +573,7 @@ pub fn customer_keys_menu(names: &[String]) -> InlineKeyboardMarkup {
 
 pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("📱 Обновить подключение", &format!("refresh:{name}"))],
+        vec![cb("♻️ Получить новый конфиг", &format!("refresh:{name}"))],
         vec![
             cb("📅 Продлить", &format!("renew:{name}")),
             cb("✏️ Устройство", &format!("device:label:{name}")),

@@ -138,6 +138,76 @@ impl Vpn {
         })
     }
 
+    async fn remote_client_files(
+        &self,
+        server: &crate::store::VpnServer,
+        action: &str,
+        name: &str,
+    ) -> Result<AddResult> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let output = self.remote_node_command(server, &[action, &name]).await?;
+        let value: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let conf = value
+            .get("conf_b64")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if conf.is_empty() {
+            return Err(crate::error::Error::Parse(
+                "узел не вернул конфигурацию".into(),
+            ));
+        }
+        let dir = self.clients_dir.join("remote").join(server.id.to_string());
+        std::fs::create_dir_all(&dir)?;
+        let conf_path = dir.join(format!("{name}.conf"));
+        std::fs::write(
+            &conf_path,
+            base64::engine::general_purpose::STANDARD
+                .decode(conf)
+                .map_err(|error| crate::error::Error::Parse(error.to_string()))?,
+        )?;
+        let qr_path = dir.join(format!("{name}.png"));
+        let qr = value
+            .get("qr_b64")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !qr.is_empty() {
+            std::fs::write(
+                &qr_path,
+                base64::engine::general_purpose::STANDARD
+                    .decode(qr)
+                    .map_err(|error| crate::error::Error::Parse(error.to_string()))?,
+            )?;
+        }
+        Ok(AddResult {
+            name,
+            conf_path: conf_path.to_string_lossy().into_owned(),
+            qr_path: if qr.is_empty() {
+                String::new()
+            } else {
+                qr_path.to_string_lossy().into_owned()
+            },
+            uri: String::new(),
+        })
+    }
+
+    pub async fn remote_existing_files(
+        &self,
+        server: &crate::store::VpnServer,
+        name: &str,
+    ) -> Result<AddResult> {
+        self.remote_client_files(server, "get", name).await
+    }
+
+    pub async fn remote_regen(
+        &self,
+        server: &crate::store::VpnServer,
+        name: &str,
+    ) -> Result<AddResult> {
+        self.remote_client_files(server, "regen", name).await
+    }
+
     pub async fn remote_remove(&self, server: &crate::store::VpnServer, name: &str) -> Result<()> {
         let name = validate::validate_name(name)
             .map_err(|error| crate::error::Error::Parse(error.to_string()))?;

@@ -19,6 +19,8 @@ valid(){ [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]]; }
 case "$a" in
  status) systemctl is-active --quiet awg-quick@awg0 && printf '{"ok":true,"status":"online"}\n' || { printf '{"ok":false,"status":"offline"}\n'; exit 1; };;
  add) valid "$n"||exit 2; bash /root/awg/manage_amneziawg.sh add "$n">/dev/null; systemctl restart awg-quick@awg0; c=/root/awg/$n.conf; [ -f "$c" ]||exit 4; printf '{"ok":true,"name":"%s","conf_b64":"%s","qr_b64":"%s"}\n' "$n" "$(base64 -w0<"$c")" "$([ -f /root/awg/$n.png ]&&base64 -w0</root/awg/$n.png||true)";;
+ get) valid "$n"||exit 2; c=/root/awg/$n.conf; [ -f "$c" ]||exit 4; printf '{"ok":true,"name":"%s","conf_b64":"%s","qr_b64":"%s"}\n' "$n" "$(base64 -w0<"$c")" "$([ -f /root/awg/$n.png ]&&base64 -w0</root/awg/$n.png||true)";;
+ regen) valid "$n"||exit 2; bash /root/awg/manage_amneziawg.sh regen "$n" --json >/dev/null; c=/root/awg/$n.conf; [ -f "$c" ]||exit 4; printf '{"ok":true,"name":"%s","conf_b64":"%s","qr_b64":"%s"}\n' "$n" "$(base64 -w0<"$c")" "$([ -f /root/awg/$n.png ]&&base64 -w0</root/awg/$n.png||true)";;
  remove) valid "$n"||exit 2; bash /root/awg/manage_amneziawg.sh remove "$n">/dev/null||true; systemctl restart awg-quick@awg0; printf '{"ok":true}\n';;
  set-expiry) valid "$n"||exit 2; [[ "$e" =~ ^[0-9]+$ ]]||exit 2; install -d -m700 /etc/awgram-node/expiry; printf '%s\n' "$e">"/etc/awgram-node/expiry/$n"; printf '{"ok":true}\n';;
  *) exit 2;; esac
@@ -82,4 +84,11 @@ import_data(){
   printf 'OK Перенос завершён. На старой VPS отключите автозапуск: systemctl disable awgram\n'
 }
 
-case "${1:-}" in export) export_data;; import) import_data "${2:-$OUT}";; *) die 'usage: transfer.sh export | transfer.sh import [archive]';; esac
+bridge_data(){
+  root
+  [ -s "$STATE/node_id_ed25519.pub" ]||die 'публичный ключ контроллера не найден'
+  install_node_bridge "$(cat "$STATE/node_id_ed25519.pub")"
+  printf 'OK SSH bridge обновлён: доступны status, get, regen, add, remove и set-expiry\n'
+}
+
+case "${1:-}" in export) export_data;; import) import_data "${2:-$OUT}";; bridge) bridge_data;; *) die 'usage: transfer.sh export | transfer.sh import [archive] | transfer.sh bridge';; esac

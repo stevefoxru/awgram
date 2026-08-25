@@ -5504,7 +5504,11 @@ async fn callback_handler(
             )
             .reply_markup(menu::customer_key_menu(&name))
             .await?;
-            match vpn.existing_files(&name) {
+            let files = match settings.client_vpn_server(&name) {
+                Some(server) if !server.is_local => vpn.remote_existing_files(&server, &name).await,
+                _ => vpn.existing_files(&name),
+            };
+            match files {
                 Ok(res) => {
                     if let Err(e) = render::send_client_files(&bot, chat, lang, &res).await {
                         bot.send_message(chat, i18n::error_text(lang, &e)).await?;
@@ -5673,7 +5677,11 @@ async fn callback_handler(
                 .send_message(chat, "⏳ Создаю свежую конфигурацию…")
                 .await
                 .ok();
-            match vpn.regen_client(&name).await {
+            let refreshed = match settings.client_vpn_server(&name) {
+                Some(server) if !server.is_local => vpn.remote_regen(&server, &name).await,
+                _ => vpn.regen_client(&name).await,
+            };
+            match refreshed {
                 Ok(result) => {
                     settings.log_event(
                         now_epoch(),
