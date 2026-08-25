@@ -13,6 +13,12 @@ A new VPS can be added through the step-by-step server wizard. After entering
 its name, IP, location, and provider, choose automatic AWG 1.0 installation,
 connect an existing panel, or generate a one-time bootstrap command.
 
+Starting with v0.26, the controller can run without a local VPN. New AWG 1.0
+nodes are managed by a separate `awgram-node` binary that accepts only signed,
+allowlisted commands. The data model supports multiple VPN instances and
+drivers per physical VPS, while existing nodes retain the restricted SSH
+compatibility fallback.
+
 [🇷🇺 Русский](README.md) · 🇬🇧 English
 
 [![CI](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/stevefoxru/awgram/actions/workflows/ci.yml)
