@@ -85,6 +85,25 @@ impl Vpn {
         Ok(value.get("ok").and_then(serde_json::Value::as_bool) == Some(true))
     }
 
+    pub async fn remote_legacy_migration(
+        &self,
+        server: &crate::store::VpnServer,
+        command: &str,
+    ) -> Result<String> {
+        let action = match command {
+            "preflight" => "migrate-preflight",
+            "start" => "migrate-start",
+            "status" => "migrate-status",
+            "rollback" => "migrate-rollback",
+            _ => {
+                return Err(crate::error::Error::Parse(
+                    "неизвестная команда удалённой миграции".into(),
+                ));
+            }
+        };
+        self.remote_node_command(server, &[action]).await
+    }
+
     pub async fn remote_add(
         &self,
         server: &crate::store::VpnServer,

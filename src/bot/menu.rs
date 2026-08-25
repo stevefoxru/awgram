@@ -219,12 +219,42 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             "🚀 Установить VPN на VPS",
             &format!("server:deploy:{id}"),
         )],
+        vec![cb(
+            "🔀 Перевести AWG 2.0 → 1.0",
+            &format!("server:migrate:{id}"),
+        )],
         vec![cb("⭐ Сделать основным", &format!("server:default:{id}"))],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),
             cb("🏠 Админ-панель", "admin:dashboard"),
         ],
+    ])
+}
+
+pub fn remote_migration_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "🧪 Предварительная проверка",
+            &format!("server:migrate:preflight:{id}"),
+        )],
+        vec![cb("📍 Статус", &format!("server:migrate:status:{id}"))],
+        vec![cb(
+            "🚨 Начать миграцию",
+            &format!("server:migrate:ask:{id}"),
+        )],
+        vec![cb(
+            "↩️ Аварийный откат",
+            &format!("server:migrate:rollback:{id}"),
+        )],
+        vec![cb("⬅️ Карточка сервера", &format!("server:{id}"))],
+    ])
+}
+
+pub fn remote_migration_confirm_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🚨 ДА, ЗАПУСТИТЬ", &format!("server:migrate:run:{id}"))],
+        vec![cb("❌ Отмена", &format!("server:migrate:{id}"))],
     ])
 }
 

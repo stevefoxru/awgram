@@ -28,6 +28,10 @@ case "$a" in
  regen) valid "$n"||exit 2; bash /root/awg/manage_amneziawg.sh regen "$n" --json >/dev/null; c=/root/awg/$n.conf; [[ -f "$c" ]]||exit 4; printf '{"ok":true,"name":"%s","conf_b64":"%s","qr_b64":"%s"}\n' "$n" "$(base64 -w0<"$c")" "$([[ -f /root/awg/$n.png ]]&&base64 -w0</root/awg/$n.png||true)";;
  remove) valid "$n"||exit 2; bash /root/awg/manage_amneziawg.sh remove "$n">/dev/null||true; systemctl restart awg-quick@awg0; printf '{"ok":true}\n';;
  set-expiry) valid "$n"||exit 2; [[ "$e" =~ ^[0-9]+$ ]]||exit 2; install -d -m700 /etc/awgram-node/expiry; printf '%s\n' "$e">"/etc/awgram-node/expiry/$n"; printf '{"ok":true}\n';;
+ migrate-preflight) exec /usr/local/libexec/awgram-migratectl preflight;;
+ migrate-start) exec /usr/local/libexec/awgram-migratectl start;;
+ migrate-status) exec /usr/local/libexec/awgram-migratectl status;;
+ migrate-rollback) exec /usr/local/libexec/awgram-migratectl rollback;;
  enforce) now=$(date +%s); for f in /etc/awgram-node/expiry/*; do [[ -f "$f" ]]||continue; read -r until<"$f"; if [[ "$until" =~ ^[0-9]+$ ]]&&((until<=now)); then x=${f##*/}; bash /root/awg/manage_amneziawg.sh remove "$x">/dev/null||true; rm -f "$f"; fi; done; systemctl restart awg-quick@awg0; printf '{"ok":true}\n';;
  *) exit 2;; esac
 NODECTL

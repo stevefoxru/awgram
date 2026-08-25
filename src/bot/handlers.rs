@@ -30,6 +30,12 @@ pub enum Action {
     AdminUpdateRun,
     ServerAdd,
     ServerCard(i64),
+    RemoteMigration(i64),
+    RemoteMigrationPreflight(i64),
+    RemoteMigrationStatus(i64),
+    RemoteMigrationAsk(i64),
+    RemoteMigrationRun(i64),
+    RemoteMigrationRollback(i64),
     ServerBilling,
     ServerBillingAsk(i64),
     ServerPassportAsk(i64),
@@ -259,6 +265,30 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("admin:owners:page:") {
                 v.parse()
                     .map(Action::AdminOwnersPage)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:migrate:preflight:") {
+                v.parse()
+                    .map(Action::RemoteMigrationPreflight)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:migrate:status:") {
+                v.parse()
+                    .map(Action::RemoteMigrationStatus)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:migrate:ask:") {
+                v.parse()
+                    .map(Action::RemoteMigrationAsk)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:migrate:run:") {
+                v.parse()
+                    .map(Action::RemoteMigrationRun)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:migrate:rollback:") {
+                v.parse()
+                    .map(Action::RemoteMigrationRollback)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:migrate:") {
+                v.parse()
+                    .map(Action::RemoteMigration)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("buy:term:") {
                 v.parse().map(Action::BuyTerm).unwrap_or(Action::Unknown)
@@ -1364,6 +1394,12 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminUpdateRun
         | ServerAdd
         | ServerCard(_)
+        | RemoteMigration(_)
+        | RemoteMigrationPreflight(_)
+        | RemoteMigrationStatus(_)
+        | RemoteMigrationAsk(_)
+        | RemoteMigrationRun(_)
+        | RemoteMigrationRollback(_)
         | ServerBilling
         | ServerBillingAsk(_)
         | ServerPassportAsk(_)
@@ -4125,6 +4161,73 @@ async fn callback_handler(
             if let Some(server) = settings.vpn_server(id) {
                 bot.send_message(chat, server_card_text(&server, now_epoch()))
                     .reply_markup(menu::server_card_menu(id))
+                    .await?;
+            }
+        }
+        Action::RemoteMigration(id) => {
+            if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
+                bot.send_message(chat, format!("🔀 Миграция «{}»: AWG 2.0 → AWG 1.0\n\nIP: {}\nОперация создаст резервную копию, остановит VPN и может дважды перезагрузить только выбранный сервер. Старые пользовательские конфигурации перестанут работать.\n\nСначала выполните предварительную проверку.", server.name, server.public_ip))
+                    .reply_markup(menu::remote_migration_menu(id)).await?;
+            }
+        }
+        Action::RemoteMigrationPreflight(id) => {
+            if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
+                let text = match vpn.remote_legacy_migration(&server, "preflight").await {
+                    Ok(output) => format!("✅ Сервер готов к миграции.\n\n{output}"),
+                    Err(error) => format!("❌ Миграцию запускать нельзя: {error}"),
+                };
+                bot.send_message(chat, text)
+                    .reply_markup(menu::remote_migration_menu(id))
+                    .await?;
+            }
+        }
+        Action::RemoteMigrationStatus(id) => {
+            if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
+                let text = match vpn.remote_legacy_migration(&server, "status").await {
+                    Ok(output) => format!("📍 Статус миграции «{}»\n\n{output}", server.name),
+                    Err(error) => format!("❌ Статус недоступен: {error}\n\nЕсли VPS перезагружается, повторите через 2–3 минуты."),
+                };
+                bot.send_message(chat, text)
+                    .reply_markup(menu::remote_migration_menu(id))
+                    .await?;
+            }
+        }
+        Action::RemoteMigrationAsk(id) => {
+            if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
+                bot.send_message(chat, format!("🚨 Последнее предупреждение\n\nБудет мигрирован только сервер «{}» ({}). VPN временно отключится, старые конфигурации клиентов станут недействительными. Убедитесь, что snapshot VPS и доступ к веб-консоли готовы.", server.name, server.public_ip))
+                    .reply_markup(menu::remote_migration_confirm_menu(id)).await?;
+            }
+        }
+        Action::RemoteMigrationRun(id) => {
+            if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
+                settings.set_server_status(id, "maintenance", now_epoch());
+                settings.set_server_provisioning(id, false, now_epoch());
+                let text = match vpn.remote_legacy_migration(&server, "start").await {
+                    Ok(output) => {
+                        settings.log_event(
+                            now_epoch(),
+                            EventKind::Migration,
+                            None,
+                            Some(uid),
+                            Some(&format!("remote migration server={id}")),
+                        );
+                        format!("🚨 Миграция запущена. Сервер может дважды перезагрузиться. Не запускайте её повторно; проверяйте кнопку «Статус».\n\n{output}")
+                    }
+                    Err(error) => format!("❌ Не удалось запустить миграцию: {error}"),
+                };
+                bot.send_message(chat, text)
+                    .reply_markup(menu::remote_migration_menu(id))
+                    .await?;
+            }
+        }
+        Action::RemoteMigrationRollback(id) => {
+            if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
+                let text = match vpn.remote_legacy_migration(&server, "rollback").await {
+                    Ok(output) => format!("✅ Команда аварийного отката выполнена.\n\n{output}"),
+                    Err(error) => format!("❌ Откат не выполнен: {error}"),
+                };
+                bot.send_message(chat, text)
+                    .reply_markup(menu::remote_migration_menu(id))
                     .await?;
             }
         }
@@ -7614,6 +7717,12 @@ mod tests {
             AdminSystem,
             ServerAdd,
             ServerCard(1),
+            RemoteMigration(1),
+            RemoteMigrationPreflight(1),
+            RemoteMigrationStatus(1),
+            RemoteMigrationAsk(1),
+            RemoteMigrationRun(1),
+            RemoteMigrationRollback(1),
             ServerBilling,
             ServerBillingAsk(1),
             ServerPassportAsk(1),
@@ -7739,6 +7848,12 @@ mod tests {
                 AdminUpdateRun => {}
                 ServerAdd => {}
                 ServerCard(_) => {}
+                RemoteMigration(_) => {}
+                RemoteMigrationPreflight(_) => {}
+                RemoteMigrationStatus(_) => {}
+                RemoteMigrationAsk(_) => {}
+                RemoteMigrationRun(_) => {}
+                RemoteMigrationRollback(_) => {}
                 ServerBilling => {}
                 ServerBillingAsk(_) => {}
                 ServerPassportAsk(_) => {}
@@ -8067,6 +8182,12 @@ mod tests {
             (Action::AdminSystem, true, false),
             (Action::ServerAdd, true, false),
             (Action::ServerCard(1), true, false),
+            (Action::RemoteMigration(1), true, false),
+            (Action::RemoteMigrationPreflight(1), true, false),
+            (Action::RemoteMigrationStatus(1), true, false),
+            (Action::RemoteMigrationAsk(1), true, false),
+            (Action::RemoteMigrationRun(1), true, false),
+            (Action::RemoteMigrationRollback(1), true, false),
             (Action::ServerBilling, true, false),
             (Action::ServerBillingAsk(1), true, false),
             (Action::ServerPassportAsk(1), true, false),
