@@ -31,9 +31,12 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/awgram" "dist/awgram-linux-${{ matrix.arch }}"
+          cp "target/${{ matrix.target }}/release/awgram-node" "dist/awgram-node-linux-${{ matrix.arch }}"
           cd dist
           sha256sum "awgram-linux-${{ matrix.arch }}" > "awgram-linux-${{ matrix.arch }}.sha256"
+          sha256sum "awgram-node-linux-${{ matrix.arch }}" > "awgram-node-linux-${{ matrix.arch }}.sha256"
           file "awgram-linux-${{ matrix.arch }}"
+          file "awgram-node-linux-${{ matrix.arch }}"
       - uses: actions/upload-artifact@v7
         with:
           name: awgram-linux-${{ matrix.arch }}
@@ -83,6 +86,10 @@ jobs:
             dist/awgram-linux-amd64.sha256
             dist/awgram-linux-arm64
             dist/awgram-linux-arm64.sha256
+            dist/awgram-node-linux-amd64
+            dist/awgram-node-linux-amd64.sha256
+            dist/awgram-node-linux-arm64
+            dist/awgram-node-linux-arm64.sha256
             install.sh
             node-bootstrap.sh
             transfer.sh

@@ -10,6 +10,7 @@ use rusqlite::Connection;
 mod commerce;
 mod events;
 mod groups;
+mod nodes;
 mod server_enrollment;
 mod servers;
 mod settings;
@@ -25,6 +26,7 @@ pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
     INVITE_TTL_SECS,
 };
+pub use nodes::{InstallationJob, VpnInstance, VpnNode};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
 pub use stars::{NewStarOrder, StarOrder, StarPaymentClaim};
@@ -423,6 +425,71 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX idx_key_replacements_pending_old
       ON key_replacements(old_client) WHERE status='pending';
     CREATE INDEX idx_key_replacements_expiry ON key_replacements(status,created_at);
+    "#,
+    // v17: физические узлы отделены от установленных VPN-инстансов. Это
+    // позволяет контроллеру управлять несколькими протоколами на одном VPS и
+    // больше не считать vpn_servers реализацией конкретного VPN-драйвера.
+    r#"
+    CREATE TABLE vpn_nodes(
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL UNIQUE REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        transport TEXT NOT NULL CHECK(transport IN ('local','restricted_ssh','https_agent','panel_api')),
+        status TEXT NOT NULL DEFAULT 'unknown',
+        agent_version TEXT,
+        public_key_fingerprint TEXT,
+        endpoint TEXT,
+        last_seen_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE vpn_instances(
+        id INTEGER PRIMARY KEY,
+        node_id INTEGER NOT NULL REFERENCES vpn_nodes(id) ON DELETE CASCADE,
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        protocol TEXT NOT NULL,
+        driver TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        is_default INTEGER NOT NULL DEFAULT 0,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX idx_vpn_instances_driver ON vpn_instances(node_id,driver);
+    CREATE UNIQUE INDEX idx_vpn_instances_default ON vpn_instances(server_id) WHERE is_default=1;
+    CREATE TABLE installation_jobs(
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        node_id INTEGER REFERENCES vpn_nodes(id) ON DELETE SET NULL,
+        protocol TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        stage TEXT NOT NULL DEFAULT 'created',
+        progress INTEGER NOT NULL DEFAULT 0 CHECK(progress BETWEEN 0 AND 100),
+        error_code TEXT,
+        log_excerpt TEXT,
+        backup_ref TEXT,
+        requested_by INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+    );
+    CREATE INDEX idx_installation_jobs_server ON installation_jobs(server_id,created_at DESC);
+    ALTER TABLE clients ADD COLUMN instance_id INTEGER REFERENCES vpn_instances(id);
+    INSERT INTO vpn_nodes(server_id,transport,status,created_at,updated_at)
+      SELECT id,
+             CASE WHEN is_local=1 THEN 'local'
+                  WHEN protocol='amneziawg-panel' THEN 'panel_api'
+                  ELSE 'restricted_ssh' END,
+             status,added_at,updated_at
+      FROM vpn_servers;
+    INSERT INTO vpn_instances(node_id,server_id,protocol,driver,status,is_default,created_at,updated_at)
+      SELECT n.id,s.id,s.protocol,s.protocol,s.status,1,s.added_at,s.updated_at
+      FROM vpn_servers s JOIN vpn_nodes n ON n.server_id=s.id;
+    UPDATE clients
+       SET instance_id=(SELECT i.id FROM vpn_instances i
+                        WHERE i.server_id=clients.server_id AND i.is_default=1)
+     WHERE server_id IS NOT NULL;
+    CREATE INDEX idx_clients_instance ON clients(instance_id,removed_at);
     "#,
 ];
 

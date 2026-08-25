@@ -1,4 +1,6 @@
+pub mod driver;
 pub mod model;
+pub mod node_api;
 pub mod panel;
 pub mod runner;
 pub mod validate;

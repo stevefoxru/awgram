@@ -90,7 +90,9 @@ impl Store {
                 .optional()?
             {
                 c.execute(
-                    "UPDATE clients SET server_id=?1 WHERE server_id IS NULL AND removed_at IS NULL",
+                    "UPDATE clients SET server_id=?1,
+                     instance_id=(SELECT id FROM vpn_instances WHERE server_id=?1 AND is_default=1)
+                     WHERE server_id IS NULL AND removed_at IS NULL",
                     [id],
                 )?;
                 return Ok(id);
@@ -108,7 +110,9 @@ impl Store {
                     rusqlite::params![id, now],
                 )?;
                 c.execute(
-                    "UPDATE clients SET server_id=?1 WHERE server_id IS NULL AND removed_at IS NULL",
+                    "UPDATE clients SET server_id=?1,
+                     instance_id=(SELECT id FROM vpn_instances WHERE server_id=?1 AND is_default=1)
+                     WHERE server_id IS NULL AND removed_at IS NULL",
                     [id],
                 )?;
                 return Ok(id);
@@ -121,7 +125,20 @@ impl Store {
             )?;
             let id = c.last_insert_rowid();
             c.execute(
-                "UPDATE clients SET server_id=?1 WHERE server_id IS NULL AND removed_at IS NULL",
+                "INSERT INTO vpn_nodes(server_id,transport,status,created_at,updated_at)
+                 VALUES(?1,'local','unknown',?2,?2)",
+                rusqlite::params![id, now],
+            )?;
+            let node_id = c.last_insert_rowid();
+            c.execute(
+                "INSERT INTO vpn_instances(node_id,server_id,protocol,driver,status,is_default,created_at,updated_at)
+                 VALUES(?1,?2,'modern','modern','unknown',1,?3,?3)",
+                rusqlite::params![node_id, id, now],
+            )?;
+            c.execute(
+                "UPDATE clients SET server_id=?1,
+                 instance_id=(SELECT id FROM vpn_instances WHERE server_id=?1 AND is_default=1)
+                 WHERE server_id IS NULL AND removed_at IS NULL",
                 [id],
             )?;
             Ok(id)
@@ -155,12 +172,33 @@ impl Store {
             return None;
         }
         self.with_conn(|c| {
-            c.execute(
+            let transaction = c.unchecked_transaction()?;
+            transaction.execute(
                 "INSERT INTO vpn_servers(name,hostname,public_ip,provider,location,protocol,opened_at,is_local,created_by,added_at,updated_at)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)",
                 rusqlite::params![value.name.trim(),value.hostname.trim(),value.public_ip.trim(),value.provider.trim(),value.location.trim(),value.protocol,value.opened_at,value.is_local as i64,actor,now],
             )?;
-            Ok(c.last_insert_rowid())
+            let server_id = transaction.last_insert_rowid();
+            let transport = if value.is_local {
+                "local"
+            } else if value.protocol == "amneziawg-panel" {
+                "panel_api"
+            } else {
+                "restricted_ssh"
+            };
+            transaction.execute(
+                "INSERT INTO vpn_nodes(server_id,transport,status,created_at,updated_at)
+                 VALUES(?1,?2,'unknown',?3,?3)",
+                rusqlite::params![server_id, transport, now],
+            )?;
+            let node_id = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO vpn_instances(node_id,server_id,protocol,driver,status,is_default,created_at,updated_at)
+                 VALUES(?1,?2,?3,?3,'unknown',1,?4,?4)",
+                rusqlite::params![node_id, server_id, value.protocol, now],
+            )?;
+            transaction.commit()?;
+            Ok(server_id)
         }).ok()
     }
 
@@ -217,10 +255,18 @@ impl Store {
             return false;
         }
         self.with_conn(|c| {
-            c.execute(
+            let transaction = c.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "UPDATE vpn_servers SET name=?2,hostname=?3,public_ip=?4,provider=?5,location=?6,protocol=?7,opened_at=?8,updated_at=?9 WHERE id=?1",
                 rusqlite::params![id,value.name.trim(),value.hostname.trim(),value.public_ip.trim(),value.provider.trim(),value.location.trim(),value.protocol,value.opened_at,now],
-            )
+            )?;
+            transaction.execute(
+                "UPDATE vpn_instances SET protocol=?2,driver=?2,updated_at=?3
+                 WHERE server_id=?1 AND is_default=1",
+                rusqlite::params![id, value.protocol, now],
+            )?;
+            transaction.commit()?;
+            Ok(changed)
         })
         .is_ok_and(|n| n == 1)
     }
@@ -244,10 +290,22 @@ impl Store {
             return false;
         }
         self.with_conn(|c| {
-            c.execute(
+            let transaction = c.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "UPDATE vpn_servers SET status=?2,updated_at=?3 WHERE id=?1",
                 rusqlite::params![id, status, now],
-            )
+            )?;
+            transaction.execute(
+                "UPDATE vpn_nodes SET status=?2,updated_at=?3 WHERE server_id=?1",
+                rusqlite::params![id, status, now],
+            )?;
+            transaction.execute(
+                "UPDATE vpn_instances SET status=?2,updated_at=?3
+                 WHERE server_id=?1 AND is_default=1",
+                rusqlite::params![id, status, now],
+            )?;
+            transaction.commit()?;
+            Ok(changed)
         })
         .is_ok_and(|n| n == 1)
     }
@@ -321,6 +379,16 @@ impl Store {
                 return Ok(false);
             }
             transaction.execute(
+                "UPDATE vpn_nodes SET transport='panel_api',status='online',updated_at=?2
+                 WHERE server_id=?1",
+                rusqlite::params![id, now],
+            )?;
+            transaction.execute(
+                "UPDATE vpn_instances SET protocol='amneziawg-panel',driver='amneziawg-panel',
+                 status='online',updated_at=?2 WHERE server_id=?1 AND is_default=1",
+                rusqlite::params![id, now],
+            )?;
+            transaction.execute(
                 "INSERT INTO settings(key,value) VALUES(?1,?2)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 rusqlite::params![key, secret],
@@ -366,11 +434,12 @@ impl Store {
                     continue;
                 }
                 changed += transaction.execute(
-                    "INSERT INTO clients(name,ip,first_seen,last_seen,server_id,protocol,removed_at)
-                     VALUES(?1,?2,?3,?3,?4,'amneziawg-panel',NULL)
+                    "INSERT INTO clients(name,ip,first_seen,last_seen,server_id,protocol,instance_id,removed_at)
+                     VALUES(?1,?2,?3,?3,?4,'amneziawg-panel',
+                       (SELECT id FROM vpn_instances WHERE server_id=?4 AND is_default=1),NULL)
                      ON CONFLICT(name) DO UPDATE SET
                        ip=excluded.ip,last_seen=excluded.last_seen,server_id=excluded.server_id,
-                       protocol='amneziawg-panel',removed_at=NULL",
+                       protocol='amneziawg-panel',instance_id=excluded.instance_id,removed_at=NULL",
                     rusqlite::params![name, address, now, server_id],
                 )?;
             }
@@ -396,6 +465,11 @@ impl Store {
                 "UPDATE clients SET protocol='amneziawg-1' WHERE server_id=?1 AND removed_at IS NULL",
                 [id],
             )?;
+            transaction.execute(
+                "UPDATE vpn_instances SET protocol='amneziawg-1',driver='amneziawg-1',
+                 status='online',updated_at=?2 WHERE server_id=?1 AND is_default=1",
+                rusqlite::params![id, now],
+            )?;
             transaction.commit()?;
             Ok(true)
         })
@@ -414,6 +488,11 @@ impl Store {
             transaction.execute(
                 "UPDATE clients SET protocol='amneziawg-2' WHERE server_id=?1 AND removed_at IS NULL",
                 [id],
+            )?;
+            transaction.execute(
+                "UPDATE vpn_instances SET protocol='amneziawg-2',driver='amneziawg-2',
+                 status='online',updated_at=?2 WHERE server_id=?1 AND is_default=1",
+                rusqlite::params![id, now],
             )?;
             transaction.commit()?;
             Ok(server_changed == 1)
@@ -444,7 +523,9 @@ impl Store {
         }
         self.with_conn(|c| {
             c.execute(
-                "UPDATE clients SET server_id=?2,protocol=?3 WHERE name=?1 AND removed_at IS NULL",
+                "UPDATE clients SET server_id=?2,protocol=?3,
+                 instance_id=(SELECT id FROM vpn_instances WHERE server_id=?2 AND is_default=1)
+                 WHERE name=?1 AND removed_at IS NULL",
                 rusqlite::params![name, server_id, protocol],
             )
         })
@@ -480,17 +561,7 @@ impl Store {
 }
 
 pub fn valid_protocol(value: &str) -> bool {
-    matches!(
-        value,
-        "modern"
-            | "legacy"
-            | "amneziawg-2"
-            | "amneziawg-1"
-            | "amneziawg-panel"
-            | "wireguard"
-            | "openvpn"
-            | "outline"
-    )
+    crate::vpn::driver::Protocol::parse(value).is_some()
 }
 
 #[cfg(test)]
