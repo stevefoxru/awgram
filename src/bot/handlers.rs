@@ -4223,9 +4223,7 @@ async fn callback_handler(
                     .as_ref()
                     .is_ok_and(|output| output.contains("\"status\":\"complete\""))
                 {
-                    let details = status
-                        .map(|output| output)
-                        .unwrap_or_else(|error| error.to_string());
+                    let details = status.unwrap_or_else(|error| error.to_string());
                     bot.send_message(chat, format!("⏳ Тестовый конфиг пока недоступен: миграция не завершена.\n\n{details}"))
                         .reply_markup(menu::remote_migration_menu(id))
                         .await?;

@@ -499,7 +499,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        store.ensure_user(7, "ru");
+        store.upsert_user(7, Some("tester"), "Tester", None, 100);
         store
             .with_conn(|connection| {
                 connection.execute(
