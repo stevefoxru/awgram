@@ -131,6 +131,21 @@ impl Store {
         }).ok()
     }
 
+    pub fn pending_key_replacement(&self, user_id: i64, old: &str) -> Option<(i64, String, i64)> {
+        self.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT id,new_client,target_server_id FROM key_replacements
+                     WHERE user_id=?1 AND old_client=?2 AND status='pending'",
+                    rusqlite::params![user_id, old],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
     pub fn decide_key_replacement(
         &self,
         id: i64,

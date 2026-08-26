@@ -729,6 +729,31 @@ mod tests {
     }
 
     #[test]
+    fn pending_replacement_can_be_resumed_without_creating_a_duplicate() {
+        let store = Store::open_in_memory();
+        let server_id = store.ensure_local_vpn_server("vpn", 1, 100).unwrap();
+        store.upsert_user(7, Some("alice"), "Alice", None, 100);
+        for name in ["old-key", "new-key"] {
+            store.assign_client_group(name, None, 100);
+            assert!(store.assign_client_owner(name, Some(7)));
+        }
+        let id = store
+            .create_key_replacement(7, "old-key", "new-key", server_id, 101)
+            .unwrap();
+        assert_eq!(
+            store.pending_key_replacement(7, "old-key"),
+            Some((id, "new-key".into(), server_id))
+        );
+        assert!(store.retire_client("old-key", 102));
+        assert_eq!(store.user_client_names(7), vec!["new-key"]);
+        assert_eq!(
+            store.decide_key_replacement(id, 7, "confirmed", 103),
+            Some(("old-key".into(), "new-key".into()))
+        );
+        assert_eq!(store.pending_key_replacement(7, "old-key"), None);
+    }
+
+    #[test]
     fn approving_remote_migration_updates_server_and_clients_atomically() {
         let store = Store::open_in_memory();
         let id = store

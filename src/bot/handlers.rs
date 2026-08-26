@@ -985,6 +985,42 @@ async fn extend_managed_client(
     Ok(target)
 }
 
+async fn resume_pending_replacement(
+    bot: &Bot,
+    chat: ChatId,
+    vpn: &Vpn,
+    settings: &Store,
+    lang: Lang,
+    user_id: i64,
+    old: &str,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let Some((id, new, server_id)) = settings.pending_key_replacement(user_id, old) else {
+        return Ok(false);
+    };
+    if settings.client_owner(&new) != Some(user_id) {
+        // A previous attempt was rolled back physically but left a stale
+        // pending row. Close it and let the caller perform one clean retry.
+        settings.decide_key_replacement(id, user_id, "cancelled", now_epoch());
+        return Ok(false);
+    }
+    settings.retire_client(old, now_epoch());
+    let location = settings
+        .vpn_server(server_id)
+        .map(|server| server.location)
+        .unwrap_or_else(|| "рабочий сервер".into());
+    bot.send_message(chat, format!("♻️ Найдена уже созданная замена\n\nНовый ключ: «{new}»\nСервер: {location}\nСтарый ключ «{old}» скрыт из личного кабинета.\n\nУстановите новый ключ и подтвердите результат. Ещё один ключ создаваться не будет."))
+        .reply_markup(menu::replacement_confirm_menu(id))
+        .await?;
+    match client_files(vpn, settings, &new).await {
+        Ok(files) => render::send_client_files(bot, chat, lang, &files).await?,
+        Err(error) => {
+            bot.send_message(chat, i18n::error_text(lang, &error))
+                .await?;
+        }
+    }
+    Ok(true)
+}
+
 async fn provision_customer_key(
     vpn: &Vpn,
     settings: &Store,
@@ -6482,6 +6518,9 @@ async fn callback_handler(
             if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
             }
+            if resume_pending_replacement(&bot, chat, &vpn, &settings, lang, uid, &name).await? {
+                return Ok(());
+            }
             let Some(source) = settings.client_vpn_server(&name) else {
                 bot.send_message(
                     chat,
@@ -6519,6 +6558,9 @@ async fn callback_handler(
         }
         Action::CustomerMoveServer(name, server_id) => {
             if settings.client_owner(&name) != Some(uid) {
+                return Ok(());
+            }
+            if resume_pending_replacement(&bot, chat, &vpn, &settings, lang, uid, &name).await? {
                 return Ok(());
             }
             let Some(source) = settings.client_vpn_server(&name) else {
