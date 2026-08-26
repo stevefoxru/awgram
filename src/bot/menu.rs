@@ -242,7 +242,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("🔄 Синхронизировать", &format!("server:panel:sync:{id}")),
         ],
         vec![
-            cb("🩺 Проверить", &format!("server:check:{id}")),
+            cb(
+                "🩺 Проверить и отметить ключи",
+                &format!("server:check:{id}"),
+            ),
             cb("🔬 Диагностика", &format!("server:diagnose:{id}")),
         ],
         vec![cb(
@@ -628,10 +631,10 @@ pub fn broadcast_audience_menu() -> InlineKeyboardMarkup {
     ])
 }
 
-pub fn customer_keys_menu(names: &[String]) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(names.iter().map(|name| {
+pub fn customer_keys_menu(items: &[(String, String)]) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(items.iter().map(|(name, title)| {
         vec![
-            cb(&format!("🔑 {name}"), &format!("mykey:{name}")),
+            cb(title, &format!("mykey:{name}")),
             cb("📅 Продлить", &format!("renew:{name}")),
             cb("✏️", &format!("device:label:{name}")),
         ]

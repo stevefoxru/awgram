@@ -1055,6 +1055,50 @@ async fn customer_dashboard(
     Ok(())
 }
 
+fn customer_key_list(
+    settings: &Store,
+    vpn: &Vpn,
+    uid: i64,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let names = settings.user_client_names(uid);
+    let mut lines = Vec::with_capacity(names.len());
+    let mut buttons = Vec::with_capacity(names.len());
+    for name in names {
+        let device = settings
+            .device_label(&name)
+            .unwrap_or_else(|| "устройство не указано".into());
+        let server = settings.client_vpn_server(&name);
+        let unavailable = server
+            .as_ref()
+            .is_none_or(|server| server.status != "online");
+        let (icon, state) = if unavailable {
+            ("❌", "НЕ РАБОТАЕТ — требуется замена".to_string())
+        } else if vpn.client_disabled(&name) {
+            ("⏸", "отключён".to_string())
+        } else {
+            ("✅", "работает".to_string())
+        };
+        let location = server
+            .as_ref()
+            .map(|server| server.location.as_str())
+            .unwrap_or("сервер не определён");
+        let expiry = crate::vpn::model::format_expiry(
+            settings.lang(uid),
+            now_epoch(),
+            vpn.client_expiry(&name),
+        );
+        lines.push(format!(
+            "{icon} {device}\n   Ключ: {name}\n   Сервер: {location}\n   Статус: {state}\n   Срок: {expiry}"
+        ));
+        let title = format!("{icon} {device} · {name}")
+            .chars()
+            .take(60)
+            .collect::<String>();
+        buttons.push((name.clone(), title));
+    }
+    (lines, buttons)
+}
+
 async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -> HandlerResult {
     let now = now_epoch();
     let clients = vpn.list().await.unwrap_or_default();
@@ -3481,27 +3525,18 @@ async fn message_handler(
                     .await?;
             }
             "🔑 Мои ключи" => {
-                let names = settings.user_client_names(uid);
-                let text = if names.is_empty() {
+                let (lines, buttons) = customer_key_list(&settings, &vpn, uid);
+                let text = if lines.is_empty() {
                     "🔑 У вас пока нет ключей. Вы можете приобрести ключ или обратиться в поддержку.".to_string()
                 } else {
                     format!(
-                        "🔑 Ваши ключи\n\n{}\n\nНажмите на ключ для получения конфигурации; 📅 — продление; ✏️ — название устройства.",
-                        names
-                            .iter()
-                            .map(|n| {
-                                let label=settings.device_label(n).unwrap_or_else(||"устройство не указано".into());
-                                let status=if vpn.client_disabled(n){"⏸"}else{"✅"};
-                                let expiry=crate::vpn::model::format_expiry(settings.lang(uid),now_epoch(),vpn.client_expiry(n));
-                                format!("{status} {label} · {n} · {expiry}")
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
+                        "🔑 Ваши подключения\n\n{}\n\n❌ Нерабочий ключ откройте и замените кнопкой восстановления.",
+                        lines.join("\n\n")
                     )
                 };
                 let mut request = bot.send_message(msg.chat.id, text);
-                if !names.is_empty() {
-                    request = request.reply_markup(menu::customer_keys_menu(&names));
+                if !buttons.is_empty() {
+                    request = request.reply_markup(menu::customer_keys_menu(&buttons));
                 }
                 request.await?;
             }
@@ -4882,10 +4917,20 @@ async fn callback_handler(
                 } else {
                     vpn.remote_status(&server).await
                 };
+                let new_status = match &result {
+                    Ok(true) => "online",
+                    Ok(false) => "warning",
+                    Err(_) => "offline",
+                };
+                settings.set_server_status(id, new_status, now_epoch());
+                if new_status == "offline" {
+                    settings.set_server_provisioning(id, false, now_epoch());
+                }
+                let affected = settings.server_client_count(id);
                 let text = match result {
                     Ok(true) => format!("✅ «{}» доступен, VPN-служба активна.", server.name),
                     Ok(false) => format!("⚠️ «{}» доступен, но VPN-служба не готова.", server.name),
-                    Err(error) => format!("❌ «{}» недоступен: {error}", server.name),
+                    Err(error) => format!("❌ «{}» недоступен: {error}\n\n{affected} активных ключей этого сервера отмечены как нерабочие. Их владельцы увидят кнопку безопасной замены.", server.name),
                 };
                 bot.send_message(chat, text)
                     .reply_markup(menu::server_card_menu(id))
@@ -5608,15 +5653,15 @@ async fn callback_handler(
             }
         }
         Action::MyKeys => {
-            let names = settings.user_client_names(uid);
-            let text = if names.is_empty() {
+            let (lines, buttons) = customer_key_list(&settings, &vpn, uid);
+            let text = if lines.is_empty() {
                 "У вас пока нет ключей.".to_string()
             } else {
-                format!("🔑 Ваши ключи:\n{}", names.join("\n"))
+                format!("🔑 Ваши подключения\n\n{}\n\n❌ Нерабочий ключ откройте и замените кнопкой восстановления.", lines.join("\n\n"))
             };
             let mut request = bot.send_message(chat, text);
-            if !names.is_empty() {
-                request = request.reply_markup(menu::customer_keys_menu(&names));
+            if !buttons.is_empty() {
+                request = request.reply_markup(menu::customer_keys_menu(&buttons));
             }
             request.await?;
         }
@@ -6227,6 +6272,20 @@ async fn callback_handler(
                 .unwrap_or_else(|| "не указано".into());
             let expiry =
                 crate::vpn::model::format_expiry(lang, now_epoch(), vpn.client_expiry(&name));
+            let source = settings.client_vpn_server(&name);
+            let source_unavailable = source
+                .as_ref()
+                .is_none_or(|server| server.status != "online");
+            if source_unavailable {
+                let location = source
+                    .as_ref()
+                    .map(|server| server.location.as_str())
+                    .unwrap_or("не определён");
+                bot.send_message(chat, format!("❌ Нерабочее подключение\n\nКлюч: {name}\nУстройство: {label}\nСтарый сервер: {location}\nСтатус: сервер недоступен\nСрок: {expiry}\n\nКонфигурация старого сервера больше не поможет. Нажмите «Заменить нерабочий ключ», проверьте новый и подтвердите замену."))
+                    .reply_markup(menu::customer_key_menu(&name))
+                    .await?;
+                return Ok(());
+            }
             let expired = vpn
                 .client_expiry(&name)
                 .is_some_and(|value| value <= now_epoch());
