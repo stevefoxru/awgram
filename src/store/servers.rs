@@ -553,6 +553,19 @@ impl Store {
         .flatten()
     }
 
+    /// Logically retires a client whose source server cannot be contacted.
+    /// This keeps history intact while removing the stale key from all active
+    /// customer/admin lists and capacity calculations.
+    pub fn retire_client(&self, name: &str, now: i64) -> bool {
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE clients SET removed_at=?2 WHERE name=?1 AND removed_at IS NULL",
+                rusqlite::params![name, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
     pub fn mark_server_billing_notification(
         &self,
         id: i64,
@@ -684,6 +697,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![preferred, first]
         );
+    }
+
+    #[test]
+    fn retiring_unreachable_client_removes_it_from_active_inventory() {
+        let store = Store::open_in_memory();
+        store.assign_client_group("broken-key", None, 100);
+        assert!(store
+            .active_client_names()
+            .contains(&"broken-key".to_string()));
+        assert!(store.retire_client("broken-key", 200));
+        assert!(!store
+            .active_client_names()
+            .contains(&"broken-key".to_string()));
+        assert!(!store.retire_client("broken-key", 201));
     }
 
     #[test]

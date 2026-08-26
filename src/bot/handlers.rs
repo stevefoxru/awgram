@@ -6267,13 +6267,28 @@ async fn callback_handler(
             if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
             }
+            let Some(source) = settings.client_vpn_server(&name) else {
+                bot.send_message(
+                    chat,
+                    "Не удалось определить исходный сервер этого ключа. Обратитесь в поддержку.",
+                )
+                .reply_markup(menu::customer_key_menu(&name))
+                .await?;
+                return Ok(());
+            };
+            if source.status == "online" {
+                bot.send_message(chat, "Этот ключ находится на доступном сервере, поэтому аварийная замена для него не требуется.")
+                    .reply_markup(menu::customer_key_menu(&name))
+                    .await?;
+                return Ok(());
+            }
             let servers = settings
                 .default_vpn_server()
                 .and_then(|id| {
                     settings
                         .available_vpn_servers()
                         .into_iter()
-                        .find(|server| server.id == id)
+                        .find(|server| server.id == id && server.id != source.id)
                 })
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -6289,6 +6304,15 @@ async fn callback_handler(
         }
         Action::CustomerMoveServer(name, server_id) => {
             if settings.client_owner(&name) != Some(uid) {
+                return Ok(());
+            }
+            let Some(source) = settings.client_vpn_server(&name) else {
+                return Ok(());
+            };
+            if source.status == "online" || source.id == server_id {
+                bot.send_message(chat, "Замена разрешена только для ключа с недоступного исходного сервера на другой рабочий сервер.")
+                    .reply_markup(menu::customer_key_menu(&name))
+                    .await?;
                 return Ok(());
             }
             let Some(server) = settings.vpn_server(server_id).filter(|server| {
@@ -6363,14 +6387,35 @@ async fn callback_handler(
             else {
                 return Ok(());
             };
-            let removal = match settings.client_vpn_server(&old) {
-                Some(server) if !server.is_local => {
-                    nonlocal_remove(&vpn, &settings, &server, &old).await
+            let source = settings.client_vpn_server(&old);
+            let source_unavailable = source
+                .as_ref()
+                .is_none_or(|server| server.status != "online");
+            let removal = if source_unavailable {
+                // The original node is unreachable by definition. Retire its
+                // stale database record; there is no useful remote deletion
+                // to wait for, and the old tunnel cannot authenticate on the
+                // newly selected server anyway.
+                if settings.retire_client(&old, now_epoch()) {
+                    Ok(())
+                } else {
+                    Err(crate::error::Error::Parse(
+                        "не удалось архивировать старый ключ".into(),
+                    ))
                 }
-                _ => vpn.remove(&old).await,
+            } else {
+                match source {
+                    Some(server) if !server.is_local => {
+                        nonlocal_remove(&vpn, &settings, &server, &old).await
+                    }
+                    _ => vpn.remove(&old).await,
+                }
             };
             match removal {
                 Ok(()) => {
+                    // Remote/local collectors may run later; make the result
+                    // immediately visible in the user's key list.
+                    settings.retire_client(&old, now_epoch());
                     bot.send_message(
                         chat,
                         format!(
