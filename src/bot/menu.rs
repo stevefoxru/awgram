@@ -146,7 +146,15 @@ pub fn admin_communication_hub() -> InlineKeyboardMarkup {
             cb("🆘 Поддержка", "admin:support"),
             cb("📣 Рассылка", "admin:broadcast"),
         ],
+        vec![cb("📝 Шаблоны рассылок", "admin:broadcast:templates")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn broadcast_templates_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("📣 Создать рассылку", "admin:broadcast")],
+        vec![cb("⬅️ Связь", "admin:communication")],
     ])
 }
 
@@ -222,6 +230,25 @@ pub fn server_setup_method_menu(id: i64) -> InlineKeyboardMarkup {
 
 pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
+        vec![cb("— КЛЮЧИ —", &format!("server:{id}"))],
+        vec![cb(
+            "🎯 Использовать для новых ключей",
+            &format!("server:default:{id}"),
+        )],
+        vec![cb(
+            "🔄 Синхронизировать панель",
+            &format!("server:panel:sync:{id}"),
+        )],
+        vec![cb(
+            "📣 Владельцам ключей",
+            &format!("broadcast:audience:server:{id}"),
+        )],
+        vec![cb("— СОСТОЯНИЕ —", &format!("server:{id}"))],
+        vec![
+            cb("🩺 Проверить ключи", &format!("server:check:{id}")),
+            cb("🔬 Диагностика", &format!("server:diagnose:{id}")),
+        ],
+        vec![cb("— НАСТРОЙКА VPS —", &format!("server:{id}"))],
         vec![
             cb("✏️ Паспорт", &format!("server:edit:{id}")),
             cb("💳 Оплата", &format!("server:bill:{id}")),
@@ -237,28 +264,13 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             "🚀 Установить VPN на VPS",
             &format!("server:deploy:{id}"),
         )],
-        vec![
-            cb("🔐 Подключить панель", &format!("server:panel:{id}")),
-            cb("🔄 Синхронизировать", &format!("server:panel:sync:{id}")),
-        ],
-        vec![
-            cb(
-                "🩺 Проверить и отметить ключи",
-                &format!("server:check:{id}"),
-            ),
-            cb("🔬 Диагностика", &format!("server:diagnose:{id}")),
-        ],
+        vec![cb(
+            "🔐 Подключить / сменить панель",
+            &format!("server:panel:{id}"),
+        )],
         vec![cb(
             "🔀 Перевести AWG 2.0 → 1.0",
             &format!("server:migrate:{id}"),
-        )],
-        vec![cb(
-            "🎯 Новые ключи и замена",
-            &format!("server:default:{id}"),
-        )],
-        vec![cb(
-            "📣 Рассылка владельцам ключей",
-            &format!("broadcast:audience:server:{id}"),
         )],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
@@ -371,6 +383,7 @@ pub fn admin_commerce_menu() -> InlineKeyboardMarkup {
             cb("♻️ Legacy-тариф", "legacy:price"),
             cb("💳 Реквизиты", "set:payment"),
         ],
+        vec![cb("🏦 Эквайринг / Т-Банк", "set:acquiring")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
@@ -523,8 +536,8 @@ pub fn buy_servers_menu(
     InlineKeyboardMarkup::new(rows)
 }
 
-pub fn buy_method_menu(months: i64) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
+pub fn buy_method_menu(months: i64, acquiring: bool) -> InlineKeyboardMarkup {
+    let mut rows = vec![
         vec![cb("💳 Перевод", &format!("buy:method:{months}:manual"))],
         vec![cb(
             "💰 Внутренний баланс",
@@ -534,7 +547,39 @@ pub fn buy_method_menu(months: i64) -> InlineKeyboardMarkup {
             "⭐ Telegram Stars",
             &format!("buy:method:{months}:stars"),
         )],
-    ])
+    ];
+    if acquiring {
+        rows.insert(
+            0,
+            vec![cb(
+                "🏦 Оплатить онлайн",
+                &format!("buy:method:{months}:acquiring"),
+            )],
+        );
+    }
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn bulk_servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup {
+    let mut rows = servers
+        .iter()
+        .map(|server| {
+            vec![cb(
+                &format!(
+                    "📍 {} · {}",
+                    server.location,
+                    if server.protocol == "amneziawg-2" {
+                        "AWG 2.0"
+                    } else {
+                        "AWG 1.0"
+                    }
+                ),
+                &format!("bulkserver:{}", server.id),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("❌ Отмена", "admin:keys")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn payment_paid_menu(id: i64) -> InlineKeyboardMarkup {

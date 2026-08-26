@@ -60,6 +60,7 @@ pub enum Action {
     AdminFinance,
     AdminSupport,
     AdminBroadcast,
+    AdminBroadcastTemplates,
     BroadcastAudience(String),
     AdminHelp,
     AdminSearch,
@@ -133,6 +134,7 @@ pub enum Action {
     AddBulkRun(usize), // N клиентов для генерации (1..=MAX_BULK, валидируется в обработчике)
     BulkExpiry(String), // "none" | "1d" | ... | "custom" — общий срок для всей пачки
     AddBulkPsk(bool),  // true = включить PSK для генерируемых клиентов
+    BulkServer(i64),
     // --- Артефакты существующего клиента (повторная выдача) ---
     SendQr(String),
     SendLink(String),
@@ -180,6 +182,7 @@ pub enum Action {
     AdminExpiryAsk(String),
     SetClientEnabled(String, bool),
     PaymentInstructionsAsk,
+    AcquiringUrlAsk,
     CustomerKey(String),
     CustomerMove(String),
     CustomerMoveServer(String, i64),
@@ -226,6 +229,7 @@ fn parse_callback(data: &str) -> Action {
         "admin:finance" => Action::AdminFinance,
         "admin:support" => Action::AdminSupport,
         "admin:broadcast" => Action::AdminBroadcast,
+        "admin:broadcast:templates" => Action::AdminBroadcastTemplates,
         "admin:help" => Action::AdminHelp,
         "admin:search" => Action::AdminSearch,
         "admin:roles" => Action::AdminRoles,
@@ -256,6 +260,7 @@ fn parse_callback(data: &str) -> Action {
         "profile" => Action::Profile,
         "balance" => Action::Balance,
         "set:payment" => Action::PaymentInstructionsAsk,
+        "set:acquiring" => Action::AcquiringUrlAsk,
         "finance:export" => Action::FinanceExport,
         "admin:promos" => Action::AdminPromos,
         "admin:commerce" => Action::AdminCommerce,
@@ -638,6 +643,8 @@ fn parse_callback(data: &str) -> Action {
                 // ("bulkadd:..." also starts with "bulk", so "bulk:" would
                 // prefix-match it and misparse as AddBulkRun("add:psk:on")).
                 Action::AddBulkPsk(v == "on")
+            } else if let Some(v) = data.strip_prefix("bulkserver:") {
+                v.parse().map(Action::BulkServer).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("bulkexp:") {
                 // Must be checked before "bulk:" — same reason as delyes:/del:
                 // ("bulkexp:..." also starts with "bulk").
@@ -1395,8 +1402,8 @@ fn server_card_text(server: &crate::store::VpnServer, now: i64) -> String {
         .map(|v| (v - now).div_euclid(86_400))
         .map(|v| format!("{v} дн."))
         .unwrap_or_else(|| "—".into());
-    format!("🖥 {}\n\nУзел: {}\nСтатус: {}\nHostname: {}\nIP: {}\nХостер: {}\nЛокация: {}\nПротокол: {}\nВыдача новых ключей: {}\nЛимит ключей: {}\nОткрыт: {}\nДобавлен в бот: {}\nОплачен до: {}\nДо оплаты: {}\nСтоимость: {}\nПериод: {} мес.\nАвтопродление: {}",
-        server.name,if server.is_local{"локальный — здесь работают бот и VPN"}else{"удалённый"},server.status,server.hostname,server.public_ip,server.provider,server.location,server.protocol,if server.enabled_for_provisioning{"включена"}else{"выключена"},server.capacity,opened,crate::calendar::format_date(server.added_at),paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"})
+    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЛимит: {} ключей\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
+        server.name,server.status,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},if server.enabled_for_provisioning{"включена"}else{"выключена"},if server.protocol=="amneziawg-2"{"AWG 2.0"}else{"AWG 1.0"},server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
 async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
@@ -1408,7 +1415,9 @@ async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
                 || s.paid_until.is_some_and(|v| v <= now_epoch() + 7 * 86_400)
         })
         .count();
-    bot.send_message(chat,format!("🖥 Серверы\n\nВсего: {}\nТребуют внимания: {}\n\nЗдесь хранятся паспорта VPS, сроки оплаты и состояние инфраструктуры.",servers.len(),attention)).reply_markup(menu::servers_menu(&servers)).await?;
+    let local = servers.iter().filter(|s| s.is_local).count();
+    let online = servers.iter().filter(|s| s.status == "online").count();
+    bot.send_message(chat,format!("🖥 Серверы\n\n🟢 Онлайн: {online}/{}\n🏠 Локальных: {local}\n⚠️ Требуют внимания: {attention}\n\nВыберите конкретный сервер. В его карточке действия разделены на подключение, диагностику, ключи и обслуживание.",servers.len())).reply_markup(menu::servers_menu(&servers)).await?;
     Ok(())
 }
 
@@ -1700,6 +1709,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AddBulkRun(_)
         | BulkExpiry(_)
         | AddBulkPsk(_)
+        | BulkServer(_)
         | Lang(_)
         | SetListFilter(_)
         | Buy
@@ -1834,6 +1844,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminFinance
         | AdminSupport
         | AdminBroadcast
+        | AdminBroadcastTemplates
         | BroadcastAudience(_)
         | AdminHelp
         | AdminSearch
@@ -1861,7 +1872,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | LegacyRequestReject(_)
         | LegacyPriceAsk
         | ClientNoteAsk(_)
-        | PaymentInstructionsAsk => role.is_owner(),
+        | PaymentInstructionsAsk
+        | AcquiringUrlAsk => role.is_owner(),
     }
 }
 
@@ -2675,6 +2687,29 @@ async fn message_handler(
         } else {
             bot.send_message(msg.chat.id, "Введите текст длиной от 1 до 1000 символов.")
                 .await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingAcquiringUrl) {
+        let value = msg.text().unwrap_or_default().trim();
+        if value.eq_ignore_ascii_case("off") {
+            settings.set_acquiring_url_template(None);
+            bot.send_message(msg.chat.id, "✅ Онлайн-эквайринг отключён.")
+                .reply_markup(menu::admin_commerce_menu())
+                .await?;
+            dialogue.update(State::Idle).await?;
+        } else if reqwest::Url::parse(value).is_ok() && value.contains("{order_id}") {
+            settings.set_acquiring_url_template(Some(value));
+            bot.send_message(msg.chat.id, "✅ Шаблон платёжной ссылки сохранён.")
+                .reply_markup(menu::admin_commerce_menu())
+                .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Нужен полный HTTPS/HTTP URL с {order_id}. Для отключения отправьте off.",
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -3565,6 +3600,20 @@ async fn message_handler(
                             .map(|client| (client.name.clone(), client.address.clone()))
                             .collect::<Vec<_>>(),
                         now_epoch(),
+                    );
+                    settings.ingest_panel(
+                        server.id,
+                        now_epoch(),
+                        &clients
+                            .iter()
+                            .map(|client| crate::store::Sample {
+                                name: client.name.clone(),
+                                ip: client.address.clone(),
+                                rx: client.transfer_rx,
+                                tx: client.transfer_tx,
+                                last_handshake: client.last_handshake_epoch(),
+                            })
+                            .collect::<Vec<_>>(),
                     );
                     bot.send_message(msg.chat.id, format!("✅ Панель подключена. Найдено клиентов: {}; синхронизировано: {imported}.\n\n{}", clients.len(), if url.starts_with("http://") {"⚠️ Используется незашифрованный HTTP. Ограничьте порт панели по IP сервера бота."} else {"Соединение защищено HTTPS."}))
                         .reply_markup(menu::server_card_menu(server.id))
@@ -4479,6 +4528,7 @@ async fn finish_bulk(
     psk: bool,
     uid: i64,
     group: Option<i64>,
+    server: &crate::store::VpnServer,
 ) {
     let waiting = bot.send_message(chat, i18n::bulk_creating(lang)).await.ok();
 
@@ -4515,21 +4565,6 @@ async fn finish_bulk(
             }
         }
     }
-
-    let Some(server) = settings.default_vpn_server().and_then(|server_id| {
-        settings
-            .available_vpn_servers()
-            .into_iter()
-            .find(|server| server.id == server_id)
-    }) else {
-        if let Some(message) = waiting {
-            let _ = bot.delete_message(chat, message.id).await;
-        }
-        let _ = bot
-            .send_message(chat, "Основной AWG-сервер не настроен или недоступен.")
-            .await;
-        return;
-    };
 
     if !server.is_local {
         let mut created = 0usize;
@@ -5312,6 +5347,20 @@ async fn callback_handler(
                                 .collect::<Vec<_>>(),
                             now_epoch(),
                         );
+                        settings.ingest_panel(
+                            id,
+                            now_epoch(),
+                            &clients
+                                .iter()
+                                .map(|client| crate::store::Sample {
+                                    name: client.name.clone(),
+                                    ip: client.address.clone(),
+                                    rx: client.transfer_rx,
+                                    tx: client.transfer_tx,
+                                    last_handshake: client.last_handshake_epoch(),
+                                })
+                                .collect::<Vec<_>>(),
+                        );
                         for client in &clients {
                             let expiry = client
                                 .expired_at
@@ -5418,6 +5467,10 @@ async fn callback_handler(
             bot.send_message(chat, "Выберите получателей рассылки:")
                 .reply_markup(menu::broadcast_audience_menu())
                 .await?;
+        }
+        Action::AdminBroadcastTemplates => {
+            bot.send_message(chat, "📝 Шаблоны рассылок\n\nНажмите на текст сообщения, чтобы быстро выделить и скопировать. Перед отправкой замените значения в {фигурных скобках}.\n\n<pre>⚠️ Технические работы\n\n{дата} с {начало} до {конец} возможны перерывы подключения на сервере {страна}. После завершения ничего переустанавливать не нужно.</pre>\n\n<pre>🔑 Требуется замена ключа\n\nВаш старый ключ на сервере {страна} больше не работает. Откройте «Мои ключи», выберите его и нажмите «Заменить нерабочий ключ».</pre>\n\n<pre>✅ Новый сервер доступен\n\nДобавлена локация {страна} на AWG 1.0. Приобрести подключение можно в разделе «Купить ключ».</pre>\n\n<pre>💳 Напоминание об оплате\n\nСрок ключа {ключ} истекает {дата}. Продлить его можно из карточки ключа.</pre>")
+                .parse_mode(ParseMode::Html).reply_markup(menu::broadcast_templates_menu()).await?;
         }
         Action::BroadcastAudience(audience) => {
             let server_segment = audience
@@ -5909,7 +5962,10 @@ async fn callback_handler(
                     return Ok(());
                 }
                 bot.send_message(chat, "💳 Шаг 3 из 3 · Выберите способ оплаты:")
-                    .reply_markup(menu::buy_method_menu(months))
+                    .reply_markup(menu::buy_method_menu(
+                        months,
+                        settings.acquiring_url_template().is_some(),
+                    ))
                     .await?;
             }
         }
@@ -5948,18 +6004,55 @@ async fn callback_handler(
             }
             let discount = settings.purchase_discount(uid, now_epoch());
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
-            if method == "balance" {
-                let reference = format!("balance:{}:{}", uid, now_epoch());
+            if method == "acquiring" {
+                let Some(server_id) = settings.purchase_server(uid) else {
+                    return Ok(());
+                };
+                let Some(template) = settings.acquiring_url_template() else {
+                    bot.send_message(chat, "Онлайн-оплата пока не настроена.")
+                        .await?;
+                    return Ok(());
+                };
+                if let Some(id) = settings.create_payment_request_on_server(
+                    uid,
+                    months,
+                    amount,
+                    "acquiring",
+                    server_id,
+                    now_epoch(),
+                ) {
+                    let url = template
+                        .replace("{order_id}", &id.to_string())
+                        .replace("{amount}", &amount.to_string())
+                        .replace("{user_id}", &uid.to_string());
+                    bot.send_message(chat, format!("🏦 Онлайн-оплата · заказ #{id}\n\nК оплате: {:.2} ₽\n\nПерейдите по защищённой ссылке платёжного провайдера:\n{url}\n\nПосле подключения webhook подтверждение и выдача ключа будут выполняться автоматически; пока заказ подтверждается администратором.", amount as f64/100.0)).await?;
+                }
+            } else if method == "balance" {
+                let Some(server_id) = settings.purchase_server(uid).filter(|selected| {
+                    settings
+                        .available_vpn_servers()
+                        .iter()
+                        .any(|server| server.id == *selected)
+                }) else {
+                    bot.send_message(
+                        chat,
+                        "Выбранный сервер больше недоступен. Выберите рабочую локацию заново.",
+                    )
+                    .reply_markup(menu::buy_servers_menu(
+                        &settings.available_vpn_servers(),
+                        &settings,
+                    ))
+                    .await?;
+                    return Ok(());
+                };
+                let nonce: u64 = rand::random();
+                let reference = format!("balance:{uid}:{server_id}:{}:{nonce}", now_epoch());
                 if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
-                    bot.send_message(chat, "Недостаточно средств на внутреннем балансе.")
+                    bot.send_message(chat, format!("Недостаточно средств на внутреннем балансе. Доступно: {:.2} ₽, требуется: {:.2} ₽.", settings.balance_kopecks(uid) as f64 / 100.0, amount as f64 / 100.0))
                         .reply_markup(menu::customer_keyboard())
                         .await?;
                     return Ok(());
                 }
-                let Some(server_id) = settings.purchase_server(uid) else {
-                    bot.send_message(chat, "Сначала выберите локацию.").await?;
-                    return Ok(());
-                };
                 match provision_customer_key(&vpn, &settings, uid, months, server_id).await {
                     Ok(result) => {
                         if let Some(referrer) = settings.user(uid).and_then(|u| u.referrer_id) {
@@ -6672,6 +6765,10 @@ async fn callback_handler(
             )
             .await?;
             dialogue.update(State::AwaitingPaymentInstructions).await?;
+        }
+        Action::AcquiringUrlAsk => {
+            bot.send_message(chat, format!("🏦 Заготовка эквайринга\n\nУкажите URL платёжной страницы или шлюза. Доступные подстановки: {{order_id}}, {{amount}} (копейки), {{user_id}}. Обязательна {{order_id}}.\n\nПример:\nhttps://pay.example.ru/order/{{order_id}}?amount={{amount}}\n\nТекущее значение: {}\n\nДля отключения отправьте off. Для полноценного T-Банк API следующим этапом понадобятся TerminalKey, секрет и webhook.", settings.acquiring_url_template().unwrap_or_else(|| "не настроено".into()))).await?;
+            dialogue.update(State::AwaitingAcquiringUrl).await?;
         }
         Action::CustomerKey(name) => {
             if settings.client_owner(&name) != Some(uid) {
@@ -7690,6 +7787,53 @@ async fn callback_handler(
                     return Ok(());
                 }
             };
+            let servers = settings.available_vpn_servers();
+            if servers.is_empty() {
+                bot.send_message(chat, "Нет доступных AWG-серверов для создания ключей.")
+                    .await?;
+                dialogue.exit().await?;
+            } else {
+                bot.send_message(chat, "📍 Последний шаг · Выберите сервер для всей пачки:")
+                    .reply_markup(menu::bulk_servers_menu(&servers))
+                    .await?;
+                dialogue
+                    .update(State::AwaitingBulkServer {
+                        prefix,
+                        count,
+                        expires,
+                        psk,
+                    })
+                    .await?;
+            }
+        }
+        Action::BulkServer(server_id) => {
+            let State::AwaitingBulkServer {
+                prefix,
+                count,
+                expires,
+                psk,
+            } = dialogue.get().await?.unwrap_or_default()
+            else {
+                bot.send_message(chat, session_expired_text(lang)).await?;
+                return Ok(());
+            };
+            let Some(server) = settings
+                .available_vpn_servers()
+                .into_iter()
+                .find(|server| server.id == server_id)
+            else {
+                bot.send_message(chat, "Выбранный сервер недоступен или заполнен.")
+                    .await?;
+                return Ok(());
+            };
+            let group = match &role {
+                Role::GroupAdmin(groups) => current_ga_group(&settings, uid, groups),
+                Role::Owner => match settings.owner_scope(uid) {
+                    ListScope::Group(id) => Some(id),
+                    _ => None,
+                },
+                _ => None,
+            };
             finish_bulk(
                 &bot,
                 chat,
@@ -7701,15 +7845,8 @@ async fn callback_handler(
                 expires.as_deref(),
                 psk,
                 uid,
-                match &role {
-                    Role::GroupAdmin(groups) => current_ga_group(&settings, uid, groups),
-                    Role::Owner => match settings.owner_scope(uid) {
-                        ListScope::Group(id) => Some(id),
-                        _ => None,
-                    },
-                    Role::Denied => None,
-                    Role::Staff(_) => None,
-                },
+                group,
+                &server,
             )
             .await;
             dialogue.exit().await?;

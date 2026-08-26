@@ -58,6 +58,29 @@ impl TrafficSummary {
 }
 
 impl Store {
+    /// Записывает счётчики и handshake, полученные из конкретной удалённой панели.
+    pub fn ingest_panel(&self, server_id: i64, now: i64, samples: &[Sample]) {
+        for sample in samples {
+            if self
+                .client_vpn_server(&sample.name)
+                .is_some_and(|server| server.id == server_id)
+            {
+                self.ingest_one(now, sample);
+            }
+        }
+    }
+
+    fn ingest_one(&self, now: i64, smp: &Sample) {
+        let _ = self.with_conn(|c| {
+            let online = matches!(smp.last_handshake, Some(hs) if hs > 0 && now - hs < ONLINE_THRESHOLD_SECS);
+            let client_id: i64 = c.query_row("SELECT id FROM clients WHERE name=?1 AND removed_at IS NULL", [&smp.name], |r| r.get(0))?;
+            let prev: Option<(i64,i64,i64)> = c.query_row("SELECT rx,tx,online FROM traffic_samples WHERE client_id=?1 ORDER BY ts DESC LIMIT 1", [client_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            let (rx_delta,tx_delta)=prev.map_or((0,0), |(rx,tx,_)| ((smp.rx as i64-rx).max(0),(smp.tx as i64-tx).max(0)));
+            c.execute("INSERT INTO traffic_samples(client_id,ts,rx,tx,rx_delta,tx_delta,online) VALUES(?1,?2,?3,?4,?5,?6,?7)", rusqlite::params![client_id,now,smp.rx as i64,smp.tx as i64,rx_delta,tx_delta,online as i64])?;
+            Ok(())
+        });
+    }
+
     pub fn registered_clients(&self) -> Vec<crate::vpn::model::Client> {
         self.with_conn(|connection| {
             let mut statement = connection.prepare(

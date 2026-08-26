@@ -652,10 +652,19 @@ impl Vpn {
         std::fs::create_dir_all(&dir)?;
         let conf_path = dir.join(format!("{}.conf", client.name));
         std::fs::write(&conf_path, contents)?;
+        let qr_path = dir.join(format!("{}.png", client.name));
+        let qr = qrcode::QrCode::new(std::fs::read(&conf_path)?)
+            .map_err(|error| crate::error::Error::Parse(format!("QR-код: {error}")))?;
+        qr.render::<image::Luma<u8>>()
+            .min_dimensions(768, 768)
+            .quiet_zone(true)
+            .build()
+            .save(&qr_path)
+            .map_err(|error| crate::error::Error::Parse(format!("QR-код: {error}")))?;
         Ok(AddResult {
             name: client.name.clone(),
             conf_path: conf_path.to_string_lossy().into_owned(),
-            qr_path: String::new(),
+            qr_path: qr_path.to_string_lossy().into_owned(),
             uri: String::new(),
         })
     }

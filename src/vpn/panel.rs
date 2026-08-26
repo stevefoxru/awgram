@@ -19,6 +19,38 @@ pub struct PanelClient {
     pub enabled: bool,
     #[serde(default)]
     pub expired_at: Option<String>,
+    #[serde(default, alias = "transferRx", alias = "receivedBytes", alias = "rx")]
+    pub transfer_rx: u64,
+    #[serde(default, alias = "transferTx", alias = "sentBytes", alias = "tx")]
+    pub transfer_tx: u64,
+    #[serde(
+        default,
+        alias = "latestHandshakeAt",
+        alias = "lastHandshakeAt",
+        alias = "lastHandshake"
+    )]
+    pub latest_handshake_at: Option<serde_json::Value>,
+}
+
+impl PanelClient {
+    pub fn last_handshake_epoch(&self) -> Option<i64> {
+        let value = self.latest_handshake_at.as_ref()?;
+        if let Some(epoch) = value.as_i64() {
+            return Some(if epoch > 10_000_000_000 {
+                epoch / 1000
+            } else {
+                epoch
+            });
+        }
+        let raw = value.as_str()?;
+        raw.parse::<i64>().ok().map(|epoch| {
+            if epoch > 10_000_000_000 {
+                epoch / 1000
+            } else {
+                epoch
+            }
+        })
+    }
 }
 
 fn parse_base_url(value: &str) -> Result<reqwest::Url> {
@@ -165,30 +197,37 @@ pub async fn set_expiry(
     expire_date: &str,
 ) -> Result<()> {
     let (client, base) = session(base_url, password).await?;
-    let response = client
-        .put(api_url(
-            &base,
-            &format!("wireguard/client/{client_id}/expireDate/"),
-        )?)
-        .json(&serde_json::json!({"expireDate": expire_date}))
-        .send()
-        .await
-        .map_err(|error| Error::Parse(error.to_string()))?;
-    let status = response.status();
-    if status.is_success() {
-        Ok(())
-    } else {
-        let details = response.text().await.unwrap_or_default();
-        let details = details.chars().take(500).collect::<String>();
-        Err(Error::Parse(format!(
-            "срок клиента: HTTP {status}{}",
-            if details.is_empty() {
-                String::new()
-            } else {
-                format!(" — {details}")
+    let paths = [
+        format!("wireguard/client/{client_id}/expireDate"),
+        format!("wireguard/client/{client_id}/expireDate/"),
+    ];
+    let bodies = [
+        serde_json::json!({"expireDate": expire_date}),
+        serde_json::json!({"expiredDate": expire_date}),
+    ];
+    let mut last = String::new();
+    for path in paths {
+        for body in &bodies {
+            let response = client
+                .put(api_url(&base, &path)?)
+                .json(body)
+                .send()
+                .await
+                .map_err(|error| Error::Parse(error.to_string()))?;
+            if response.status().is_success() {
+                return Ok(());
             }
-        )))
+            let status = response.status();
+            let details = response.text().await.unwrap_or_default();
+            last = format!(
+                "HTTP {status} — {}",
+                details.chars().take(300).collect::<String>()
+            );
+        }
     }
+    Err(Error::Parse(format!(
+        "панель не приняла срок действия клиента ({last})"
+    )))
 }
 
 pub fn iso_date(epoch: i64) -> String {

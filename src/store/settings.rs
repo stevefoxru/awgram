@@ -113,6 +113,16 @@ impl Store {
     pub fn set_payment_instructions(&self, value: &str) {
         self.set_json("payment_instructions", &value.to_string());
     }
+    pub fn acquiring_url_template(&self) -> Option<String> {
+        self.get_json::<String>("acquiring_url_template")
+            .filter(|value| !value.trim().is_empty())
+    }
+    pub fn set_acquiring_url_template(&self, value: Option<&str>) {
+        self.set_json(
+            "acquiring_url_template",
+            &value.unwrap_or_default().trim().to_string(),
+        );
+    }
     pub fn runtime_version(&self) -> Option<String> {
         self.get_json("runtime_version")
     }

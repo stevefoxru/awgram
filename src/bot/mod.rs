@@ -53,6 +53,12 @@ pub enum State {
         count: usize,
         expires: Option<String>,
     },
+    AwaitingBulkServer {
+        prefix: String,
+        count: usize,
+        expires: Option<String>,
+        psk: bool,
+    },
     // --- группы (#20): диалоги владельца ---
     AwaitingGroupName,
     AwaitingGroupRename {
@@ -81,6 +87,7 @@ pub enum State {
     },
     AwaitingTopupAmount,
     AwaitingPaymentInstructions,
+    AwaitingAcquiringUrl,
     AwaitingTariffPricesRub,
     AwaitingTariffPricesStars,
     AwaitingReferralPercent,
