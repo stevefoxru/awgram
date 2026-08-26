@@ -945,10 +945,15 @@ async fn client_files(
 }
 
 async fn client_remove(vpn: &Vpn, settings: &Store, name: &str) -> crate::error::Result<()> {
-    match settings.client_vpn_server(name) {
+    let result = match settings.client_vpn_server(name) {
         Some(server) if !server.is_local => nonlocal_remove(vpn, settings, &server, name).await,
         _ => vpn.remove(name).await,
+    };
+    if result.is_ok() || matches!(&result, Err(crate::error::Error::ClientNotFound(_))) {
+        settings.retire_client(name, now_epoch());
+        return Ok(());
     }
+    result
 }
 
 async fn client_refresh(
@@ -974,6 +979,16 @@ async fn extend_managed_client(
         .unwrap_or(now)
         .max(now)
         .saturating_add(seconds);
+    set_managed_expiry(vpn, settings, name, target).await?;
+    Ok(target)
+}
+
+async fn set_managed_expiry(
+    vpn: &Vpn,
+    settings: &Store,
+    name: &str,
+    target: i64,
+) -> crate::error::Result<()> {
     match settings.client_vpn_server(name) {
         Some(server) if !server.is_local => {
             nonlocal_set_expiry(vpn, settings, &server, name, target).await?;
@@ -982,7 +997,7 @@ async fn extend_managed_client(
             vpn.set_client_expiry(name, Some(target)).await?;
         }
     }
-    Ok(target)
+    Ok(())
 }
 
 async fn resume_pending_replacement(
@@ -1188,7 +1203,7 @@ async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -
     let month = settings.finance_summary(now - 30 * 86_400);
     bot.send_message(chat,format!(
         "🏠 Админ-панель\n\n👤 Пользователей: {}\n🔑 Ключей на сервере: {}\n⏸ Отключено: {disabled}\n⏳ Истекают за 7 дней: {expiring}\n🆘 Активных обращений: {}\n💳 Заявок ожидает: {}\n💰 Выручка за 30 дней: {:.2} ₽\n\nВыберите раздел:",
-        settings.all_user_ids().len(),clients.len(),settings.open_support_count(),month.pending,month.revenue_kopecks as f64/100.0))
+        settings.all_user_ids().len(),settings.active_client_names().len(),settings.open_support_count(),month.pending,month.revenue_kopecks as f64/100.0))
         .reply_markup(menu::admin_dashboard_menu()).await?;
     Ok(())
 }
@@ -1972,7 +1987,7 @@ async fn message_handler(
             let seconds = tariff_duration(order.months)
                 .and_then(duration_seconds)
                 .unwrap_or_default();
-            vpn.extend_client(&name, seconds, now_epoch())
+            extend_managed_client(&vpn, &settings, &name, seconds, now_epoch())
                 .await
                 .map(|_| {
                     (
@@ -2669,13 +2684,19 @@ async fn message_handler(
         let raw = msg.text().unwrap_or_default().trim().to_ascii_lowercase();
         let result = if matches!(raw.as_str(), "none" | "без срока" | "бессрочно")
         {
-            vpn.set_client_expiry(&name, None).await.map(|_| None)
+            match settings.client_vpn_server(&name) {
+                Some(server) if !server.is_local => Err(crate::error::Error::Parse(
+                    "панель не поддерживает снятие срока через этот API; укажите новый срок".into(),
+                )),
+                _ => vpn.set_client_expiry(&name, None).await.map(|_| None),
+            }
         } else {
             match duration_seconds(&raw).filter(|v| *v <= 10 * 31_536_000) {
-                Some(seconds) => vpn
-                    .extend_client(&name, seconds, now_epoch())
-                    .await
-                    .map(Some),
+                Some(seconds) => {
+                    extend_managed_client(&vpn, &settings, &name, seconds, now_epoch())
+                        .await
+                        .map(Some)
+                }
                 None => Err(crate::error::Error::Parse(
                     "используйте 12h, 7d, 30d, 6m, 1y или none".into(),
                 )),
@@ -4365,16 +4386,10 @@ async fn finish_bulk(
     let waiting = bot.send_message(chat, i18n::bulk_creating(lang)).await.ok();
 
     // 1. Продолжаем нумерацию и заполняем свободные пропуски.
-    let existing = match vpn.list().await {
-        Ok(clients) => clients
-            .into_iter()
-            .map(|c| c.name)
-            .collect::<std::collections::HashSet<_>>(),
-        Err(e) => {
-            tracing::warn!(error = %e, "list для нумерации упал — используем пустой список");
-            std::collections::HashSet::new()
-        }
-    };
+    let existing = settings
+        .active_client_names()
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
     let names = match crate::vpn::validate::gen_available_names(prefix, count, &existing) {
         Ok(n) => n,
         Err(_) => {
@@ -4402,6 +4417,83 @@ async fn finish_bulk(
                 return;
             }
         }
+    }
+
+    let Some(server) = settings.default_vpn_server().and_then(|server_id| {
+        settings
+            .available_vpn_servers()
+            .into_iter()
+            .find(|server| server.id == server_id)
+    }) else {
+        if let Some(message) = waiting {
+            let _ = bot.delete_message(chat, message.id).await;
+        }
+        let _ = bot
+            .send_message(chat, "Основной AWG-сервер не настроен или недоступен.")
+            .await;
+        return;
+    };
+
+    if !server.is_local {
+        let mut created = 0usize;
+        let expiry = expires
+            .and_then(duration_seconds)
+            .map(|seconds| now_epoch() + seconds);
+        for name in &names {
+            let result = async {
+                let files = nonlocal_add(vpn, settings, &server, name).await?;
+                if let Some(expires_at) = expiry {
+                    if let Err(error) =
+                        nonlocal_set_expiry(vpn, settings, &server, name, expires_at).await
+                    {
+                        let _ = nonlocal_remove(vpn, settings, &server, name).await;
+                        return Err(error);
+                    }
+                }
+                settings.assign_client_group(name, group, now_epoch());
+                if !settings.assign_client_server(name, server.id, &server.protocol) {
+                    let _ = nonlocal_remove(vpn, settings, &server, name).await;
+                    return Err(crate::error::Error::Parse(
+                        "не удалось закрепить пакетный ключ за сервером".into(),
+                    ));
+                }
+                Ok::<_, crate::error::Error>(files)
+            }
+            .await;
+            match result {
+                Ok(files) => {
+                    created += 1;
+                    settings.log_event(
+                        now_epoch(),
+                        EventKind::ClientAdd,
+                        Some(name),
+                        Some(uid),
+                        Some("bulk_remote"),
+                    );
+                    if let Err(error) = render::send_client_files(bot, chat, lang, &files).await {
+                        tracing::error!(%error, client = %name, "не удалось отправить пакетный ключ");
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, client = %name, "не удалось создать пакетный ключ");
+                }
+            }
+        }
+        if let Some(message) = waiting {
+            let _ = bot.delete_message(chat, message.id).await;
+        }
+        let _ = bot
+            .send_message(
+                chat,
+                format!(
+                    "✅ На сервере «{}» создано {created}/{} ключей.",
+                    server.location,
+                    names.len()
+                ),
+            )
+            .reply_markup(menu::main_menu(lang))
+            .await;
+        return;
     }
 
     // 2. Превентивная проверка свободных адресов (capacity учитывает v4-подсеть).
@@ -4455,6 +4547,7 @@ async fn finish_bulk(
                 // owner-only и без группы, поэтому явно отвязываем строку,
                 // а не оставляем «воскресшую» привязку от прежнего клиента.
                 settings.assign_client_group(&r.name, group, now_epoch());
+                settings.assign_client_server(&r.name, server.id, &server.protocol);
             }
             // 4. Telegram принимает не больше 10 элементов в одном альбоме.
             if settings.deliver_conf() && !res.created.is_empty() {
@@ -5103,6 +5196,16 @@ async fn callback_handler(
                                 .collect::<Vec<_>>(),
                             now_epoch(),
                         );
+                        for client in &clients {
+                            let expiry = client
+                                .expired_at
+                                .as_deref()
+                                .and_then(|value| value.get(..10))
+                                .and_then(crate::calendar::parse_date);
+                            if let Err(error) = vpn.cache_client_expiry(&client.name, expiry) {
+                                tracing::warn!(%error, client = %client.name, "не удалось сохранить срок ключа панели");
+                            }
+                        }
                         bot.send_message(chat, format!("✅ Синхронизация завершена. В панели: {}; обновлено в боте: {synced}.\n\nНовые импортированные ключи не получают владельца автоматически — назначьте его в карточке ключа.", clients.len()))
                             .reply_markup(menu::server_card_menu(id))
                             .await?;
@@ -5537,10 +5640,7 @@ async fn callback_handler(
                     .join("\n")
             };
             bot.send_message(chat, format!("🔑 Ключи пользователя {user_id}\n\n{text}"))
-                .reply_markup(menu::admin_user_menu(
-                    user_id,
-                    settings.user_blocked(user_id),
-                ))
+                .reply_markup(menu::admin_user_keys_menu(user_id, &names))
                 .await?;
         }
         Action::AdminUserPayments(user_id) => {
@@ -5913,10 +6013,7 @@ async fn callback_handler(
             }
         }
         Action::LegacyRenew(name) => {
-            if settings.client_owner(&name) == Some(uid)
-                && settings.is_legacy_client(&name, uid)
-                && vpn.exists(&name).await.unwrap_or(false)
-            {
+            if settings.client_owner(&name) == Some(uid) && settings.is_legacy_client(&name, uid) {
                 let target =
                     crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
                 let price = settings
@@ -5925,10 +6022,7 @@ async fn callback_handler(
             }
         }
         Action::LegacyRenewMethod(name, method) => {
-            if settings.client_owner(&name) != Some(uid)
-                || !settings.is_legacy_client(&name, uid)
-                || !vpn.exists(&name).await.unwrap_or(false)
-            {
+            if settings.client_owner(&name) != Some(uid) || !settings.is_legacy_client(&name, uid) {
                 return Ok(());
             }
             let amount = settings
@@ -5943,9 +6037,13 @@ async fn callback_handler(
                         .await?;
                     return Ok(());
                 }
-                match vpn.set_client_expiry(&name, Some(target)).await {
+                match set_managed_expiry(&vpn, &settings, &name, target).await {
                     Ok(()) => {
-                        if vpn.client_disabled(&name) {
+                        if settings
+                            .client_vpn_server(&name)
+                            .is_some_and(|server| server.is_local)
+                            && vpn.client_disabled(&name)
+                        {
                             vpn.enable_client(&name).await?;
                         }
                         bot.send_message(
@@ -6151,9 +6249,13 @@ async fn callback_handler(
                         now_epoch(),
                         vpn.client_expiry(&name),
                     );
-                    match vpn.set_client_expiry(&name, Some(target)).await {
+                    match set_managed_expiry(&vpn, &settings, &name, target).await {
                         Ok(()) => {
-                            if vpn.client_disabled(&name) {
+                            if settings
+                                .client_vpn_server(&name)
+                                .is_some_and(|server| server.is_local)
+                                && vpn.client_disabled(&name)
+                            {
                                 vpn.enable_client(&name).await?;
                             }
                             if settings.decide_payment(
@@ -6308,7 +6410,7 @@ async fn callback_handler(
             dialogue.update(State::AwaitingClientOwner { name }).await?;
         }
         Action::AdminExpiryAsk(name) => {
-            if !vpn.exists(&name).await.unwrap_or(false) {
+            if settings.client_vpn_server(&name).is_none() {
                 bot.send_message(
                     chat,
                     "Ключ уже удалён или не существует. Его можно только создать заново.",

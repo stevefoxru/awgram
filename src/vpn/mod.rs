@@ -720,7 +720,9 @@ impl Vpn {
             .into_iter()
             .find(|client| client.name == name)
             .ok_or_else(|| crate::error::Error::ClientNotFound(name.into()))?;
-        panel::set_expiry(&url, &password, &client.id, &panel::iso_date(expires_at)).await
+        panel::set_expiry(&url, &password, &client.id, &panel::iso_date(expires_at)).await?;
+        self.cache_client_expiry(name, Some(expires_at))?;
+        Ok(())
     }
 
     fn spec(&self) -> RunSpec<'_> {
@@ -1057,6 +1059,20 @@ impl Vpn {
         let path = self.clients_dir.join("expiry").join(&name);
         let raw = std::fs::read_to_string(path).ok()?;
         raw.trim().parse::<i64>().ok()
+    }
+
+    pub fn cache_client_expiry(&self, name: &str, expires_at: Option<i64>) -> Result<()> {
+        let name = validate::validate_name(name)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?;
+        let directory = self.clients_dir.join("expiry");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(name);
+        if let Some(epoch) = expires_at {
+            std::fs::write(path, epoch.to_string())?;
+        } else if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
     }
 
     /// Атомарно меняет срок существующего клиента через root-helper,
@@ -1900,6 +1916,16 @@ exit 1
     fn client_expiry_none_when_file_missing() {
         let (_d, vpn) = vpn_with_script("#!/bin/sh\n");
         assert_eq!(vpn.client_expiry("bob"), None);
+    }
+
+    #[test]
+    fn cached_panel_expiry_is_visible_and_can_be_cleared() {
+        let (_dir, vpn) = vpn_with_script("#!/bin/sh\n");
+        vpn.cache_client_expiry("panel-key", Some(1_893_456_000))
+            .unwrap();
+        assert_eq!(vpn.client_expiry("panel-key"), Some(1_893_456_000));
+        vpn.cache_client_expiry("panel-key", None).unwrap();
+        assert_eq!(vpn.client_expiry("panel-key"), None);
     }
 
     #[test]

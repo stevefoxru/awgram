@@ -465,6 +465,26 @@ pub fn admin_user_menu(user_id: i64, blocked: bool) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn admin_user_keys_menu(user_id: i64, names: &[String]) -> InlineKeyboardMarkup {
+    let mut rows = names
+        .iter()
+        .flat_map(|name| {
+            vec![
+                vec![cb(&format!("🔑 {name}"), &format!("show:{name}"))],
+                vec![
+                    cb("👁 Открыть", &format!("show:{name}")),
+                    cb("🗑 Удалить", &format!("del:{name}")),
+                ],
+            ]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb(
+        "⬅️ Карточка пользователя",
+        &format!("admin:user:{user_id}"),
+    )]);
+    InlineKeyboardMarkup::new(rows)
+}
+
 pub fn buy_terms_menu(prices: [i64; 4]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
@@ -2239,6 +2259,14 @@ mod tests {
         ] {
             assert!(data.contains(&expected.to_string()), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn admin_user_keys_offer_open_delete_and_back() {
+        let data = all_callback_data(&admin_user_keys_menu(7, &["alice-phone".into()]));
+        assert!(data.contains(&"show:alice-phone".to_string()));
+        assert!(data.contains(&"del:alice-phone".to_string()));
+        assert!(data.contains(&"admin:user:7".to_string()));
     }
 
     #[test]
