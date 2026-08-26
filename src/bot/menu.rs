@@ -256,6 +256,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             "🎯 Новые ключи и замена",
             &format!("server:default:{id}"),
         )],
+        vec![cb(
+            "📣 Рассылка владельцам ключей",
+            &format!("broadcast:audience:server:{id}"),
+        )],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),

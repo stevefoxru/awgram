@@ -2221,6 +2221,16 @@ async fn message_handler(
                                 .is_some_and(|e| e > now && e - now <= 7 * 86_400)
                         }),
                         "nokeys" => keys.is_empty(),
+                        value if value.starts_with("server:") => value
+                            .strip_prefix("server:")
+                            .and_then(|value| value.parse::<i64>().ok())
+                            .is_some_and(|server_id| {
+                                keys.iter().any(|name| {
+                                    settings
+                                        .client_vpn_server(name)
+                                        .is_some_and(|server| server.id == server_id)
+                                })
+                            }),
                         _ => true,
                     }
                 })
@@ -5155,8 +5165,18 @@ async fn callback_handler(
                 .await?;
         }
         Action::BroadcastAudience(audience) => {
-            if matches!(audience.as_str(), "all" | "active" | "expiring" | "nokeys") {
-                bot.send_message(chat,format!("Сегмент: {audience}. Отправьте сообщение для предпросмотра; поддерживаются текст, фото и документы.")).await?;
+            let server_segment = audience
+                .strip_prefix("server:")
+                .and_then(|value| value.parse::<i64>().ok())
+                .and_then(|id| settings.vpn_server(id));
+            if matches!(audience.as_str(), "all" | "active" | "expiring" | "nokeys")
+                || server_segment.is_some()
+            {
+                let label = server_segment
+                    .as_ref()
+                    .map(|server| format!("владельцы ключей сервера «{}»", server.name))
+                    .unwrap_or_else(|| audience.clone());
+                bot.send_message(chat,format!("Сегмент: {label}.\n\nОтправьте сообщение для предпросмотра; поддерживаются текст, фото и документы.\n\nРекомендуемый текст:\n❌ Ваш старый VPN-ключ больше не работает. Откройте «🔑 Мои ключи», выберите подключение со статусом «требуется замена» и нажмите «🛟 Заменить нерабочий ключ». Новый ключ будет выдан автоматически.")).await?;
                 dialogue
                     .update(State::AwaitingBroadcast { audience })
                     .await?;
@@ -5250,25 +5270,79 @@ async fn callback_handler(
             else {
                 return Ok(());
             };
+            if !settings.claim_legacy_request(id, uid, now_epoch()) {
+                bot.send_message(chat, "Эта заявка уже обрабатывается или была завершена.")
+                    .await?;
+                return Ok(());
+            }
             let fallback = format!("legacy_{}", request.user_id);
             let base = crate::vpn::validate::normalize_name(&request.requested_name, None)
                 .unwrap_or(fallback);
-            let existing = vpn
-                .list()
-                .await
-                .unwrap_or_default()
+            let existing = settings
+                .active_client_names()
                 .into_iter()
-                .map(|c| c.name)
                 .collect::<std::collections::HashSet<_>>();
             let name = crate::vpn::validate::gen_available_names(&base, 1, &existing)
-                .map_err(|e| crate::error::Error::Parse(e.to_string()))?
+                .map_err(|e| {
+                    settings.release_legacy_request_claim(id);
+                    crate::error::Error::Parse(e.to_string())
+                })?
                 .remove(0);
-            match vpn.add(&name, None, settings.psk_default()).await {
+            let Some(server) = settings.default_vpn_server().and_then(|server_id| {
+                settings
+                    .available_vpn_servers()
+                    .into_iter()
+                    .find(|server| server.id == server_id)
+            }) else {
+                settings.release_legacy_request_claim(id);
+                bot.send_message(chat, "Сервер восстановления не настроен или недоступен. Откройте карточку рабочего AWG-сервера и нажмите «🎯 Новые ключи и замена».")
+                    .reply_markup(menu::admin_dashboard_menu())
+                    .await?;
+                return Ok(());
+            };
+            let created = if server.is_local {
+                vpn.add(&name, None, settings.psk_default()).await
+            } else {
+                nonlocal_add(&vpn, &settings, &server, &name).await
+            };
+            match created {
                 Ok(result) => {
-                    vpn.set_client_expiry(&name, Some(crate::calendar::LEGACY_RESTORE_DEADLINE))
-                        .await?;
+                    let expiry_result = if server.is_local {
+                        vpn.set_client_expiry(&name, Some(crate::calendar::LEGACY_RESTORE_DEADLINE))
+                            .await
+                    } else {
+                        nonlocal_set_expiry(
+                            &vpn,
+                            &settings,
+                            &server,
+                            &name,
+                            crate::calendar::LEGACY_RESTORE_DEADLINE,
+                        )
+                        .await
+                    };
+                    if let Err(error) = expiry_result {
+                        if server.is_local {
+                            let _ = vpn.remove(&name).await;
+                        } else {
+                            let _ = nonlocal_remove(&vpn, &settings, &server, &name).await;
+                        }
+                        settings.release_legacy_request_claim(id);
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                        return Ok(());
+                    }
                     settings.assign_client_group(&name, None, now_epoch());
                     settings.assign_client_owner(&name, Some(request.user_id));
+                    if !settings.assign_client_server(&name, server.id, &server.protocol) {
+                        if server.is_local {
+                            let _ = vpn.remove(&name).await;
+                        } else {
+                            let _ = nonlocal_remove(&vpn, &settings, &server, &name).await;
+                        }
+                        settings.release_legacy_request_claim(id);
+                        bot.send_message(chat, "Не удалось закрепить восстановленный ключ за сервером. Созданный ключ удалён.").await?;
+                        return Ok(());
+                    }
                     settings.mark_legacy_subscription(&name, request.user_id, now_epoch());
                     if settings.decide_legacy_request(id, uid, Some(&name), None, now_epoch()) {
                         let user = settings.user(request.user_id);
@@ -5295,6 +5369,7 @@ async fn callback_handler(
                     }
                 }
                 Err(error) => {
+                    settings.release_legacy_request_claim(id);
                     bot.send_message(chat, i18n::error_text(lang, &error))
                         .await?;
                 }

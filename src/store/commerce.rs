@@ -405,6 +405,27 @@ impl Store {
         self.with_conn(|c|c.query_row("SELECT id,user_id,requested_name,comment,status,created_at,client_name FROM legacy_requests WHERE id=?1",[id],legacy_request_from_row).optional()).ok().flatten()
     }
 
+    pub fn claim_legacy_request(&self, id: i64, admin_id: i64, now: i64) -> bool {
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE legacy_requests SET status='processing',decided_by=?2,decided_at=?3
+                 WHERE id=?1 AND status='pending'",
+                rusqlite::params![id, admin_id, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn release_legacy_request_claim(&self, id: i64) {
+        let _ = self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE legacy_requests SET status='pending',decided_by=NULL,decided_at=NULL
+                 WHERE id=?1 AND status='processing'",
+                [id],
+            )
+        });
+    }
+
     pub fn decide_legacy_request(
         &self,
         id: i64,
@@ -418,7 +439,7 @@ impl Store {
         } else {
             "rejected"
         };
-        self.with_conn(|c|c.execute("UPDATE legacy_requests SET status=?2,decided_at=?3,decided_by=?4,client_name=?5,reject_reason=?6 WHERE id=?1 AND status='pending'",rusqlite::params![id,status,now,admin_id,client_name,reason])).map(|n|n==1).unwrap_or(false)
+        self.with_conn(|c|c.execute("UPDATE legacy_requests SET status=?2,decided_at=?3,decided_by=?4,client_name=?5,reject_reason=?6 WHERE id=?1 AND status IN ('pending','processing')",rusqlite::params![id,status,now,admin_id,client_name,reason])).map(|n|n==1).unwrap_or(false)
     }
 
     pub fn mark_legacy_subscription(&self, name: &str, user_id: i64, now: i64) -> bool {
@@ -1427,6 +1448,8 @@ mod tests {
         let second = s.create_legacy_request(7, "laptop", None, 23).unwrap();
         assert_ne!(first, second);
         assert_eq!(s.legacy_requests("pending", 10).len(), 2);
+        assert!(s.claim_legacy_request(first, 1, 24));
+        assert!(!s.claim_legacy_request(first, 1, 24));
         assert!(s.decide_legacy_request(first, 1, Some("phone_01"), None, 24));
         assert_eq!(s.legacy_request(first).unwrap().status, "approved");
         assert_eq!(s.activate_promo(8, "RESTORE2026", 22), None);
