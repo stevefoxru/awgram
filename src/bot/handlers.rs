@@ -4573,18 +4573,18 @@ async fn finish_bulk(
             .map(|seconds| now_epoch() + seconds);
         for name in &names {
             let result = async {
-                let files = nonlocal_add(vpn, settings, &server, name).await?;
+                let files = nonlocal_add(vpn, settings, server, name).await?;
                 if let Some(expires_at) = expiry {
                     if let Err(error) =
-                        nonlocal_set_expiry(vpn, settings, &server, name, expires_at).await
+                        nonlocal_set_expiry(vpn, settings, server, name, expires_at).await
                     {
-                        let _ = nonlocal_remove(vpn, settings, &server, name).await;
+                        let _ = nonlocal_remove(vpn, settings, server, name).await;
                         return Err(error);
                     }
                 }
                 settings.assign_client_group(name, group, now_epoch());
                 if !settings.assign_client_server(name, server.id, &server.protocol) {
-                    let _ = nonlocal_remove(vpn, settings, &server, name).await;
+                    let _ = nonlocal_remove(vpn, settings, server, name).await;
                     return Err(crate::error::Error::Parse(
                         "не удалось закрепить пакетный ключ за сервером".into(),
                     ));
