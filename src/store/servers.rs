@@ -566,6 +566,16 @@ impl Store {
         .is_ok_and(|changed| changed == 1)
     }
 
+    pub fn revive_client(&self, name: &str) -> bool {
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE clients SET removed_at=NULL WHERE name=?1 AND removed_at IS NOT NULL",
+                [name],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
     pub fn mark_server_billing_notification(
         &self,
         id: i64,
@@ -711,6 +721,11 @@ mod tests {
             .active_client_names()
             .contains(&"broken-key".to_string()));
         assert!(!store.retire_client("broken-key", 201));
+        assert!(store.revive_client("broken-key"));
+        assert!(store
+            .active_client_names()
+            .contains(&"broken-key".to_string()));
+        assert!(!store.revive_client("broken-key"));
     }
 
     #[test]

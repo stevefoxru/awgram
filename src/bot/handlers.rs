@@ -962,6 +962,29 @@ async fn client_refresh(
     }
 }
 
+async fn extend_managed_client(
+    vpn: &Vpn,
+    settings: &Store,
+    name: &str,
+    seconds: i64,
+    now: i64,
+) -> crate::error::Result<i64> {
+    let target = vpn
+        .client_expiry(name)
+        .unwrap_or(now)
+        .max(now)
+        .saturating_add(seconds);
+    match settings.client_vpn_server(name) {
+        Some(server) if !server.is_local => {
+            nonlocal_set_expiry(vpn, settings, &server, name, target).await?;
+        }
+        _ => {
+            vpn.set_client_expiry(name, Some(target)).await?;
+        }
+    }
+    Ok(target)
+}
+
 async fn provision_customer_key(
     vpn: &Vpn,
     settings: &Store,
@@ -1037,15 +1060,28 @@ async fn customer_dashboard(
     let me = bot.get_me().await?;
     let username = me.username.clone().unwrap_or_default();
     let now = now_epoch();
-    let keys = settings
-        .user_client_names(uid)
+    let names = settings.user_client_names(uid);
+    let working = names
         .iter()
-        .filter(|name| vpn.client_expiry(name).is_none_or(|expiry| expiry > now))
+        .filter(|name| {
+            settings
+                .client_vpn_server(name)
+                .is_some_and(|server| server.status == "online")
+                && vpn.client_expiry(name).is_none_or(|expiry| expiry > now)
+        })
+        .count();
+    let broken = names
+        .iter()
+        .filter(|name| {
+            settings
+                .client_vpn_server(name)
+                .is_none_or(|server| server.status != "online")
+        })
         .count();
     bot.send_message(
         chat,
         format!(
-            "🏠 Личный кабинет\n\nTelegram ID: {uid}\n💰 Баланс: {:.2} ₽\n🔑 Активных ключей: {keys}\n👥 Приглашено друзей: {}\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
+            "🏠 Личный кабинет\n\n✅ Рабочих подключений: {working}\n❌ Требуют замены: {broken}\n💰 Баланс: {:.2} ₽\n👥 Приглашено друзей: {}\n\nЧтобы подключиться или заменить старый ключ, откройте «🔑 Мои ключи».\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
             settings.balance_kopecks(uid) as f64 / 100.0,
             settings.referral_count(uid),
         ),
@@ -2422,7 +2458,10 @@ async fn message_handler(
         return Ok(());
     }
     if let State::AwaitingPaymentProof { id } = state.clone() {
-        let proof = msg.text().unwrap_or("Подтверждение отправлено");
+        let proof = msg
+            .text()
+            .or_else(|| msg.caption())
+            .unwrap_or("Чек приложен сообщением");
         if settings.set_payment_proof(id, uid, proof) {
             if let Some(req) = settings.payment_request(id) {
                 let user = settings.user(uid);
@@ -2445,11 +2484,24 @@ async fn message_handler(
                         .reply_markup(menu::payment_admin_menu(id))
                         .parse_mode(ParseMode::Html)
                         .await;
+                    // Текст, фото или документ с чеком должны дойти до
+                    // администратора в исходном виде, а не превращаться в
+                    // безликую строку «подтверждение отправлено».
+                    let _ = bot
+                        .forward_message(ChatId(*owner), msg.chat.id, msg.id)
+                        .await;
                 }
             }
-            bot.send_message(msg.chat.id, "✅ Заявка отправлена администратору.")
+            bot.send_message(msg.chat.id, format!("✅ Чек по заявке #{id} отправлен администратору.\n\nПосле проверки бот автоматически пришлёт рабочий ключ."))
                 .reply_markup(menu::customer_keyboard())
                 .await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Заявка уже обработана либо принадлежит другому пользователю.",
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
         }
         dialogue.update(State::Idle).await?;
         return Ok(());
@@ -3515,14 +3567,17 @@ async fn message_handler(
                 customer_dashboard(&bot, msg.chat.id, uid, &vpn, &settings).await?;
             }
             "➕ Купить ключ" => {
-                bot.send_message(msg.chat.id, "Выберите срок подписки:")
-                    .reply_markup(menu::buy_terms_menu([
-                        settings.tariff_price_kopecks(1).unwrap_or(0),
-                        settings.tariff_price_kopecks(3).unwrap_or(0),
-                        settings.tariff_price_kopecks(6).unwrap_or(0),
-                        settings.tariff_price_kopecks(12).unwrap_or(0),
-                    ]))
-                    .await?;
+                let servers = settings.available_vpn_servers();
+                bot.send_message(
+                    msg.chat.id,
+                    if servers.is_empty() {
+                        "Сейчас нет доступных серверов для выдачи ключа."
+                    } else {
+                        "🌍 Шаг 1 из 3 · Выберите сервер подключения:"
+                    },
+                )
+                .reply_markup(menu::buy_servers_menu(&servers, &settings))
+                .await?;
             }
             "🔑 Мои ключи" => {
                 let (lines, buttons) = customer_key_list(&settings, &vpn, uid);
@@ -5504,7 +5559,7 @@ async fn callback_handler(
                 .into_iter()
                 .any(|server| server.id == server_id);
             if available && settings.set_purchase_server(uid, server_id, now_epoch()) {
-                bot.send_message(chat, "Выберите срок подписки:")
+                bot.send_message(chat, "📅 Шаг 2 из 3 · Выберите срок подписки:")
                     .reply_markup(menu::buy_terms_menu([
                         settings.tariff_price_kopecks(1).unwrap_or(0),
                         settings.tariff_price_kopecks(3).unwrap_or(0),
@@ -5519,7 +5574,14 @@ async fn callback_handler(
         }
         Action::BuyTerm(months) => {
             if tariff_duration(months).is_some() {
-                bot.send_message(chat, "Выберите способ оплаты:")
+                if settings.purchase_server(uid).is_none() {
+                    let servers = settings.available_vpn_servers();
+                    bot.send_message(chat, "Сначала выберите сервер подключения:")
+                        .reply_markup(menu::buy_servers_menu(&servers, &settings))
+                        .await?;
+                    return Ok(());
+                }
+                bot.send_message(chat, "💳 Шаг 3 из 3 · Выберите способ оплаты:")
                     .reply_markup(menu::buy_method_menu(months))
                     .await?;
             }
@@ -5619,7 +5681,15 @@ async fn callback_handler(
                     }
                 }
             } else if method == "manual" {
-                if let Some(id) = settings.purchase_server(uid).and_then(|server_id| {
+                let server_id = settings.purchase_server(uid).or_else(|| {
+                    settings.default_vpn_server().filter(|id| {
+                        settings
+                            .available_vpn_servers()
+                            .iter()
+                            .any(|server| server.id == *id)
+                    })
+                });
+                if let Some(id) = server_id.and_then(|server_id| {
                     settings.create_payment_request_on_server(
                         uid,
                         months,
@@ -5629,14 +5699,27 @@ async fn callback_handler(
                         now_epoch(),
                     )
                 }) {
+                    let location = settings
+                        .purchase_server(uid)
+                        .and_then(|server_id| settings.vpn_server(server_id))
+                        .map(|server| server.location)
+                        .unwrap_or_else(|| "основной сервер".into());
                     let text = format!(
-                        "Заявка #{id}\nТариф: {months} мес.\nСумма: {} ₽\n\n{}",
-                        amount / 100,
+                        "💳 Оплата переводом · заявка #{id}\n\n📍 Сервер: {location}\n📅 Тариф: {months} мес.\n💰 К оплате: {:.2} ₽\n\n{}\n\nПосле перевода нажмите «✅ Я оплатил» и пришлите чек, номер операции или комментарий.",
+                        amount as f64 / 100.0,
                         settings.payment_instructions()
                     );
                     bot.send_message(chat, text)
                         .reply_markup(menu::payment_paid_menu(id))
                         .await?;
+                } else {
+                    let servers = settings.available_vpn_servers();
+                    bot.send_message(
+                        chat,
+                        "Не удалось создать заявку: сначала выберите рабочий сервер подключения.",
+                    )
+                    .reply_markup(menu::buy_servers_menu(&servers, &settings))
+                    .await?;
                 }
             }
         }
@@ -5800,9 +5883,7 @@ async fn callback_handler(
             }
         }
         Action::RenewMethod(name, months, method) => {
-            if settings.client_owner(&name) != Some(uid)
-                || !vpn.exists(&name).await.unwrap_or(false)
-            {
+            if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
             }
             let (Some(base_amount), Some(expiry)) = (
@@ -5846,7 +5927,7 @@ async fn callback_handler(
                         .await?;
                     return Ok(());
                 }
-                match vpn.extend_client(&name, seconds, now_epoch()).await {
+                match extend_managed_client(&vpn, &settings, &name, seconds, now_epoch()).await {
                     Ok(epoch) => {
                         bot.send_message(
                             chat,
@@ -5990,7 +6071,7 @@ async fn callback_handler(
                 let seconds = tariff_duration(req.months)
                     .and_then(duration_seconds)
                     .unwrap_or(0);
-                match vpn.extend_client(&name, seconds, now_epoch()).await {
+                match extend_managed_client(&vpn, &settings, &name, seconds, now_epoch()).await {
                     Ok(epoch) => {
                         if settings.decide_payment(
                             id,
@@ -6429,6 +6510,20 @@ async fn callback_handler(
                     .await?;
                 return Ok(());
             };
+            if !settings.retire_client(&name, now_epoch()) {
+                settings.decide_key_replacement(replacement_id, uid, "cancelled", now_epoch());
+                if server.is_local {
+                    let _ = vpn.remove(&new_name).await;
+                } else {
+                    let _ = nonlocal_remove(&vpn, &settings, &server, &new_name).await;
+                }
+                bot.send_message(
+                    chat,
+                    "Не удалось скрыть старый ключ. Новый ключ удалён, повторите замену позже.",
+                )
+                .await?;
+                return Ok(());
+            }
             settings.log_event(
                 now_epoch(),
                 EventKind::Regen,
@@ -6436,7 +6531,7 @@ async fn callback_handler(
                 Some(uid),
                 Some(&format!("replaced={name} server={server_id}")),
             );
-            bot.send_message(chat, format!("✅ Новый ключ «{new_name}» готов: {} ({}).\n\nДобавьте его в приложение и проверьте подключение. Старый ключ «{name}» пока продолжает работать.", server.location, server.protocol))
+            bot.send_message(chat, format!("✅ Новый ключ «{new_name}» готов: {} ({}).\n\nСтарый нерабочий ключ «{name}» уже скрыт из списка. Добавьте новый ключ в приложение и проверьте подключение.", server.location, server.protocol))
                 .reply_markup(menu::replacement_confirm_menu(replacement_id)).await?;
             render::send_client_files(&bot, chat, lang, &replacement).await?;
         }
@@ -6455,13 +6550,8 @@ async fn callback_handler(
                 // stale database record; there is no useful remote deletion
                 // to wait for, and the old tunnel cannot authenticate on the
                 // newly selected server anyway.
-                if settings.retire_client(&old, now_epoch()) {
-                    Ok(())
-                } else {
-                    Err(crate::error::Error::Parse(
-                        "не удалось архивировать старый ключ".into(),
-                    ))
-                }
+                settings.retire_client(&old, now_epoch());
+                Ok(())
             } else {
                 match source {
                     Some(server) if !server.is_local => {
@@ -6511,6 +6601,8 @@ async fn callback_handler(
                     let _ = vpn.remove(&new).await;
                 }
             }
+            settings.retire_client(&new, now_epoch());
+            settings.revive_client(&old);
             bot.send_message(
                 chat,
                 format!("❌ Замена отменена. Старый ключ «{old}» сохранён и продолжает работать."),
