@@ -9503,6 +9503,7 @@ mod tests {
             (Action::AddBulkRun(3), true, true),
             (Action::BulkExpiry("1d".into()), true, true),
             (Action::AddBulkPsk(true), true, true),
+            (Action::BulkServer(1), true, true),
             (Action::Settings, true, false),
             (Action::SetLang("en".into()), true, false),
             (Action::SetPsk(true), true, false),
@@ -9634,6 +9635,7 @@ mod tests {
             (Action::AdminFinance, true, false),
             (Action::AdminSupport, true, false),
             (Action::AdminBroadcast, true, false),
+            (Action::AdminBroadcastTemplates, true, false),
             (Action::BroadcastAudience("all".into()), true, false),
             (Action::AdminHelp, true, false),
             (Action::AdminSearch, true, false),
@@ -9657,6 +9659,7 @@ mod tests {
             (Action::LegacyRequestApprove(1), true, false),
             (Action::LegacyRequestReject(1), true, false),
             (Action::LegacyPriceAsk, true, false),
+            (Action::AcquiringUrlAsk, true, false),
         ];
 
         // Ассерт полноты: на каждый вариант Action (образцы из
