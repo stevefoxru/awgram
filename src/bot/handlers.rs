@@ -5611,7 +5611,19 @@ async fn callback_handler(
             let created = if server.is_local {
                 vpn.add(&name, None, settings.psk_default()).await
             } else {
-                nonlocal_add(&vpn, &settings, &server, &name).await
+                match nonlocal_add(&vpn, &settings, &server, &name).await {
+                    Ok(result) => Ok(result),
+                    Err(create_error) if server.protocol == "amneziawg-panel" => {
+                        match nonlocal_files(&vpn, &settings, &server, &name).await {
+                            Ok(result) => {
+                                tracing::warn!(client = %name, %create_error, "восстановление подхватило ранее созданный ключ панели");
+                                Ok(result)
+                            }
+                            Err(_) => Err(create_error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
             };
             match created {
                 Ok(result) => {
@@ -5635,8 +5647,15 @@ async fn callback_handler(
                             let _ = nonlocal_remove(&vpn, &settings, &server, &name).await;
                         }
                         settings.release_legacy_request_claim(id);
-                        bot.send_message(chat, i18n::error_text(lang, &error))
-                            .await?;
+                        tracing::error!(request_id = id, client = %name, %error, "срок восстановленного ключа не установлен");
+                        bot.send_message(
+                            chat,
+                            format!(
+                                "{}\n\nДиагностика для администратора: {error}",
+                                i18n::error_text(lang, &error)
+                            ),
+                        )
+                        .await?;
                         return Ok(());
                     }
                     settings.assign_client_group(&name, None, now_epoch());
@@ -5678,8 +5697,15 @@ async fn callback_handler(
                 }
                 Err(error) => {
                     settings.release_legacy_request_claim(id);
-                    bot.send_message(chat, i18n::error_text(lang, &error))
-                        .await?;
+                    tracing::error!(request_id = id, client = %name, %error, "восстановление legacy-ключа не выполнено");
+                    bot.send_message(
+                        chat,
+                        format!(
+                            "{}\n\nДиагностика для администратора: {error}",
+                            i18n::error_text(lang, &error)
+                        ),
+                    )
+                    .await?;
                 }
             }
         }

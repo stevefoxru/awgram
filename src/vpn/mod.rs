@@ -648,23 +648,45 @@ impl Vpn {
     ) -> Result<AddResult> {
         let (url, password) = self.panel_auth(server, encrypted_password)?;
         let contents = panel::configuration(&url, &password, &client.id).await?;
-        let dir = self.clients_dir.join("panel").join(server.id.to_string());
-        std::fs::create_dir_all(&dir)?;
-        let conf_path = dir.join(format!("{}.conf", client.name));
-        std::fs::write(&conf_path, contents)?;
-        let qr_path = dir.join(format!("{}.png", client.name));
-        let qr = qrcode::QrCode::new(std::fs::read(&conf_path)?)
-            .map_err(|error| crate::error::Error::Parse(format!("QR-код: {error}")))?;
-        qr.render::<image::Luma<u8>>()
-            .min_dimensions(768, 768)
-            .quiet_zone(true)
-            .build()
-            .save(&qr_path)
-            .map_err(|error| crate::error::Error::Parse(format!("QR-код: {error}")))?;
+        let preferred = self.clients_dir.join("panel").join(server.id.to_string());
+        let fallback = std::env::temp_dir()
+            .join("awgram-panel")
+            .join(server.id.to_string());
+        let dir = match std::fs::create_dir_all(&preferred) {
+            Ok(()) => preferred,
+            Err(error) => {
+                tracing::warn!(%error, path = %preferred.display(), "каталог панели недоступен, используется временный");
+                std::fs::create_dir_all(&fallback)?;
+                fallback.clone()
+            }
+        };
+        let mut conf_path = dir.join(format!("{}.conf", client.name));
+        if let Err(error) = std::fs::write(&conf_path, &contents) {
+            tracing::warn!(%error, path = %conf_path.display(), "конфигурация панели не записалась, используется временный каталог");
+            std::fs::create_dir_all(&fallback)?;
+            conf_path = fallback.join(format!("{}.conf", client.name));
+            std::fs::write(&conf_path, &contents)?;
+        }
+        let qr_path = conf_path.with_extension("png");
+        let qr_saved = qrcode::QrCode::new(&contents).is_ok_and(|qr| {
+            qr.render::<image::Luma<u8>>()
+                .min_dimensions(768, 768)
+                .quiet_zone(true)
+                .build()
+                .save(&qr_path)
+                .is_ok()
+        });
+        if !qr_saved {
+            tracing::warn!(client = %client.name, "QR панели не создан, конфигурация всё равно будет выдана");
+        }
         Ok(AddResult {
             name: client.name.clone(),
             conf_path: conf_path.to_string_lossy().into_owned(),
-            qr_path: qr_path.to_string_lossy().into_owned(),
+            qr_path: if qr_saved {
+                qr_path.to_string_lossy().into_owned()
+            } else {
+                String::new()
+            },
             uri: String::new(),
         })
     }
