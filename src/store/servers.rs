@@ -501,7 +501,9 @@ impl Store {
     }
 
     pub fn available_vpn_servers(&self) -> Vec<VpnServer> {
-        self.vpn_servers()
+        let preferred = self.default_vpn_server();
+        let mut servers = self
+            .vpn_servers()
             .into_iter()
             .filter(|server| {
                 server.enabled_for_provisioning
@@ -509,7 +511,11 @@ impl Store {
                     && server.status != "offline"
                     && self.server_client_count(server.id) < server.capacity
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // The recovery/default server is always offered first in every key
+        // creation flow, while preserving the configured order of the rest.
+        servers.sort_by_key(|server| (Some(server.id) != preferred, server.id));
+        servers
     }
 
     pub fn assign_client_server(&self, name: &str, server_id: i64, protocol: &str) -> bool {
@@ -640,6 +646,44 @@ mod tests {
         assert!(store.vpn_server(id).is_some());
         assert_eq!(store.remove_empty_local_vpn_servers(), 1);
         assert!(store.vpn_server(id).is_none());
+    }
+
+    #[test]
+    fn preferred_server_is_first_in_provisioning_lists() {
+        let store = Store::open_in_memory();
+        let add = |name: &str, ip: &str, now: i64| {
+            store
+                .add_vpn_server(
+                    &NewVpnServer {
+                        name,
+                        hostname: name,
+                        public_ip: ip,
+                        provider: "Hoster",
+                        location: name,
+                        protocol: "amneziawg-panel",
+                        opened_at: None,
+                        is_local: false,
+                    },
+                    1,
+                    now,
+                )
+                .unwrap()
+        };
+        let first = add("first", "192.0.2.1", 100);
+        let preferred = add("preferred", "192.0.2.2", 101);
+        for id in [first, preferred] {
+            assert!(store.set_server_status(id, "online", 102));
+            assert!(store.set_server_provisioning(id, true, 102));
+        }
+        store.set_default_vpn_server(preferred);
+        assert_eq!(
+            store
+                .available_vpn_servers()
+                .into_iter()
+                .map(|server| server.id)
+                .collect::<Vec<_>>(),
+            vec![preferred, first]
+        );
     }
 
     #[test]

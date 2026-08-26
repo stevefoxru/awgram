@@ -1264,7 +1264,17 @@ async fn maybe_issue_trial(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store,
         return;
     };
     let result = async {
-        let existing = vpn.list().await?.into_iter().map(|c| c.name).collect();
+        let server_id = settings.default_vpn_server().ok_or_else(|| {
+            crate::error::Error::Parse("основной сервер выдачи не настроен".into())
+        })?;
+        let server = settings
+            .available_vpn_servers()
+            .into_iter()
+            .find(|server| server.id == server_id)
+            .ok_or_else(|| {
+                crate::error::Error::Parse("основной сервер выдачи недоступен".into())
+            })?;
+        let existing = settings.active_client_names().into_iter().collect();
         let name = crate::vpn::validate::gen_available_names(
             &format!("{}_trial", customer_base_name(&user)),
             1,
@@ -1272,9 +1282,30 @@ async fn maybe_issue_trial(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store,
         )
         .map_err(|e| crate::error::Error::Parse(e.to_string()))?
         .remove(0);
-        let result = vpn.add(&name, Some("1d"), settings.psk_default()).await?;
+        let result = if server.is_local {
+            vpn.add(&name, Some("1d"), settings.psk_default()).await?
+        } else {
+            let result = nonlocal_add(vpn, settings, &server, &name).await?;
+            if let Err(error) =
+                nonlocal_set_expiry(vpn, settings, &server, &name, claimed_at + 86_400).await
+            {
+                let _ = nonlocal_remove(vpn, settings, &server, &name).await;
+                return Err(error);
+            }
+            result
+        };
         settings.assign_client_group(&name, None, claimed_at);
         settings.assign_client_owner(&name, Some(uid));
+        if !settings.assign_client_server(&name, server.id, &server.protocol) {
+            if server.is_local {
+                let _ = vpn.remove(&name).await;
+            } else {
+                let _ = nonlocal_remove(vpn, settings, &server, &name).await;
+            }
+            return Err(crate::error::Error::Parse(
+                "не удалось закрепить пробный ключ за сервером".into(),
+            ));
+        }
         Ok::<_, crate::error::Error>(result)
     }
     .await;
@@ -4805,7 +4836,7 @@ async fn callback_handler(
                 .is_some_and(|server| server.status == "online" && server.enabled_for_provisioning);
             if ready {
                 settings.set_default_vpn_server(id);
-                bot.send_message(chat, "✅ Сервер назначен основным для новых ключей.")
+                bot.send_message(chat, "✅ Сервер назначен источником новых ключей и безопасной замены нерабочих ключей.\n\nПробные ключи теперь также будут выпускаться на нём. При замене старый ключ удаляется только после подтверждения пользователя.")
                     .reply_markup(menu::server_card_menu(id))
                     .await?;
             } else {
@@ -6236,8 +6267,23 @@ async fn callback_handler(
             if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
             }
-            let servers = settings.available_vpn_servers();
-            bot.send_message(chat, "🔄 Замена ключа и локации\n\nСначала будет создан новый ключ. Старый удалится только после успешного выпуска нового. Выберите доступную локацию:")
+            let servers = settings
+                .default_vpn_server()
+                .and_then(|id| {
+                    settings
+                        .available_vpn_servers()
+                        .into_iter()
+                        .find(|server| server.id == id)
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            if servers.is_empty() {
+                bot.send_message(chat, "Сервер замены сейчас недоступен. Администратору нужно открыть карточку рабочего AWG-сервера и нажать «🎯 Новые ключи и замена».")
+                    .reply_markup(menu::customer_key_menu(&name))
+                    .await?;
+                return Ok(());
+            }
+            bot.send_message(chat, "🛟 Безопасная замена ключа\n\nНовый ключ будет создан на рабочем сервере. Установите и проверьте его: старый ключ удалится только после вашего подтверждения. Если новый ключ не заработает, нажмите кнопку отката.")
                 .reply_markup(menu::customer_move_servers_menu(&name, &servers, &settings))
                 .await?;
         }

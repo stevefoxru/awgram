@@ -249,7 +249,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             "🔀 Перевести AWG 2.0 → 1.0",
             &format!("server:migrate:{id}"),
         )],
-        vec![cb("⭐ Сделать основным", &format!("server:default:{id}"))],
+        vec![cb(
+            "🎯 Новые ключи и замена",
+            &format!("server:default:{id}"),
+        )],
         vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),
@@ -643,7 +646,7 @@ pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
             cb("✏️ Устройство", &format!("device:label:{name}")),
         ],
         vec![cb(
-            "🔄 Сменить ключ и локацию",
+            "🛟 Заменить нерабочий ключ",
             &format!("move:choose:{name}"),
         )],
         vec![cb("⬅️ Мои ключи", "mykeys")],
@@ -2212,6 +2215,7 @@ mod tests {
             "server:diagnose:42",
             "server:panel:42",
             "server:panel:sync:42",
+            "server:default:42",
         ] {
             assert!(data.contains(&expected.to_string()), "missing {expected}");
         }
