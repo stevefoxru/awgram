@@ -9141,6 +9141,7 @@ mod tests {
             AdminFinance,
             AdminSupport,
             AdminBroadcast,
+            AdminBroadcastTemplates,
             BroadcastAudience("all".into()),
             AdminHelp,
             AdminSearch,
@@ -9208,6 +9209,8 @@ mod tests {
             AddBulkRun(1),
             BulkExpiry("none".into()),
             AddBulkPsk(false),
+            BulkServer(1),
+            AcquiringUrlAsk,
             SendQr("s".into()),
             SendLink("s".into()),
             SendAll("s".into()),
@@ -9287,6 +9290,7 @@ mod tests {
                 AdminFinance => {}
                 AdminSupport => {}
                 AdminBroadcast => {}
+                AdminBroadcastTemplates => {}
                 BroadcastAudience(_) => {}
                 AdminHelp => {}
                 AdminSearch => {}
@@ -9359,6 +9363,7 @@ mod tests {
                 AddBulkRun(_) => {}
                 BulkExpiry(_) => {}
                 AddBulkPsk(_) => {}
+                BulkServer(_) => {}
                 SendQr(_) => {}
                 SendLink(_) => {}
                 SendAll(_) => {}
@@ -9402,6 +9407,7 @@ mod tests {
                 AdminExpiryAsk(_) => {}
                 SetClientEnabled(_, _) => {}
                 PaymentInstructionsAsk => {}
+                AcquiringUrlAsk => {}
                 CustomerKey(_) => {}
                 CustomerMove(_) => {}
                 CustomerMoveServer(_, _) => {}
