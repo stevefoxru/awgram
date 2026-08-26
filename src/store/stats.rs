@@ -58,6 +58,38 @@ impl TrafficSummary {
 }
 
 impl Store {
+    pub fn registered_clients(&self) -> Vec<crate::vpn::model::Client> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT c.name,c.ip,COALESCE(s.status,'unknown'),
+                    COALESCE((SELECT t.rx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY t.ts DESC LIMIT 1),0),
+                    COALESCE((SELECT t.tx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY t.ts DESC LIMIT 1),0),
+                    (SELECT t.ts FROM traffic_samples t WHERE t.client_id=c.id AND t.online=1 ORDER BY t.ts DESC LIMIT 1)
+                 FROM clients c LEFT JOIN vpn_servers s ON s.id=c.server_id
+                 WHERE c.removed_at IS NULL ORDER BY c.name",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let server_status: String = row.get(2)?;
+                Ok(crate::vpn::model::Client {
+                    name: row.get(0)?,
+                    ip: row.get(1)?,
+                    client_ipv6: String::new(),
+                    status: server_status.clone(),
+                    status_code: if server_status == "offline" {
+                        "key_error".into()
+                    } else {
+                        "no_data".into()
+                    },
+                    rx: row.get::<_, i64>(3)?.max(0) as u64,
+                    tx: row.get::<_, i64>(4)?.max(0) as u64,
+                    last_handshake: row.get(5)?,
+                })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
     pub fn ingest(&self, now: i64, samples: &[Sample]) {
         let res = self.with_conn(|c| {
             let tx_guard = c.unchecked_transaction()?;
@@ -114,6 +146,7 @@ impl Store {
                 let placeholders = vec!["?"; names.len()].join(",");
                 let sql = format!(
                     "UPDATE clients SET removed_at=?1 WHERE removed_at IS NULL
+                     AND (server_id IS NULL OR server_id IN (SELECT id FROM vpn_servers WHERE is_local=1))
                      AND name NOT IN ({placeholders})"
                 );
                 let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now];
@@ -122,7 +155,8 @@ impl Store {
             } else {
                 // Когда нет сэмплов, все существующие клиенты считаются удалёнными
                 c.execute(
-                    "UPDATE clients SET removed_at=?1 WHERE removed_at IS NULL",
+                    "UPDATE clients SET removed_at=?1 WHERE removed_at IS NULL
+                     AND (server_id IS NULL OR server_id IN (SELECT id FROM vpn_servers WHERE is_local=1))",
                     [&now],
                 )?;
             }
@@ -484,6 +518,34 @@ mod tests {
             })
             .unwrap();
         assert_eq!(removed, Some(1060));
+    }
+
+    #[test]
+    fn local_collector_never_removes_remote_panel_clients() {
+        let store = Store::open_in_memory();
+        let server_id = store
+            .add_vpn_server(
+                &crate::store::NewVpnServer {
+                    name: "Panel",
+                    hostname: "panel.example",
+                    public_ip: "192.0.2.10",
+                    provider: "Hoster",
+                    location: "Netherlands",
+                    protocol: "amneziawg-panel",
+                    opened_at: None,
+                    is_local: false,
+                },
+                1,
+                900,
+            )
+            .unwrap();
+        store.ingest(1_000, &[s("remote-key", 10, 20, None)]);
+        assert!(store.assign_client_server("remote-key", server_id, "amneziawg-panel"));
+        store.ingest(1_060, &[]);
+        assert!(store
+            .active_client_names()
+            .contains(&"remote-key".to_string()));
+        assert_eq!(store.registered_clients()[0].name, "remote-key");
     }
 
     #[test]

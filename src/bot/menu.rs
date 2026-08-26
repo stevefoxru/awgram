@@ -167,7 +167,7 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
 
 pub fn bot_update_confirm_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("✅ Запустить обновление", "admin:update:run")],
+        vec![cb("⬆️ Установить обновление", "admin:update:run")],
         vec![cb("❌ Отмена", "admin:system")],
     ])
 }
@@ -503,17 +503,18 @@ pub fn buy_terms_menu(prices: [i64; 4]) -> InlineKeyboardMarkup {
 
 pub fn buy_servers_menu(
     servers: &[crate::store::VpnServer],
-    store: &crate::store::Store,
+    _store: &crate::store::Store,
 ) -> InlineKeyboardMarkup {
     let mut rows = servers
         .iter()
         .map(|server| {
-            let used = store.server_client_count(server.id);
+            let protocol = if server.protocol == "amneziawg-2" {
+                "AWG 2.0 · тестовый"
+            } else {
+                "AWG 1.0 · стабильно"
+            };
             vec![cb(
-                &format!(
-                    "📍 {} · {} ({}/{})",
-                    server.location, server.protocol, used, server.capacity
-                ),
+                &format!("📍 {} · {protocol}", server.location),
                 &format!("buy:server:{}", server.id),
             )]
         })

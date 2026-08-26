@@ -945,7 +945,15 @@ async fn client_files(
 }
 
 async fn client_remove(vpn: &Vpn, settings: &Store, name: &str) -> crate::error::Result<()> {
-    let result = match settings.client_vpn_server(name) {
+    let source = settings.client_vpn_server(name);
+    if source
+        .as_ref()
+        .is_none_or(|server| server.status != "online")
+    {
+        settings.retire_client(name, now_epoch());
+        return Ok(());
+    }
+    let result = match source {
         Some(server) if !server.is_local => nonlocal_remove(vpn, settings, &server, name).await,
         _ => vpn.remove(name).await,
     };
@@ -965,6 +973,24 @@ async fn client_refresh(
         Some(server) if !server.is_local => nonlocal_refresh(vpn, settings, &server, name).await,
         _ => vpn.regen_client(name).await,
     }
+}
+
+async fn managed_clients(
+    vpn: &Vpn,
+    settings: &Store,
+) -> crate::error::Result<Vec<crate::vpn::model::Client>> {
+    let mut clients = settings.registered_clients();
+    if let Ok(local) = vpn.list_enriched().await {
+        for client in local {
+            if let Some(existing) = clients.iter_mut().find(|item| item.name == client.name) {
+                *existing = client;
+            } else {
+                clients.push(client);
+            }
+        }
+    }
+    clients.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(clients)
 }
 
 async fn extend_managed_client(
@@ -1110,6 +1136,10 @@ async fn customer_dashboard(
 ) -> HandlerResult {
     let me = bot.get_me().await?;
     let username = me.username.clone().unwrap_or_default();
+    let display_name = settings
+        .user(uid)
+        .map(|user| user.display_name)
+        .unwrap_or_else(|| "пользователь".into());
     let now = now_epoch();
     let names = settings.user_client_names(uid);
     let working = names
@@ -1129,10 +1159,17 @@ async fn customer_dashboard(
                 .is_none_or(|server| server.status != "online")
         })
         .count();
+    let expiring = names
+        .iter()
+        .filter(|name| {
+            vpn.client_expiry(name)
+                .is_some_and(|expiry| expiry > now && expiry <= now + 7 * 86_400)
+        })
+        .count();
     bot.send_message(
         chat,
         format!(
-            "🏠 Личный кабинет\n\n✅ Рабочих подключений: {working}\n❌ Требуют замены: {broken}\n💰 Баланс: {:.2} ₽\n👥 Приглашено друзей: {}\n\nЧтобы подключиться или заменить старый ключ, откройте «🔑 Мои ключи».\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
+            "🏠 Личный кабинет\nЗдравствуйте, {display_name}!\n\n🔐 Подключения\n✅ Работают: {working}\n❌ Требуют замены: {broken}\n⏳ Истекают за 7 дней: {expiring}\n\n💰 Баланс: {:.2} ₽\n👥 Приглашено друзей: {}\n\nБыстрый старт:\n• «🔑 Мои ключи» — подключение и замена\n• «➕ Купить ключ» — новое устройство\n• «🆘 Поддержка» — помощь с подключением\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
             settings.balance_kopecks(uid) as f64 / 100.0,
             settings.referral_count(uid),
         ),
@@ -1201,9 +1238,15 @@ async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -
         })
         .count();
     let month = settings.finance_summary(now - 30 * 86_400);
+    let servers = settings.vpn_servers();
+    let online_servers = servers
+        .iter()
+        .filter(|server| server.status == "online")
+        .count();
+    let total_keys = settings.active_client_names().len();
     bot.send_message(chat,format!(
-        "🏠 Админ-панель\n\n👤 Пользователей: {}\n🔑 Ключей на сервере: {}\n⏸ Отключено: {disabled}\n⏳ Истекают за 7 дней: {expiring}\n🆘 Активных обращений: {}\n💳 Заявок ожидает: {}\n💰 Выручка за 30 дней: {:.2} ₽\n\nВыберите раздел:",
-        settings.all_user_ids().len(),settings.active_client_names().len(),settings.open_support_count(),month.pending,month.revenue_kopecks as f64/100.0))
+        "🏠 Панель управления ZuevVPN\n\n🖥 Инфраструктура\nСерверы: {online_servers}/{} онлайн\nКлючи: {total_keys} активных\n\n👥 Клиенты\nПользователей: {}\nОтключено: {disabled}\nИстекают за 7 дней: {expiring}\n\n💼 Работа\nПлатежей ожидает: {}\nОбращений открыто: {}\nВыручка за 30 дней: {:.2} ₽\n\n⚙️ Версия бота: v{}\n\nВыберите раздел:",
+        servers.len(),settings.all_user_ids().len(),month.pending,settings.open_support_count(),month.revenue_kopecks as f64/100.0,env!("CARGO_PKG_VERSION")))
         .reply_markup(menu::admin_dashboard_menu()).await?;
     Ok(())
 }
@@ -1472,6 +1515,37 @@ fn truncate_for_message(body: String) -> String {
         cut -= 1;
     }
     format!("{}\n…", &body[..cut])
+}
+
+async fn latest_release_info() -> Option<(String, String, String)> {
+    let response = reqwest::Client::builder()
+        .user_agent("awgram-update-check")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?
+        .get("https://api.github.com/repos/stevefoxru/awgram/releases/latest")
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?;
+    let tag = response.get("tag_name")?.as_str()?.to_string();
+    let body = response
+        .get("body")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Список изменений не опубликован.")
+        .chars()
+        .take(1800)
+        .collect::<String>();
+    let url = response
+        .get("html_url")
+        .and_then(|value| value.as_str())
+        .unwrap_or("https://github.com/stevefoxru/awgram/releases/latest")
+        .to_string();
+    Some((tag, body, url))
 }
 
 /// Локальный текст сессии-таймаута: не входит в каталог `i18n` (см. brief
@@ -2886,13 +2960,19 @@ async fn message_handler(
             dialogue.update(State::Idle).await?;
             return Ok(());
         }
-        let value = msg
-            .text()
+        let raw = msg.text().unwrap_or_default().trim();
+        let mut parts = raw.splitn(2, char::is_whitespace);
+        let value = parts
+            .next()
             .unwrap_or_default()
-            .trim()
             .replace(',', ".")
             .parse::<f64>()
             .ok();
+        let reason = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Корректировка администратором");
         let kopecks = value
             .map(|v| (v * 100.0).round() as i64)
             .filter(|v| *v != 0);
@@ -2902,7 +2982,7 @@ async fn message_handler(
                 amount,
                 "admin_adjustment",
                 &format!("admin:{uid}:{user_id}:{}", now_epoch()),
-                Some("Ручная корректировка администратором"),
+                Some(reason),
                 now_epoch(),
             )
         });
@@ -2920,6 +3000,23 @@ async fn message_handler(
         ))
         .await?;
         if changed {
+            let amount = kopecks.unwrap_or_default();
+            let operation = if amount > 0 {
+                "пополнен"
+            } else {
+                "уменьшен"
+            };
+            let _ = bot
+                .send_message(
+                    ChatId(user_id),
+                    format!(
+                        "💰 Ваш баланс {operation} на {:.2} ₽.\nПричина: {reason}\nТекущий баланс: {:.2} ₽.",
+                        amount.unsigned_abs() as f64 / 100.0,
+                        settings.balance_kopecks(user_id) as f64 / 100.0
+                    ),
+                )
+                .reply_markup(menu::customer_keyboard())
+                .await;
             dialogue.update(State::Idle).await?;
         }
         return Ok(());
@@ -4621,7 +4718,7 @@ async fn render_clients_list(
     // + last_handshake/rx/tx из stats (метка времени для кнопки). Чистый stats
     // (#27) терял жёлтый статус никогда не подключавшихся клиентов (inactive 🔴
     // вместо no_handshake 🟡) — см. vpn::Vpn::list_enriched.
-    match vpn.list_enriched().await {
+    match managed_clients(vpn, settings).await {
         Ok(all_clients) => {
             // Фильтр + сортировка «онлайн вперёд» (🟢 → 🔴 → 🟡, внутри — по имени).
             // apply_filter_and_sort возвращает owned Vec — clients_list берёт срез по странице.
@@ -4720,6 +4817,8 @@ async fn callback_handler(
             | Action::CustomerKey(_)
             | Action::CustomerMove(_)
             | Action::CustomerMoveServer(_, _)
+            | Action::CustomerMoveConfirm(_)
+            | Action::CustomerMoveCancel(_)
             | Action::CustomerRefresh(_)
             | Action::CustomerRefreshRun(_)
             | Action::Renew(_)
@@ -4729,6 +4828,7 @@ async fn callback_handler(
             | Action::LegacyRenewMethod(_, _)
             | Action::LegacyRequestNew
             | Action::PromoInput
+            | Action::Guide(_)
             | Action::AutoRenew(_, _, _)
             | Action::DeviceLabelAsk(_)
             | Action::SupportNewCategory(_)
@@ -4795,15 +4895,31 @@ async fn callback_handler(
             .await?;
         }
         Action::AdminSystem => {
+            let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+            let release = latest_release_info().await;
+            let update_line = match &release {
+                Some((latest, _, _)) if latest == &current => {
+                    format!("✅ Установлена актуальная версия {current}")
+                }
+                Some((latest, _, _)) => {
+                    format!("⬆️ Доступно обновление: {current} → {latest}")
+                }
+                None => format!("Текущая версия: {current}\nНе удалось проверить GitHub."),
+            };
             bot.send_message(
                 chat,
-                "⚙️ Система\n\nНастройки, резервные копии, VPN-служба и справка.",
+                format!("⚙️ Система\n\n{update_line}\n\nНастройки, резервные копии, VPN-служба и журнал обновлений."),
             )
             .reply_markup(menu::admin_system_hub())
             .await?;
         }
         Action::AdminUpdate => {
-            bot.send_message(chat, "⬆️ Обновление бота\n\nБудет установлен последний стабильный релиз GitHub. Служба автоматически перезапустится; VPN-соединения и ключи не затрагиваются.")
+            let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+            let details = match latest_release_info().await {
+                Some((latest, body, url)) => format!("Текущая версия: {current}\nДоступная версия: {latest}\n\nИзменения:\n{body}\n\n{url}"),
+                None => format!("Текущая версия: {current}\n\nНе удалось получить описание релиза, но можно установить последний стабильный выпуск."),
+            };
+            bot.send_message(chat, format!("⬆️ Обновление бота\n\n{details}\n\nУстановить обновление? Служба автоматически перезапустится; VPN-соединения и ключи не затрагиваются."))
                 .reply_markup(menu::bot_update_confirm_menu())
                 .await?;
         }
@@ -5672,7 +5788,7 @@ async fn callback_handler(
         Action::AdminUserBalance(user_id) => {
             bot.send_message(
                 chat,
-                "Введите изменение баланса в рублях. Пополнение: 500; списание: -200.",
+                "Введите сумму и причину.\nПополнение: 500 Бонус за перенос\nСписание: -200 Возврат ошибочного начисления",
             )
             .await?;
             dialogue
@@ -7018,7 +7134,7 @@ async fn callback_handler(
                     return Ok(());
                 }
             };
-            match vpn.list_enriched().await {
+            match managed_clients(&vpn, &settings).await {
                 Ok(mut clients) => {
                     clients.retain(|c| scope.admits(settings.client_group(&c.name)));
                     let now = now_epoch();
@@ -7063,7 +7179,7 @@ async fn callback_handler(
                 }
             }
         }
-        Action::ShowClient(name) => match vpn.list_enriched().await {
+        Action::ShowClient(name) => match managed_clients(&vpn, &settings).await {
             Ok(clients) => match clients.iter().find(|c| c.name == name) {
                 Some(c) => {
                     let now = now_epoch();
