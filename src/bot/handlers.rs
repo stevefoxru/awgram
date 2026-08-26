@@ -113,6 +113,7 @@ pub enum Action {
     SetPsk(bool),
     SetSlug(bool),
     AddPsk(bool),
+    AddServer(i64),
     Backup,
     BackupNew,
     BackupList,
@@ -495,6 +496,8 @@ fn parse_callback(data: &str) -> Action {
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:") {
                 v.parse().map(Action::ServerCard).unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("add:server:") {
+                v.parse().map(Action::AddServer).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("renew:method:") {
                 let parts: Vec<_> = v.rsplitn(3, ':').collect();
                 match (
@@ -997,6 +1000,13 @@ async fn provision_customer_key(
         if let Err(error) =
             nonlocal_set_expiry(vpn, settings, &server, &name, now_epoch() + seconds).await
         {
+            tracing::error!(
+                server_id = server.id,
+                protocol = %server.protocol,
+                client = %name,
+                error = %error,
+                "remote client expiry failed; rolling back newly created key"
+            );
             let _ = nonlocal_remove(vpn, settings, &server, &name).await;
             return Err(error);
         }
@@ -1449,6 +1459,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | Page(_)
         | Expiry(_)
         | AddPsk(_)
+        | AddServer(_)
         | AddBulk
         | AddBulkRun(_)
         | BulkExpiry(_)
@@ -3946,6 +3957,7 @@ async fn finish_add(
     uid: i64,
     group: Option<i64>,
     role: &Role,
+    server: &crate::store::VpnServer,
 ) {
     let home = home_menu(role, lang);
     let waiting = bot.send_message(chat, i18n::creating(lang)).await.ok();
@@ -3973,7 +3985,7 @@ async fn finish_add(
     if recreate {
         // Удаляем старого клиента перед созданием нового. Если remove упадёт —
         // не создаём нового, показываем ошибку; старый клиент остаётся.
-        if let Err(e) = vpn.remove(name).await {
+        if let Err(e) = client_remove(vpn, settings, name).await {
             tracing::error!(error = %e, "remove перед recreate провалился");
             if let Some(m) = waiting {
                 let _ = bot.delete_message(chat, m.id).await;
@@ -3982,7 +3994,34 @@ async fn finish_add(
             return;
         }
     }
-    match vpn.add(name, expires, psk).await {
+    let creation = if server.is_local {
+        vpn.add(name, expires, psk).await
+    } else {
+        match nonlocal_add(vpn, settings, server, name).await {
+            Ok(result) => {
+                if let Some(duration) = expires {
+                    let expiry_result = duration_seconds(duration)
+                        .ok_or_else(|| crate::error::Error::Parse("неверный срок ключа".into()));
+                    let with_expiry = match expiry_result {
+                        Ok(seconds) => {
+                            nonlocal_set_expiry(vpn, settings, server, name, now_epoch() + seconds)
+                                .await
+                                .map(|_| result)
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if with_expiry.is_err() {
+                        let _ = nonlocal_remove(vpn, settings, server, name).await;
+                    }
+                    with_expiry
+                } else {
+                    Ok(result)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    };
+    match creation {
         Ok(res) => {
             settings.log_event(
                 now_epoch(),
@@ -4011,6 +4050,21 @@ async fn finish_add(
                     crate::store::QuotaAssign::Assigned
                 }
             };
+            if !settings.assign_client_server(name, server.id, &server.protocol) {
+                let _ = if server.is_local {
+                    vpn.remove(name).await
+                } else {
+                    nonlocal_remove(vpn, settings, server, name).await
+                };
+                if let Some(m) = waiting {
+                    let _ = bot.delete_message(chat, m.id).await;
+                }
+                let error = crate::error::Error::Parse(
+                    "не удалось закрепить ключ за выбранным сервером".into(),
+                );
+                let _ = bot.send_message(chat, i18n::error_text(lang, &error)).await;
+                return;
+            }
             if add_needs_quota_rollback(recreate, &outcome) {
                 // Компенсация: клиент создан, но в группу не влез — удаляем
                 // его и показываем «квота исчерпана». Артефакты не выдаём:
@@ -4018,7 +4072,7 @@ async fn finish_add(
                 // попадают ОБА события (add выше уже залогирован) — она
                 // отражает то, что реально произошло.
                 let gid = group.expect("rollback только при Some(group)");
-                if let Err(e) = vpn.remove(name).await {
+                if let Err(e) = client_remove(vpn, settings, name).await {
                     // Откат не удался: клиент существует, но без группы —
                     // виден только владельцу, чинится вручную. Пользователю —
                     // честная ошибка.
@@ -6872,6 +6926,77 @@ async fn callback_handler(
                     return Ok(());
                 }
             };
+            if recreate {
+                let Some(server) = settings.client_vpn_server(&name) else {
+                    bot.send_message(chat, "Не удалось определить сервер существующего ключа.")
+                        .reply_markup(home_menu(&role, lang))
+                        .await?;
+                    dialogue.exit().await?;
+                    return Ok(());
+                };
+                finish_add(
+                    &bot,
+                    chat,
+                    &vpn,
+                    &settings,
+                    lang,
+                    &name,
+                    expires.as_deref(),
+                    psk,
+                    true,
+                    uid,
+                    group,
+                    &role,
+                    &server,
+                )
+                .await;
+                dialogue.exit().await?;
+            } else {
+                let servers = settings.available_vpn_servers();
+                if servers.is_empty() {
+                    bot.send_message(chat, "Нет подключённых AWG-серверов, доступных для создания ключа. Проверьте панель и включите выдачу в карточке сервера.")
+                        .reply_markup(home_menu(&role, lang))
+                        .await?;
+                    dialogue.exit().await?;
+                    return Ok(());
+                }
+                bot.send_message(chat, "🌍 Выберите сервер, на котором нужно создать ключ:")
+                    .reply_markup(menu::add_server_menu(&servers))
+                    .await?;
+                dialogue
+                    .update(State::AwaitingAddServer {
+                        name,
+                        expires,
+                        psk,
+                        group,
+                    })
+                    .await?;
+            }
+        }
+        Action::AddServer(server_id) => {
+            let State::AwaitingAddServer {
+                name,
+                expires,
+                psk,
+                group,
+            } = dialogue.get().await?.unwrap_or_default()
+            else {
+                bot.send_message(chat, session_expired_text(lang))
+                    .reply_markup(home_menu(&role, lang))
+                    .await?;
+                return Ok(());
+            };
+            let Some(server) = settings
+                .available_vpn_servers()
+                .into_iter()
+                .find(|server| server.id == server_id)
+            else {
+                bot.send_message(chat, "Сервер больше не доступен для создания ключей.")
+                    .reply_markup(home_menu(&role, lang))
+                    .await?;
+                dialogue.exit().await?;
+                return Ok(());
+            };
             finish_add(
                 &bot,
                 chat,
@@ -6881,10 +7006,11 @@ async fn callback_handler(
                 &name,
                 expires.as_deref(),
                 psk,
-                recreate,
+                false,
                 uid,
                 group,
                 &role,
+                &server,
             )
             .await;
             dialogue.exit().await?;
@@ -7861,6 +7987,7 @@ mod tests {
         assert_eq!(parse_callback("set:slug:off"), Action::SetSlug(false));
         assert_eq!(parse_callback("add:psk:on"), Action::AddPsk(true));
         assert_eq!(parse_callback("add:psk:off"), Action::AddPsk(false));
+        assert_eq!(parse_callback("add:server:42"), Action::AddServer(42));
         assert_eq!(parse_callback("backup"), Action::Backup);
         assert_eq!(parse_callback("bk:new"), Action::BackupNew);
         assert_eq!(parse_callback("bk:list"), Action::BackupList);
@@ -8348,6 +8475,7 @@ mod tests {
             SetPsk(false),
             SetSlug(false),
             AddPsk(false),
+            AddServer(1),
             Backup,
             BackupNew,
             BackupList,
@@ -8498,6 +8626,7 @@ mod tests {
                 SetPsk(_) => {}
                 SetSlug(_) => {}
                 AddPsk(_) => {}
+                AddServer(_) => {}
                 Backup => {}
                 BackupNew => {}
                 BackupList => {}
@@ -8613,6 +8742,7 @@ mod tests {
             (Action::Page(0), true, true),
             (Action::Expiry("1d".into()), true, true),
             (Action::AddPsk(true), true, true),
+            (Action::AddServer(1), true, true),
             (Action::Lang("ru".into()), true, true),
             (
                 Action::SetListFilter(crate::vpn::model::ClientFilter::All),

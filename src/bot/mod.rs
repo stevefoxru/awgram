@@ -22,6 +22,12 @@ pub enum State {
         expires: Option<String>,
         recreate: bool,
     },
+    AwaitingAddServer {
+        name: String,
+        expires: Option<String>,
+        psk: bool,
+        group: Option<i64>,
+    },
     AwaitingModifyParam {
         name: String,
     },

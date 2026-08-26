@@ -1121,6 +1121,20 @@ pub fn psk_step(lang: Lang, default_on: bool) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn add_server_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup {
+    let mut rows = servers
+        .iter()
+        .map(|server| {
+            vec![cb(
+                &format!("🌍 {} · {}", server.name, server.location),
+                &format!("add:server:{}", server.id),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("❌ Отмена", "menu")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
 /// Шаг выбора PSK в bulk-диалоге — как `psk_step`, но с `bulkadd:psk:` callback'ами
 /// (чтобы попасть в Action::AddBulkPsk, а не в одиночный Action::AddPsk).
 pub fn bulk_psk_step(lang: Lang, default_on: bool) -> InlineKeyboardMarkup {

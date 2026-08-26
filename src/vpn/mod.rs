@@ -720,13 +720,7 @@ impl Vpn {
             .into_iter()
             .find(|client| client.name == name)
             .ok_or_else(|| crate::error::Error::ClientNotFound(name.into()))?;
-        panel::set_expiry(
-            &url,
-            &password,
-            &client.id,
-            &crate::calendar::format_date(expires_at),
-        )
-        .await
+        panel::set_expiry(&url, &password, &client.id, &panel::iso_date(expires_at)).await
     }
 
     fn spec(&self) -> RunSpec<'_> {

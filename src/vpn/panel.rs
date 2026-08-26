@@ -98,8 +98,21 @@ pub async fn create(base_url: &str, password: &str, name: &str) -> Result<PanelC
             response.status()
         )));
     }
-    list(base_url, password)
-        .await?
+    let response = client
+        .get(api_url(&base, "wireguard/client")?)
+        .send()
+        .await
+        .map_err(|error| Error::Parse(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(Error::Parse(format!(
+            "проверка созданного клиента: HTTP {}",
+            response.status()
+        )));
+    }
+    response
+        .json::<Vec<PanelClient>>()
+        .await
+        .map_err(|error| Error::Parse(format!("ответ панели: {error}")))?
         .into_iter()
         .find(|client| client.name == name)
         .ok_or_else(|| Error::Parse("панель создала ключ, но не вернула его в списке".into()))
@@ -161,14 +174,35 @@ pub async fn set_expiry(
         .send()
         .await
         .map_err(|error| Error::Parse(error.to_string()))?;
-    if response.status().is_success() {
+    let status = response.status();
+    if status.is_success() {
         Ok(())
     } else {
+        let details = response.text().await.unwrap_or_default();
+        let details = details.chars().take(500).collect::<String>();
         Err(Error::Parse(format!(
-            "срок клиента: HTTP {}",
-            response.status()
+            "срок клиента: HTTP {status}{}",
+            if details.is_empty() {
+                String::new()
+            } else {
+                format!(" — {details}")
+            }
         )))
     }
+}
+
+pub fn iso_date(epoch: i64) -> String {
+    let z = epoch.div_euclid(86_400) + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
@@ -237,5 +271,11 @@ mod tests {
             "secret-password"
         );
         assert_eq!(std::fs::read(key).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn panel_expiry_uses_iso_date() {
+        assert_eq!(iso_date(0), "1970-01-01");
+        assert_eq!(iso_date(1_766_016_000), "2025-12-18");
     }
 }
