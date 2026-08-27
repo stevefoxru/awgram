@@ -206,6 +206,7 @@ pub enum Action {
     DeviceLabelAsk(String),
     SupportTicket(i64),
     SupportNewCategory(String),
+    SupportDiagnostic(String),
     SupportTake(i64),
     SupportReply(i64),
     SupportClose(i64),
@@ -377,6 +378,8 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::SupportTake)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("support:diagnostic:") {
+                Action::SupportDiagnostic(v.to_string())
             } else if let Some(v) = data.strip_prefix("support:new:") {
                 Action::SupportNewCategory(v.to_string())
             } else if let Some(v) = data.strip_prefix("support:reply:") {
@@ -1911,6 +1914,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AutoRenew(_, _, _)
         | DeviceLabelAsk(_)
         | SupportRate(_, _)
+        | SupportDiagnostic(_)
         | Unknown => true,
         // Экран/установка текущей группы: только GA, группа — только своя.
         GroupSelectMenu => matches!(role, Role::GroupAdmin(_)),
@@ -5098,13 +5102,16 @@ async fn callback_handler(
             | Action::AutoRenew(_, _, _)
             | Action::DeviceLabelAsk(_)
             | Action::SupportNewCategory(_)
+            | Action::SupportDiagnostic(_)
             | Action::SupportRate(_, _)
     );
     if role == Role::Denied
         && settings.user_blocked(uid)
         && !matches!(
             &action,
-            Action::SupportNewCategory(_) | Action::SupportRate(_, _)
+            Action::SupportNewCategory(_)
+                | Action::SupportDiagnostic(_)
+                | Action::SupportRate(_, _)
         )
     {
         bot.send_message(
@@ -5942,14 +5949,85 @@ async fn callback_handler(
             dialogue.update(State::AwaitingReferralPercent).await?;
         }
         Action::Guide(kind) => {
-            let text = match kind.as_str() {
+            let (guide, key_name) = kind
+                .split_once(':')
+                .map_or((kind.as_str(), None), |(guide, name)| (guide, Some(name)));
+            if let Some(name) = key_name {
+                if settings.client_owner(name) != Some(uid) {
+                    return Ok(());
+                }
+            }
+            if guide == "install" {
+                let name = key_name.unwrap_or("");
+                bot.send_message(
+                    chat,
+                    "📖 Установка подключения\n\nВыберите устройство. Инструкция рассчитана на AmneziaWG/AWG 1.0 и импорт файла .conf, полученного от бота.",
+                )
+                .reply_markup(menu::installation_platform_menu(name))
+                .await?;
+                return Ok(());
+            }
+            if guide == "trouble" {
+                let Some(name) = key_name else {
+                    bot.send_message(
+                        chat,
+                        "Сначала откройте «Мои ключи» и выберите подключение, которое не работает.",
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                    return Ok(());
+                };
+                let server = settings.client_vpn_server(name);
+                let expiry = vpn.client_expiry(name);
+                let runtime = settings.client_runtime_stats(name);
+                let now = now_epoch();
+                let conclusion = if server.as_ref().is_none_or(|value| value.status != "online") {
+                    "🔴 Сервер недоступен. Обновление приложения не поможет — отправьте диагностику администратору."
+                } else if expiry.is_some_and(|value| value <= now) {
+                    "🔴 Срок действия закончился. Сначала продлите подключение."
+                } else if runtime
+                    .as_ref()
+                    .is_some_and(|value| value.enabled == Some(false))
+                {
+                    "🔴 Ключ отключён на сервере. Отправьте диагностику администратору."
+                } else if runtime
+                    .as_ref()
+                    .and_then(|value| value.last_handshake)
+                    .is_some_and(|value| {
+                        value >= now.saturating_sub(crate::vpn::model::ONLINE_THRESHOLD_SECS)
+                    })
+                {
+                    "🟢 Сервер недавно видел подключение. Если сайты не открываются, проверьте сеть, DNS и повторно импортируйте конфигурацию."
+                } else {
+                    "🟡 Сервер работает, но свежего подключения от устройства не видно. Выполните шаги ниже по порядку."
+                };
+                bot.send_message(
+                    chat,
+                    format!("🩺 Диагностика «{name}»\n\n{conclusion}\n\nБот не отправляет приватный ключ или содержимое конфигурации в поддержку."),
+                )
+                .reply_markup(menu::troubleshooting_menu(name))
+                .await?;
+                return Ok(());
+            }
+            let text = match guide {
                 "amnezia" => "📱 AmneziaVPN\n\n1. Установите и откройте AmneziaVPN.\n2. Нажмите «+» и выберите импорт подключения.\n3. Импортируйте присланный ботом файл .conf или VPN-ссылку.\n4. Сохраните подключение и включите VPN.\n\nНе добавляйте один ключ одновременно на несколько устройств.",
                 "awg" => "🛡 AmneziaWG\n\n1. Откройте AmneziaWG и нажмите «+».\n2. Выберите импорт туннеля из файла.\n3. Укажите присланный ботом файл .conf.\n4. Разрешите создание VPN-подключения и включите туннель.\n\nДля второго устройства приобретите отдельный ключ.",
-                "trouble" => "🩺 Если VPN не подключается\n\n1. Выключите и снова включите туннель.\n2. Переключитесь между Wi‑Fi и мобильной сетью.\n3. Проверьте, что на другом устройстве этот ключ выключен.\n4. Откройте «Мои ключи» → нужный ключ → «Обновить подключение».\n5. Если проблема осталась, создайте обращение в поддержку.",
+                "android" => "🤖 Android · AmneziaWG\n\n1. Скачайте файл .conf из карточки ключа.\n2. Откройте AmneziaWG и нажмите «+».\n3. Выберите «Импорт из файла или архива».\n4. Укажите скачанный .conf и разрешите VPN-подключение.\n5. Включите созданный туннель.\n\nЕсли Android ограничивает приложение, разрешите ему работу в фоне.",
+                "ios" => "🍎 iPhone/iPad · AmneziaWG\n\n1. Сохраните .conf в приложение «Файлы».\n2. Откройте AmneziaWG и нажмите «Добавить туннель».\n3. Выберите импорт из файла и укажите .conf.\n4. Разрешите добавление VPN-конфигурации через Face ID/код.\n5. Включите туннель.\n\nОдин ключ используйте только на одном устройстве.",
+                "windows" => "🪟 Windows · AmneziaWG\n\n1. Установите AmneziaWG.\n2. Скачайте .conf из карточки ключа.\n3. Выберите «Импорт туннелей из файла».\n4. Укажите .conf и нажмите «Активировать».\n\nЕсли туннель не запускается, откройте приложение от имени администратора один раз.",
+                "macos" => "💻 macOS · AmneziaWG\n\n1. Установите и откройте AmneziaWG.\n2. Скачайте .conf из карточки ключа.\n3. Импортируйте туннель из файла.\n4. Разрешите добавление VPN-конфигурации в настройках macOS.\n5. Активируйте туннель.",
+                "check-network" => "1️⃣ Проверка сети\n\n• Выключите VPN.\n• Убедитесь, что обычные сайты открываются.\n• Переключитесь между Wi‑Fi и мобильной сетью.\n• Включите VPN повторно.\n\nЕсли без VPN интернета нет, проблема находится не в ключе.",
+                "check-app" => "2️⃣ Проверка приложения\n\n• Обновите AmneziaWG до актуальной версии.\n• Убедитесь, что этот ключ выключен на других устройствах.\n• Удалите старый профиль из приложения.\n• Получите свежий конфиг в карточке ключа и импортируйте его заново.",
                 _ => "Инструкция не найдена.",
             };
             bot.send_message(chat, text)
-                .reply_markup(menu::instructions_menu())
+                .reply_markup(key_name.map_or_else(menu::instructions_menu, |name| {
+                    if matches!(guide, "check-network" | "check-app") {
+                        menu::troubleshooting_menu(name)
+                    } else {
+                        menu::installation_platform_menu(name)
+                    }
+                }))
                 .await?;
         }
         Action::LegacyRestore => {
@@ -7288,6 +7366,76 @@ async fn callback_handler(
                     .update(State::AwaitingSupportMessage { category })
                     .await?;
             }
+        }
+        Action::SupportDiagnostic(name) => {
+            if settings.client_owner(&name) != Some(uid) {
+                return Ok(());
+            }
+            let now = now_epoch();
+            let server = settings.client_vpn_server(&name);
+            let runtime = settings.client_runtime_stats(&name);
+            let expiry = vpn.client_expiry(&name);
+            let device = settings
+                .device_label(&name)
+                .unwrap_or_else(|| "не указано".into());
+            let server_text = server.as_ref().map_or_else(
+                || "не определён".to_string(),
+                |value| {
+                    format!(
+                        "{} / {} / статус {}",
+                        value.name, value.location, value.status
+                    )
+                },
+            );
+            let runtime_text = runtime.as_ref().map_or_else(
+                || "телеметрии нет".to_string(),
+                |value| {
+                    format!(
+                        "enabled={} handshake={} rx={} tx={} observed={}",
+                        value.enabled.map_or("unknown", |enabled| if enabled {
+                            "yes"
+                        } else {
+                            "no"
+                        }),
+                        value
+                            .last_handshake
+                            .map(|timestamp| timestamp.to_string())
+                            .unwrap_or_else(|| "never".into()),
+                        value.rx,
+                        value.tx,
+                        value.observed_at
+                    )
+                },
+            );
+            let subject = format!(
+                "Автодиагностика подключения\nКлюч: {name}\nУстройство: {device}\nСервер: {server_text}\nСрок: {}\nЛокально отключён: {}\nRuntime: {runtime_text}\nСформировано: {now}\nСекреты и содержимое конфигурации не передавались.",
+                expiry
+                    .map(crate::calendar::format_date)
+                    .unwrap_or_else(|| "бессрочно".into()),
+                vpn.client_disabled(&name)
+            );
+            let Some(ticket) =
+                settings.open_support_ticket_in_category(uid, "connection", &subject, now)
+            else {
+                bot.send_message(chat, "Не удалось создать обращение. Повторите позже.")
+                    .await?;
+                return Ok(());
+            };
+            for owner in &cfg.admin_ids {
+                let _ = bot
+                    .send_message(
+                        ChatId(*owner),
+                        format!("🩺 Автодиагностика · обращение #{ticket}\nПользователь: {uid}\n\n{subject}"),
+                    )
+                    .reply_markup(menu::support_ticket_menu(ticket))
+                    .await;
+            }
+            bot.send_message(
+                chat,
+                format!("✅ Безопасная диагностика отправлена в обращение #{ticket}. Приватный ключ и файл конфигурации не передавались."),
+            )
+            .reply_markup(menu::customer_key_menu(&name))
+            .await?;
         }
         Action::SupportTake(id) => {
             settings.assign_support_ticket(id, uid, now_epoch());
@@ -9670,6 +9818,8 @@ mod tests {
             menu::support_ticket_menu(1),
             menu::support_rating_menu(1),
             menu::customer_key_menu("alice"),
+            menu::installation_platform_menu("alice"),
+            menu::troubleshooting_menu("alice"),
             menu::customer_refresh_confirm_menu("alice"),
             menu::legacy_renew_menu("old_alice", 100_000),
             menu::legacy_renew_method_menu("old_alice"),
@@ -9913,6 +10063,7 @@ mod tests {
             DeviceLabelAsk("s".into()),
             SupportTicket(1),
             SupportNewCategory("general".into()),
+            SupportDiagnostic("s".into()),
             SupportTake(1),
             SupportReply(1),
             SupportClose(1),
@@ -10115,6 +10266,7 @@ mod tests {
                 DeviceLabelAsk(_) => {}
                 SupportTicket(_) => {}
                 SupportNewCategory(_) => {}
+                SupportDiagnostic(_) => {}
                 SupportTake(_) => {}
                 SupportReply(_) => {}
                 SupportClose(_) => {}
@@ -10285,6 +10437,7 @@ mod tests {
             (Action::PaymentInstructionsAsk, true, false),
             (Action::SupportTicket(1), true, false),
             (Action::SupportNewCategory("general".into()), true, false),
+            (Action::SupportDiagnostic("mine".into()), true, true),
             (Action::SupportTake(1), true, false),
             (Action::SupportReply(1), true, false),
             (Action::SupportClose(1), true, false),

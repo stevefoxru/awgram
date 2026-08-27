@@ -788,7 +788,8 @@ pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
             "🛟 Заменить нерабочий ключ",
             &format!("move:choose:{name}"),
         )],
-        vec![cb("📖 Как установить", "guide:awg")],
+        vec![cb("📖 Как установить", &format!("guide:install:{name}"))],
+        vec![cb("🩺 Не подключается", &format!("guide:trouble:{name}"))],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
 }
@@ -807,6 +808,39 @@ pub fn instructions_menu() -> InlineKeyboardMarkup {
         vec![cb("🛡 AmneziaWG", "guide:awg")],
         vec![cb("🩺 Не подключается", "guide:trouble")],
         vec![cb("🆘 Поддержка", "support:new:connection")],
+    ])
+}
+
+pub fn installation_platform_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("🤖 Android", &format!("guide:android:{name}")),
+            cb("🍎 iPhone/iPad", &format!("guide:ios:{name}")),
+        ],
+        vec![
+            cb("🪟 Windows", &format!("guide:windows:{name}")),
+            cb("💻 macOS", &format!("guide:macos:{name}")),
+        ],
+        vec![cb("⬅️ К ключу", &format!("mykey:{name}"))],
+    ])
+}
+
+pub fn troubleshooting_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "1️⃣ Проверить сеть",
+            &format!("guide:check-network:{name}"),
+        )],
+        vec![cb(
+            "2️⃣ Проверить приложение",
+            &format!("guide:check-app:{name}"),
+        )],
+        vec![cb("3️⃣ Получить свежий конфиг", &format!("refresh:{name}"))],
+        vec![cb(
+            "🆘 Отправить диагностику",
+            &format!("support:diagnostic:{name}"),
+        )],
+        vec![cb("⬅️ К ключу", &format!("mykey:{name}"))],
     ])
 }
 
