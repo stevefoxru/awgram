@@ -36,10 +36,41 @@ fn vpn_problem(report: &crate::vpn::wire::CheckReport) -> Option<String> {
     ))
 }
 
+fn replacement_is_stale(created_at: i64, now: i64) -> bool {
+    created_at <= now.saturating_sub(24 * 60 * 60)
+}
+
 async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     let removed_sessions = store.prune_portal_sessions(now);
     if removed_sessions > 0 {
         tracing::info!(removed_sessions, "устаревшие сессии ЛК удалены");
+    }
+    let stale_replacements = store
+        .pending_key_replacements()
+        .into_iter()
+        .filter(|operation| replacement_is_stale(operation.created_at, now))
+        .collect::<Vec<_>>();
+    if stale_replacements.is_empty() {
+        store.update_monitor_state("stale-key-replacements", "ok", None, now);
+    } else {
+        let ids = stale_replacements
+            .iter()
+            .take(20)
+            .map(|operation| format!("#{}", operation.id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let details = format!("count={} ids={ids}", stale_replacements.len());
+        if store.update_monitor_state("stale-key-replacements", "warning", Some(&details), now) {
+            notify_admins(
+                bot,
+                cfg,
+                format!(
+                    "⚠️ Есть замены ключей без подтверждения более 24 часов: {}\nОперации: {ids}\n\nОткройте админ-панель → «Операции».",
+                    stale_replacements.len()
+                ),
+            )
+            .await;
+        }
     }
     if !cfg.controller_only {
         match vpn.check().await {
@@ -372,5 +403,13 @@ mod tests {
         assert!(vpn_problem(&report).is_some());
         report.ok = true;
         assert!(vpn_problem(&report).is_none());
+    }
+
+    #[test]
+    fn replacement_becomes_stale_after_one_day() {
+        let now = 200_000;
+        assert!(!replacement_is_stale(now - 86_399, now));
+        assert!(replacement_is_stale(now - 86_400, now));
+        assert!(!replacement_is_stale(now + 60, now));
     }
 }

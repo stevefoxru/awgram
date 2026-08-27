@@ -763,6 +763,32 @@ mod tests {
     }
 
     #[test]
+    fn pending_replacements_are_listed_and_counted_per_user() {
+        let store = Store::open_in_memory();
+        let server_id = store.ensure_local_vpn_server("vpn", 1, 100).unwrap();
+        store.upsert_user(7, Some("alice"), "Alice", None, 100);
+        store.upsert_user(8, Some("bob"), "Bob", None, 100);
+        let first = store
+            .create_key_replacement(7, "old-a", "new-a", server_id, 101)
+            .unwrap();
+        store
+            .create_key_replacement(8, "old-b", "new-b", server_id, 102)
+            .unwrap();
+
+        let pending = store.pending_key_replacements();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].id, first);
+        assert_eq!(store.user_pending_key_replacement_count(7), 1);
+        assert_eq!(store.user_pending_key_replacement_count(9), 0);
+
+        assert!(store
+            .decide_key_replacement(first, 7, "confirmed", 103)
+            .is_some());
+        assert_eq!(store.pending_key_replacements().len(), 1);
+        assert_eq!(store.user_pending_key_replacement_count(7), 0);
+    }
+
+    #[test]
     fn approving_remote_migration_updates_server_and_clients_atomically() {
         let store = Store::open_in_memory();
         let id = store

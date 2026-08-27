@@ -25,6 +25,7 @@ pub enum Action {
     AdminKeys,
     AdminUsersHub,
     AdminCommunication,
+    AdminOperations,
     AdminSystem,
     AdminUpdate,
     AdminUpdateRun,
@@ -227,6 +228,7 @@ fn parse_callback(data: &str) -> Action {
         "admin:keys" => Action::AdminKeys,
         "admin:users" => Action::AdminUsersHub,
         "admin:communication" => Action::AdminCommunication,
+        "admin:operations" => Action::AdminOperations,
         "admin:system" => Action::AdminSystem,
         "admin:update" => Action::AdminUpdate,
         "admin:update:run" => Action::AdminUpdateRun,
@@ -1229,10 +1231,16 @@ async fn customer_dashboard(
                 .is_some_and(|expiry| expiry > now && expiry <= now + 7 * 86_400)
         })
         .count();
+    let pending_replacements = settings.user_pending_key_replacement_count(uid);
+    let operation_line = if pending_replacements == 0 {
+        String::new()
+    } else {
+        format!("\n🔄 Замен ожидает проверки: {pending_replacements}")
+    };
     bot.send_message(
         chat,
         format!(
-            "🏠 Личный кабинет\nЗдравствуйте, {display_name}!\n\n🔐 Подключения\n✅ Работают: {working}\n❌ Требуют замены: {broken}\n⏳ Истекают за 7 дней: {expiring}\n\n💰 Баланс: {:.2} ₽\n👥 Приглашено друзей: {}\n\nБыстрый старт:\n• «🔑 Мои ключи» — подключение и замена\n• «➕ Купить ключ» — новое устройство\n• «🆘 Поддержка» — помощь с подключением\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
+            "🏠 Личный кабинет\nЗдравствуйте, {display_name}!\n\n🔐 Подключения\n✅ Работают: {working}\n❌ Требуют замены: {broken}\n⏳ Истекают за 7 дней: {expiring}{operation_line}\n\n💰 Баланс: {:.2} ₽\n👥 Приглашено друзей: {}\n\nБыстрый старт:\n• «🔑 Мои ключи» — подключение и замена\n• «➕ Купить ключ» — новое устройство\n• «🆘 Поддержка» — помощь с подключением\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
             settings.balance_kopecks(uid) as f64 / 100.0,
             settings.referral_count(uid),
         ),
@@ -1307,10 +1315,67 @@ async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -
         .filter(|server| server.status == "online")
         .count();
     let total_keys = settings.active_client_names().len();
+    let pending_replacements = settings.pending_key_replacements().len();
     bot.send_message(chat,format!(
-        "🏠 Панель управления ZuevVPN\n\n🖥 Инфраструктура\nСерверы: {online_servers}/{} онлайн\nКлючи: {total_keys} активных\n\n👥 Клиенты\nПользователей: {}\nОтключено: {disabled}\nИстекают за 7 дней: {expiring}\n\n💼 Работа\nПлатежей ожидает: {}\nОбращений открыто: {}\nВыручка за 30 дней: {:.2} ₽\n\n⚙️ Версия бота: v{}\n\nВыберите раздел:",
+        "🏠 Панель управления ZuevVPN\n\n🖥 Инфраструктура\nСерверы: {online_servers}/{} онлайн\nКлючи: {total_keys} активных\n\n👥 Клиенты\nПользователей: {}\nОтключено: {disabled}\nИстекают за 7 дней: {expiring}\n\n💼 Работа\nЗамен ожидает проверки: {pending_replacements}\nПлатежей ожидает: {}\nОбращений открыто: {}\nВыручка за 30 дней: {:.2} ₽\n\n⚙️ Версия бота: v{}\n\nВыберите раздел:",
         servers.len(),settings.all_user_ids().len(),month.pending,settings.open_support_count(),month.revenue_kopecks as f64/100.0,env!("CARGO_PKG_VERSION")))
         .reply_markup(menu::admin_dashboard_menu()).await?;
+    Ok(())
+}
+
+async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let now = now_epoch();
+    let operations = settings.pending_key_replacements();
+    let stale = operations
+        .iter()
+        .filter(|operation| operation.created_at <= now - 24 * 60 * 60)
+        .count();
+    let details = operations
+        .iter()
+        .take(20)
+        .map(|operation| {
+            let age_hours = now.saturating_sub(operation.created_at) / 3600;
+            let user = settings
+                .user(operation.user_id)
+                .map(|user| {
+                    user.username
+                        .map_or(user.display_name, |name| format!("@{name}"))
+                })
+                .unwrap_or_else(|| format!("ID {}", operation.user_id));
+            let server = settings
+                .vpn_server(operation.target_server_id)
+                .map(|server| server.name)
+                .unwrap_or_else(|| format!("сервер #{}", operation.target_server_id));
+            let marker = if age_hours >= 24 { "⚠️" } else { "⏳" };
+            format!(
+                "{marker} #{} · {user}\n{} → {} · {server} · {} ч",
+                operation.id, operation.old_client, operation.new_client, age_hours
+            )
+        })
+        .collect::<Vec<_>>();
+    let overflow = operations.len().saturating_sub(details.len());
+    let body = if details.is_empty() {
+        "Незавершённых замен нет.".to_string()
+    } else {
+        format!(
+            "{}{}",
+            details.join("\n\n"),
+            if overflow == 0 {
+                String::new()
+            } else {
+                format!("\n\n…и ещё {overflow}")
+            }
+        )
+    };
+    bot.send_message(
+        chat,
+        format!(
+            "🔄 Операции с ключами\n\nОжидают проверки пользователем: {}\nСтарше 24 часов: {stale}\n\n{body}\n\nПовторное нажатие пользователем «Заменить» продолжит существующую операцию и не создаст ещё один ключ.",
+            operations.len()
+        ),
+    )
+    .reply_markup(menu::admin_dashboard_menu())
+    .await?;
     Ok(())
 }
 
@@ -1866,6 +1931,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminKeys
         | AdminUsersHub
         | AdminCommunication
+        | AdminOperations
         | AdminSystem
         | AdminUpdate
         | AdminUpdateRun
@@ -5033,6 +5099,9 @@ async fn callback_handler(
             )
             .reply_markup(menu::admin_communication_hub())
             .await?;
+        }
+        Action::AdminOperations => {
+            admin_operations_screen(&bot, chat, &settings).await?;
         }
         Action::AdminSystem => {
             let current = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -9583,6 +9652,7 @@ mod tests {
             AdminKeys,
             AdminUsersHub,
             AdminCommunication,
+            AdminOperations,
             AdminSystem,
             ServerAdd,
             ServerCard(1),
@@ -9729,6 +9799,7 @@ mod tests {
                 AdminKeys => {}
                 AdminUsersHub => {}
                 AdminCommunication => {}
+                AdminOperations => {}
                 AdminSystem => {}
                 AdminUpdate => {}
                 AdminUpdateRun => {}
@@ -10085,6 +10156,7 @@ mod tests {
             (Action::AdminKeys, true, false),
             (Action::AdminUsersHub, true, false),
             (Action::AdminCommunication, true, false),
+            (Action::AdminOperations, true, false),
             (Action::AdminSystem, true, false),
             (Action::ServerAdd, true, false),
             (Action::ServerCard(1), true, false),

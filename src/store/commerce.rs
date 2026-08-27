@@ -116,7 +116,52 @@ pub struct LegacyRequest {
     pub client_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyReplacement {
+    pub id: i64,
+    pub user_id: i64,
+    pub old_client: String,
+    pub new_client: String,
+    pub target_server_id: i64,
+    pub created_at: i64,
+}
+
 impl Store {
+    pub fn pending_key_replacements(&self) -> Vec<KeyReplacement> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id,user_id,old_client,new_client,target_server_id,created_at
+                   FROM key_replacements
+                  WHERE status='pending'
+                  ORDER BY created_at ASC,id ASC",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(KeyReplacement {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    old_client: row.get(2)?,
+                    new_client: row.get(3)?,
+                    target_server_id: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn user_pending_key_replacement_count(&self, user_id: i64) -> usize {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM key_replacements WHERE user_id=?1 AND status='pending'",
+                [user_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap_or(0)
+        .max(0) as usize
+    }
+
     pub fn create_key_replacement(
         &self,
         user_id: i64,

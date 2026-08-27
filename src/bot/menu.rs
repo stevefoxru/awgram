@@ -124,6 +124,7 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("📊 Аналитика", "stats"),
             cb("💬 Связь", "admin:communication"),
         ],
+        vec![cb("🔄 Операции", "admin:operations")],
         vec![cb("⚙️ Система", "admin:system")],
         vec![
             cb("🔎 Поиск", "admin:search"),
