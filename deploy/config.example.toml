@@ -16,3 +16,4 @@ db_path = "/var/lib/awgram/awgram.db"
 # Публикуйте через HTTPS reverse proxy (например, Caddy или nginx).
 # portal_bind = "127.0.0.1:8787"
 # portal_public_url = "https://cabinet.example.ru"
+# acquiring_webhook_secret = "случайный секрет не короче 32 символов"

@@ -174,6 +174,18 @@ pub fn broadcast_templates_menu() -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn broadcast_report_menu(id: i64, can_retry: bool) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if can_retry {
+        rows.push(vec![cb(
+            "🔁 Повторить только ошибки",
+            &format!("broadcast:retry:{id}"),
+        )]);
+    }
+    rows.push(vec![cb("⬅️ Связь", "admin:communication")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
 pub fn admin_system_hub() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
@@ -185,6 +197,7 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
             cb("ℹ️ Справка", "admin:help"),
         ],
         vec![cb("⬆️ Обновить бота", "admin:update")],
+        vec![cb("📋 Журнал обновления", "admin:update:status")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
@@ -193,6 +206,14 @@ pub fn bot_update_confirm_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb("⬆️ Установить обновление", "admin:update:run")],
         vec![cb("❌ Отмена", "admin:system")],
+    ])
+}
+
+pub fn bot_update_status_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🔄 Обновить журнал", "admin:update:status")],
+        vec![cb("↩️ Откатить бинарник", "admin:update:rollback")],
+        vec![cb("⬅️ Система", "admin:system")],
     ])
 }
 
@@ -256,6 +277,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             &format!("server:panel:sync:{id}"),
         )],
         vec![cb(
+            "🧾 Сверить ключи с базой",
+            &format!("server:panel:audit:{id}"),
+        )],
+        vec![cb(
             "📣 Владельцам ключей",
             &format!("broadcast:audience:server:{id}"),
         )],
@@ -264,6 +289,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("🩺 Проверить ключи", &format!("server:check:{id}")),
             cb("🔬 Диагностика", &format!("server:diagnose:{id}")),
         ],
+        vec![cb(
+            "🧪 Тестовая выдача ключа",
+            &format!("server:probe:{id}"),
+        )],
         vec![cb("— НАСТРОЙКА VPS —", &format!("server:{id}"))],
         vec![
             cb("✏️ Паспорт", &format!("server:edit:{id}")),

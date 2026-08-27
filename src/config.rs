@@ -13,6 +13,7 @@ pub struct Config {
     pub controller_only: bool,
     pub portal_bind: Option<String>,
     pub portal_public_url: Option<String>,
+    pub acquiring_webhook_secret: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -29,6 +30,10 @@ impl std::fmt::Debug for Config {
             .field("controller_only", &self.controller_only)
             .field("portal_bind", &self.portal_bind)
             .field("portal_public_url", &self.portal_public_url)
+            .field(
+                "acquiring_webhook_secret",
+                &self.acquiring_webhook_secret.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -67,6 +72,8 @@ struct Raw {
     portal_bind: Option<String>,
     #[serde(default)]
     portal_public_url: Option<String>,
+    #[serde(default)]
+    acquiring_webhook_secret: Option<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -114,6 +121,9 @@ impl Config {
                 .portal_public_url
                 .map(|value| value.trim_end_matches('/').to_string())
                 .filter(|value| value.starts_with("http://") || value.starts_with("https://")),
+            acquiring_webhook_secret: raw
+                .acquiring_webhook_secret
+                .filter(|value| value.len() >= 32),
         })
     }
 }

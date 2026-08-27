@@ -433,6 +433,7 @@ controller_only = $([ "$CONTROLLER_ONLY" = 1 ] && printf true || printf false)
 # Внутренний ЛК (v1.0): раскомментируйте и укажите публичный HTTPS-адрес.
 # portal_bind = "127.0.0.1:8787"
 # portal_public_url = "https://cabinet.example.ru"
+# acquiring_webhook_secret = "replace-with-at-least-32-random-characters"
 EOF
   chmod 640 "$CFG_FILE"
 }
@@ -522,11 +523,47 @@ install_updatectl() {
   cat > "$UPDATECTL_PATH" <<'AWGRAM_UPDATECTL'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${1:-}" = "start" ]] || { echo 'usage: awgram-updatectl start' >&2; exit 2; }
-command -v systemd-run >/dev/null 2>&1 || { echo 'systemd-run is required' >&2; exit 3; }
-systemd-run --quiet --collect --unit=awgram-self-update \
-  /usr/local/bin/awgram-setup update --yes
-printf '{"ok":true,"unit":"awgram-self-update"}\n'
+state=/var/lib/awgram/update-status
+log=/var/lib/awgram/update.log
+cmd="${1:-}"
+case "$cmd" in
+  start)
+    command -v systemd-run >/dev/null 2>&1 || { echo 'systemd-run is required' >&2; exit 3; }
+    install -d -m 750 /var/lib/awgram
+    printf 'running\n' > "$state"; : > "$log"; chmod 640 "$state" "$log"
+    systemd-run --quiet --collect --unit=awgram-self-update \
+      /usr/local/libexec/awgram-updatectl run
+    printf '{"ok":true,"unit":"awgram-self-update"}\n'
+    ;;
+  run)
+    set +e
+    /usr/local/bin/awgram-setup update --yes > "$log" 2>&1
+    code=$?
+    set -e
+    if (( code == 0 )); then printf 'succeeded\n' > "$state"; else printf 'failed:%s\n' "$code" > "$state"; fi
+    exit "$code"
+    ;;
+  status)
+    printf 'status=%s\n' "$(cat "$state" 2>/dev/null || printf never)"
+    printf '%s\n' '--- log ---'
+    tail -n 50 "$log" 2>/dev/null || true
+    ;;
+  rollback)
+    [[ -f /usr/local/bin/awgram.bak ]] || { echo 'rollback binary not found' >&2; exit 4; }
+    install -m 755 /usr/local/bin/awgram.bak /usr/local/bin/awgram
+    systemctl restart awgram
+    ok=0
+    for _ in 1 2 3 4 5; do
+      sleep 2
+      if systemctl is-active --quiet awgram; then ok=$((ok+1)); else ok=0; fi
+      (( ok >= 2 )) && break
+    done
+    (( ok >= 2 )) || { echo 'rollback service failed' >&2; exit 5; }
+    printf 'rolled_back\n' > "$state"
+    printf '{"ok":true,"status":"rolled_back"}\n'
+    ;;
+  *) echo 'usage: awgram-updatectl start|status|rollback' >&2; exit 2 ;;
+esac
 AWGRAM_UPDATECTL
   chmod 755 "$UPDATECTL_PATH"
   chown root:root "$UPDATECTL_PATH"

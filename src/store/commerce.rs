@@ -1257,6 +1257,28 @@ impl Store {
         self.with_conn(|c|c.execute("UPDATE payment_requests SET status='rejected',reject_reason=?2,decided_at=?3,decided_by=?4 WHERE id=?1 AND status='pending'",rusqlite::params![id,reason,now,admin_id])).map(|n|n==1).unwrap_or(false)
     }
 
+    pub fn claim_acquiring_webhook(
+        &self,
+        id: i64,
+        amount_kopecks: i64,
+        transaction_id: &str,
+    ) -> bool {
+        let transaction_id = transaction_id.trim();
+        if amount_kopecks <= 0 || transaction_id.is_empty() || transaction_id.len() > 200 {
+            return false;
+        }
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE payment_requests SET proof=?3
+             WHERE id=?1 AND amount_kopecks=?2 AND method='acquiring' AND status='pending'
+               AND (proof IS NULL OR proof=?3)",
+                rusqlite::params![id, amount_kopecks, format!("acquiring:{transaction_id}")],
+            )
+        })
+        .map(|changed| changed == 1)
+        .unwrap_or(false)
+    }
+
     pub fn assign_client_owner(&self, name: &str, user_id: Option<i64>) -> bool {
         self.with_conn(|c| {
             c.execute(

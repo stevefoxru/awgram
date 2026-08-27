@@ -1220,6 +1220,15 @@ impl Vpn {
     /// Планирует обновление отдельным transient systemd-unit. Вызов сразу
     /// возвращается, поэтому перезапуск awgram не обрывает сам запуск обновления.
     pub async fn schedule_bot_update(&self) -> Result<()> {
+        self.bot_update_control("start").await.map(|_| ())
+    }
+
+    pub async fn bot_update_control(&self, command: &str) -> Result<String> {
+        if !matches!(command, "start" | "status" | "rollback") {
+            return Err(crate::error::Error::Parse(
+                "неизвестная команда обновления".into(),
+            ));
+        }
         let helper = std::path::Path::new("/usr/local/libexec/awgram-updatectl");
         let spec = RunSpec {
             script: helper,
@@ -1227,9 +1236,9 @@ impl Vpn {
             timeout_secs: self.timeout_secs,
             extra_env: &[],
         };
-        let (out, code) = run(&spec, &["start"]).await?;
+        let (out, code) = run(&spec, &[command]).await?;
         if code == 0 {
-            Ok(())
+            Ok(out)
         } else {
             Err(crate::error::Error::ScriptFailed {
                 code: Some(code),

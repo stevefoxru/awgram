@@ -28,6 +28,8 @@ pub enum Action {
     AdminSystem,
     AdminUpdate,
     AdminUpdateRun,
+    AdminUpdateStatus,
+    AdminUpdateRollback,
     ServerAdd,
     ServerCard(i64),
     RemoteMigration(i64),
@@ -47,8 +49,10 @@ pub enum Action {
     ServerDeployAsk(i64),
     ServerCheck(i64),
     ServerDiagnose(i64),
+    ServerProvisioningProbe(i64),
     ServerPanelConnect(i64),
     ServerPanelSync(i64),
+    ServerPanelAudit(i64),
     LocalMigration,
     LocalMigrationPreflight,
     LocalMigrationStart,
@@ -62,6 +66,7 @@ pub enum Action {
     AdminBroadcast,
     AdminBroadcastTemplates,
     BroadcastAudience(String),
+    BroadcastRetry(i64),
     AdminHelp,
     AdminSearch,
     AdminRoles,
@@ -225,6 +230,8 @@ fn parse_callback(data: &str) -> Action {
         "admin:system" => Action::AdminSystem,
         "admin:update" => Action::AdminUpdate,
         "admin:update:run" => Action::AdminUpdateRun,
+        "admin:update:status" => Action::AdminUpdateStatus,
+        "admin:update:rollback" => Action::AdminUpdateRollback,
         "server:add" => Action::ServerAdd,
         "server:billing" => Action::ServerBilling,
         "admin:create" => Action::AdminCreate,
@@ -409,6 +416,10 @@ fn parse_callback(data: &str) -> Action {
                 Action::AdminPromoAction(v.to_string())
             } else if let Some(v) = data.strip_prefix("broadcast:audience:") {
                 Action::BroadcastAudience(v.to_string())
+            } else if let Some(v) = data.strip_prefix("broadcast:retry:") {
+                v.parse()
+                    .map(Action::BroadcastRetry)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("admin:userblock:") {
                 let mut p = v.split(':');
                 match (p.next().and_then(|x| x.parse().ok()), p.next()) {
@@ -499,9 +510,17 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::ServerDiagnose)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:probe:") {
+                v.parse()
+                    .map(Action::ServerProvisioningProbe)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:panel:sync:") {
                 v.parse()
                     .map(Action::ServerPanelSync)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:panel:audit:") {
+                v.parse()
+                    .map(Action::ServerPanelAudit)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:panel:") {
                 v.parse()
@@ -1850,6 +1869,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminSystem
         | AdminUpdate
         | AdminUpdateRun
+        | AdminUpdateStatus
+        | AdminUpdateRollback
         | ServerAdd
         | ServerCard(_)
         | RemoteMigration(_)
@@ -1869,8 +1890,10 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerDeployAsk(_)
         | ServerCheck(_)
         | ServerDiagnose(_)
+        | ServerProvisioningProbe(_)
         | ServerPanelConnect(_)
         | ServerPanelSync(_)
+        | ServerPanelAudit(_)
         | LocalMigration
         | LocalMigrationPreflight
         | LocalMigrationStart
@@ -1884,6 +1907,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminBroadcast
         | AdminBroadcastTemplates
         | BroadcastAudience(_)
+        | BroadcastRetry(_)
         | AdminHelp
         | AdminSearch
         | AdminRoles
@@ -2412,6 +2436,14 @@ async fn message_handler(
                     }
                 })
                 .collect::<Vec<_>>();
+            let broadcast_id = settings.create_broadcast_run(
+                uid,
+                source_chat_id,
+                source_message_id,
+                &audience,
+                &recipients,
+                now,
+            );
             for user_id in recipients {
                 match bot
                     .copy_message(
@@ -2421,17 +2453,49 @@ async fn message_handler(
                     )
                     .await
                 {
-                    Ok(_) => delivered += 1,
-                    Err(_) => failed += 1,
+                    Ok(_) => {
+                        delivered += 1;
+                        if let Some(id) = broadcast_id {
+                            settings.record_broadcast_delivery(
+                                id,
+                                user_id,
+                                true,
+                                None,
+                                now_epoch(),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        if let Some(id) = broadcast_id {
+                            settings.record_broadcast_delivery(
+                                id,
+                                user_id,
+                                false,
+                                Some(&error.to_string()),
+                                now_epoch(),
+                            );
+                        }
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             }
-            bot.send_message(
+            let report = bot.send_message(
                 msg.chat.id,
-                format!("✅ Рассылка завершена: доставлено {delivered}, ошибок {failed}."),
-            )
-            .reply_markup(menu::admin_keyboard())
-            .await?;
+                format!(
+                    "✅ Рассылка завершена: доставлено {delivered}, ошибок {failed}.{}",
+                    broadcast_id
+                        .map(|id| format!("\nНомер отчёта: #{id}"))
+                        .unwrap_or_default()
+                ),
+            );
+            if let Some(id) = broadcast_id {
+                report
+                    .reply_markup(menu::broadcast_report_menu(id, failed > 0))
+                    .await?;
+            } else {
+                report.reply_markup(menu::admin_dashboard_menu()).await?;
+            }
             settings.log_event(
                 now_epoch(),
                 EventKind::Broadcast,
@@ -5008,6 +5072,25 @@ async fn callback_handler(
                     .await?;
             }
         }
+        Action::AdminUpdateStatus => {
+            let text = match vpn.bot_update_control("status").await {
+                Ok(output) => format!("📋 Журнал обновления\n\n{}", truncate_for_message(output)),
+                Err(error) => format!("❌ Не удалось прочитать журнал обновления: {error}"),
+            };
+            bot.send_message(chat, text)
+                .reply_markup(menu::bot_update_status_menu())
+                .await?;
+        }
+        Action::AdminUpdateRollback => {
+            let text = match vpn.bot_update_control("rollback").await {
+                Ok(_) => "✅ Выполнен откат к предыдущему бинарнику. Служба успешно запущена."
+                    .to_string(),
+                Err(error) => format!("❌ Откат не выполнен: {error}"),
+            };
+            bot.send_message(chat, text)
+                .reply_markup(menu::admin_system_hub())
+                .await?;
+        }
         Action::ServerAdd => {
             bot.send_message(chat,"🧭 Мастер подключения нового сервера\n\nШаг 1 из 3. Отправьте понятное название сервера, например: Netherlands 3.0\n\nПосле создания мастер предложит автоматическую установку AWG 1.0, подключение панели или безопасную bootstrap-команду.").await?;
             dialogue.update(State::AwaitingServerWizardName).await?;
@@ -5353,6 +5436,65 @@ async fn callback_handler(
                     .await?;
             }
         }
+        Action::ServerProvisioningProbe(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                let probe_name = format!("awgram-probe-{id}-{}", now_epoch());
+                bot.send_message(
+                    chat,
+                    format!(
+                        "🧪 Проверяю полный цикл выдачи на «{}»: создание временного ключа, получение конфигурации и обязательное удаление.",
+                        server.name
+                    ),
+                )
+                .await?;
+                let created = if server.is_local {
+                    vpn.add(&probe_name, Some("1d"), false).await
+                } else {
+                    nonlocal_add(&vpn, &settings, &server, &probe_name).await
+                };
+                let result = match created {
+                    Ok(artifacts) => {
+                        let artifact_ok = std::path::Path::new(&artifacts.conf_path).exists()
+                            && std::fs::metadata(&artifacts.conf_path)
+                                .map(|metadata| metadata.len() > 0)
+                                .unwrap_or(false);
+                        let cleanup = if server.is_local {
+                            vpn.remove(&probe_name).await
+                        } else {
+                            nonlocal_remove(&vpn, &settings, &server, &probe_name).await
+                        };
+                        match (artifact_ok, cleanup) {
+                            (true, Ok(())) => Ok(()),
+                            (false, Ok(())) => Err(crate::error::Error::Parse(
+                                "сервер создал ключ, но вернул пустую конфигурацию; временный ключ удалён"
+                                    .into(),
+                            )),
+                            (_, Err(error)) => Err(crate::error::Error::Parse(format!(
+                                "тестовый ключ создан, но автоматическая очистка не выполнена: {error}. Удалите {probe_name} вручную"
+                            ))),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                let (status, text) = match result {
+                    Ok(()) => (
+                        "online",
+                        format!(
+                            "✅ «{}» прошёл полную проверку выдачи. Тестовый ключ создан, конфигурация получена, ключ удалён.",
+                            server.name
+                        ),
+                    ),
+                    Err(error) => (
+                        "warning",
+                        format!("❌ «{}» не прошёл проверку выдачи:\n\n{error}", server.name),
+                    ),
+                };
+                settings.set_server_status(id, status, now_epoch());
+                bot.send_message(chat, text)
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+            }
+        }
         Action::ServerPanelConnect(id) => {
             if let Some(server) = settings.vpn_server(id) {
                 if server.is_local {
@@ -5429,6 +5571,63 @@ async fn callback_handler(
                 bot.send_message(chat, "Сначала подключите панель к этому серверу.")
                     .reply_markup(menu::server_card_menu(id))
                     .await?;
+            }
+        }
+        Action::ServerPanelAudit(id) => {
+            if let Some(server) = settings
+                .vpn_server(id)
+                .filter(|server| server.protocol == "amneziawg-panel")
+            {
+                let result = match settings.panel_password(id) {
+                    Some(secret) => vpn.panel_clients(&server, &secret).await,
+                    None => Err(crate::error::Error::Parse(
+                        "пароль панели не настроен".into(),
+                    )),
+                };
+                match result {
+                    Ok(clients) => {
+                        let items = clients
+                            .iter()
+                            .map(|client| crate::store::InventoryItem {
+                                remote_id: client.id.clone(),
+                                name: client.name.clone(),
+                                enabled: client.enabled,
+                                rx: client.transfer_rx,
+                                tx: client.transfer_tx,
+                                last_handshake: client.last_handshake_epoch(),
+                            })
+                            .collect::<Vec<_>>();
+                        let report = settings.reconcile_inventory(id, now_epoch(), &items);
+                        let names = |values: &[String]| {
+                            if values.is_empty() {
+                                "—".into()
+                            } else {
+                                values
+                                    .iter()
+                                    .take(20)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            }
+                        };
+                        bot.send_message(chat, format!(
+                            "🧾 Сверка реестра · {}\n\nВ панели: {}\nСовпало с базой: {}\n\nТолько в панели: {}\n{}\n\nТолько в базе: {}\n{}\n\nЗаписаны за другим сервером: {}\n{}\n\nДубли на нескольких серверах: {}\n{}\n\nНичего не удалено. Несоответствия сохранены для последующего решения.",
+                            server.name,report.observed,report.matched,
+                            report.panel_only.len(),names(&report.panel_only),
+                            report.database_only.len(),names(&report.database_only),
+                            report.wrong_server.len(),names(&report.wrong_server),
+                            report.duplicates.len(),names(&report.duplicates)
+                        )).reply_markup(menu::server_card_menu(id)).await?;
+                    }
+                    Err(error) => {
+                        bot.send_message(
+                            chat,
+                            format!("❌ Не удалось сверить реестр «{}»: {error}", server.name),
+                        )
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                    }
+                }
             }
         }
         Action::LocalMigration => {
@@ -5530,6 +5729,45 @@ async fn callback_handler(
                     .update(State::AwaitingBroadcast { audience })
                     .await?;
             }
+        }
+        Action::BroadcastRetry(id) => {
+            let Some(run) = settings.broadcast_run(id) else {
+                bot.send_message(chat, "Отчёт рассылки не найден.")
+                    .reply_markup(menu::admin_communication_hub())
+                    .await?;
+                return Ok(());
+            };
+            let recipients = settings.failed_broadcast_recipients(id);
+            let mut recovered = 0usize;
+            let mut failed = 0usize;
+            for user_id in recipients {
+                match bot
+                    .copy_message(
+                        ChatId(user_id),
+                        ChatId(run.source_chat_id),
+                        MessageId(run.source_message_id),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        recovered += 1;
+                        settings.record_broadcast_delivery(id, user_id, true, None, now_epoch());
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        settings.record_broadcast_delivery(
+                            id,
+                            user_id,
+                            false,
+                            Some(&error.to_string()),
+                            now_epoch(),
+                        );
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            }
+            bot.send_message(chat,format!("🔁 Повтор рассылки #{id} завершён.\n\nДоставлено при повторе: {recovered}\nОсталось ошибок: {failed}"))
+                .reply_markup(menu::broadcast_report_menu(id,failed>0)).await?;
         }
         Action::AdminHelp => {
             bot.send_message(chat,"ℹ️ Навигация\n\n➕ Создать ключ — один новый клиент\n📦 Создать оптом — пакет последовательных ключей\n📊 Статистика — трафик, активность, лидеры и подразделы\n🔎 Поиск — ключи и владельцы\n🧰 Массовое управление — включение, отключение и продление по префиксу\n🧑‍💼 Роли — назначение сотрудников\n\nВсе основные действия выполняются кнопками; текстовые команды оставлены только для совместимости.").reply_markup(menu::admin_dashboard_menu()).await?;
@@ -9363,8 +9601,10 @@ mod tests {
             ServerDeployAsk(1),
             ServerCheck(1),
             ServerDiagnose(1),
+            ServerProvisioningProbe(1),
             ServerPanelConnect(1),
             ServerPanelSync(1),
+            ServerPanelAudit(1),
             AdminCreate,
             AdminOwners,
             AdminFinance,
@@ -9372,6 +9612,7 @@ mod tests {
             AdminBroadcast,
             AdminBroadcastTemplates,
             BroadcastAudience("all".into()),
+            BroadcastRetry(1),
             AdminHelp,
             AdminSearch,
             AdminRoles,
@@ -9489,6 +9730,8 @@ mod tests {
                 AdminSystem => {}
                 AdminUpdate => {}
                 AdminUpdateRun => {}
+                AdminUpdateStatus => {}
+                AdminUpdateRollback => {}
                 ServerAdd => {}
                 ServerCard(_) => {}
                 RemoteMigration(_) => {}
@@ -9508,8 +9751,10 @@ mod tests {
                 ServerDeployAsk(_) => {}
                 ServerCheck(_) => {}
                 ServerDiagnose(_) => {}
+                ServerProvisioningProbe(_) => {}
                 ServerPanelConnect(_) => {}
                 ServerPanelSync(_) => {}
+                ServerPanelAudit(_) => {}
                 LocalMigration => {}
                 LocalMigrationPreflight => {}
                 LocalMigrationStart => {}
@@ -9523,6 +9768,7 @@ mod tests {
                 AdminBroadcast => {}
                 AdminBroadcastTemplates => {}
                 BroadcastAudience(_) => {}
+                BroadcastRetry(_) => {}
                 AdminHelp => {}
                 AdminSearch => {}
                 AdminRoles => {}
@@ -9857,8 +10103,10 @@ mod tests {
             (Action::ServerDeployAsk(1), true, false),
             (Action::ServerCheck(1), true, false),
             (Action::ServerDiagnose(1), true, false),
+            (Action::ServerProvisioningProbe(1), true, false),
             (Action::ServerPanelConnect(1), true, false),
             (Action::ServerPanelSync(1), true, false),
+            (Action::ServerPanelAudit(1), true, false),
             (Action::LocalMigration, true, false),
             (Action::LocalMigrationPreflight, true, false),
             (Action::LocalMigrationStart, true, false),
@@ -9871,6 +10119,7 @@ mod tests {
             (Action::AdminBroadcast, true, false),
             (Action::AdminBroadcastTemplates, true, false),
             (Action::BroadcastAudience("all".into()), true, false),
+            (Action::BroadcastRetry(1), true, false),
             (Action::AdminHelp, true, false),
             (Action::AdminSearch, true, false),
             (Action::AdminRoles, true, false),

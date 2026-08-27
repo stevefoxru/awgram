@@ -558,10 +558,19 @@ impl Store {
     /// customer/admin lists and capacity calculations.
     pub fn retire_client(&self, name: &str, now: i64) -> bool {
         self.with_conn(|connection| {
-            connection.execute(
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO client_archive_events(client_name,server_id,owner_user_id,reason,archived_at)
+                 SELECT name,server_id,owner_user_id,'retired',?2 FROM clients
+                 WHERE name=?1 AND removed_at IS NULL",
+                rusqlite::params![name, now],
+            )?;
+            let changed = transaction.execute(
                 "UPDATE clients SET removed_at=?2 WHERE name=?1 AND removed_at IS NULL",
                 rusqlite::params![name, now],
-            )
+            )?;
+            transaction.commit()?;
+            Ok(changed)
         })
         .is_ok_and(|changed| changed == 1)
     }

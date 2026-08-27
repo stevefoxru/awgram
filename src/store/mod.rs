@@ -7,9 +7,11 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
+mod broadcasts;
 mod commerce;
 mod events;
 mod groups;
+mod inventory;
 mod nodes;
 mod portal;
 mod server_enrollment;
@@ -18,6 +20,7 @@ mod settings;
 mod stars;
 mod stats;
 
+pub use broadcasts::BroadcastRun;
 pub use commerce::{
     AdminUserProfile, AdminUserStats, FinanceSummary, LegacyRequest, PaymentRequest, PaymentStatus,
     PromoCode, SupportTicket, UserRow,
@@ -27,8 +30,9 @@ pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
     INVITE_TTL_SECS,
 };
+pub use inventory::{InventoryItem, InventoryReport};
 pub use nodes::{InstallationJob, VpnInstance, VpnNode};
-pub use portal::{PortalKey, PortalOverview};
+pub use portal::{PortalKey, PortalOverview, PortalPayment};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
 pub use stars::{NewStarOrder, StarOrder, StarPaymentClaim};
@@ -516,6 +520,47 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         revoked_at INTEGER
     );
     CREATE INDEX idx_web_sessions_user ON web_sessions(user_id,expires_at);
+    "#,
+    // v20: фактический инвентарь ключей на каждой панели. Реестр отделён от
+    // таблицы clients, чтобы видеть сироты и одинаковые имена на разных VPS.
+    r#"
+    CREATE TABLE key_inventory(
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        remote_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        rx INTEGER NOT NULL DEFAULT 0,
+        tx INTEGER NOT NULL DEFAULT 0,
+        last_handshake INTEGER,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        missing_since INTEGER,
+        PRIMARY KEY(server_id,remote_id)
+    );
+    CREATE INDEX idx_key_inventory_name ON key_inventory(name,missing_since);
+    CREATE TABLE client_archive_events(
+        id INTEGER PRIMARY KEY,
+        client_name TEXT NOT NULL,
+        server_id INTEGER REFERENCES vpn_servers(id),
+        owner_user_id INTEGER,
+        reason TEXT NOT NULL,
+        actor_id INTEGER,
+        archived_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_client_archive_name ON client_archive_events(client_name,archived_at DESC);
+    "#,
+    // v21: адресный журнал доставки и повтор только неуспешных сообщений.
+    r#"
+    CREATE TABLE broadcast_deliveries(
+        broadcast_id INTEGER NOT NULL REFERENCES broadcasts(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        status TEXT NOT NULL CHECK(status IN ('pending','delivered','failed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(broadcast_id,user_id)
+    );
+    CREATE INDEX idx_broadcast_delivery_status ON broadcast_deliveries(broadcast_id,status);
     "#,
 ];
 

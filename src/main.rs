@@ -42,8 +42,26 @@ async fn main() {
     };
     if let Some(bind) = cfg.portal_bind.clone() {
         let portal_store = store.clone();
+        let portal_vpn = vpn.clone();
+        let webhook_secret = cfg.acquiring_webhook_secret.clone();
+        let portal_bot = bot.clone();
+        let portal_admins = cfg.admin_ids.clone();
+        let secure_cookie = cfg
+            .portal_public_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://"));
         tokio::spawn(async move {
-            if let Err(error) = awgram::portal::run(&bind, portal_store).await {
+            if let Err(error) = awgram::portal::run(
+                &bind,
+                portal_store,
+                portal_vpn,
+                webhook_secret,
+                portal_bot,
+                portal_admins,
+                secure_cookie,
+            )
+            .await
+            {
                 tracing::error!(%error, %bind, "личный кабинет остановлен");
             }
         });

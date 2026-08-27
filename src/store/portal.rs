@@ -23,6 +23,16 @@ pub struct PortalOverview {
     pub username: Option<String>,
     pub balance_kopecks: i64,
     pub keys: Vec<PortalKey>,
+    pub payments: Vec<PortalPayment>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortalPayment {
+    pub id: i64,
+    pub amount_kopecks: i64,
+    pub method: String,
+    pub status: String,
+    pub created_at: i64,
 }
 
 fn token_hash(token: &str) -> String {
@@ -145,12 +155,31 @@ impl Store {
             }))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         }).unwrap_or_default();
+        let payments = self
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT id,amount_kopecks,method,status,created_at FROM payment_requests
+                 WHERE user_id=?1 ORDER BY created_at DESC LIMIT 20",
+                )?;
+                let rows = statement.query_map([user_id], |row| {
+                    Ok(PortalPayment {
+                        id: row.get(0)?,
+                        amount_kopecks: row.get(1)?,
+                        method: row.get(2)?,
+                        status: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap_or_default();
         Some(PortalOverview {
             user_id,
             display_name: user.display_name,
             username: user.username,
             balance_kopecks: self.balance_kopecks(user_id),
             keys,
+            payments,
         })
     }
 }
