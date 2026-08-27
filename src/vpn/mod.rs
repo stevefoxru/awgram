@@ -628,7 +628,12 @@ impl Vpn {
             .panel_url
             .clone()
             .ok_or_else(|| crate::error::Error::Parse("URL панели не настроен".into()))?;
-        Ok((url, self.reveal_panel_password(encrypted_password)?))
+        let password = self
+            .reveal_panel_password(encrypted_password)
+            .map_err(|error| {
+                crate::error::Error::Parse(format!("учётные данные панели недоступны: {error}"))
+            })?;
+        Ok((url, password))
     }
 
     pub async fn panel_clients(
@@ -650,22 +655,41 @@ impl Vpn {
         let contents = panel::configuration(&url, &password, &client.id).await?;
         let preferred = self.clients_dir.join("panel").join(server.id.to_string());
         let fallback = std::env::temp_dir()
-            .join("awgram-panel")
+            .join(format!(
+                "awgram-panel-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ))
             .join(server.id.to_string());
         let dir = match std::fs::create_dir_all(&preferred) {
             Ok(()) => preferred,
             Err(error) => {
                 tracing::warn!(%error, path = %preferred.display(), "каталог панели недоступен, используется временный");
-                std::fs::create_dir_all(&fallback)?;
+                std::fs::create_dir_all(&fallback).map_err(|fallback_error| {
+                    crate::error::Error::Parse(format!(
+                        "не удалось создать временный каталог {}: {fallback_error}",
+                        fallback.display()
+                    ))
+                })?;
                 fallback.clone()
             }
         };
         let mut conf_path = dir.join(format!("{}.conf", client.name));
         if let Err(error) = std::fs::write(&conf_path, &contents) {
             tracing::warn!(%error, path = %conf_path.display(), "конфигурация панели не записалась, используется временный каталог");
-            std::fs::create_dir_all(&fallback)?;
+            std::fs::create_dir_all(&fallback).map_err(|fallback_error| {
+                crate::error::Error::Parse(format!(
+                    "не удалось создать временный каталог {}: {fallback_error}",
+                    fallback.display()
+                ))
+            })?;
             conf_path = fallback.join(format!("{}.conf", client.name));
-            std::fs::write(&conf_path, &contents)?;
+            std::fs::write(&conf_path, &contents).map_err(|fallback_error| {
+                crate::error::Error::Parse(format!(
+                    "не удалось записать временную конфигурацию {}: {fallback_error}",
+                    conf_path.display()
+                ))
+            })?;
         }
         let qr_path = conf_path.with_extension("png");
         let qr_saved = qrcode::QrCode::new(&contents).is_ok_and(|qr| {
