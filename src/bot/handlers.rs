@@ -1000,6 +1000,31 @@ async fn managed_clients(
     Ok(clients)
 }
 
+fn legacy_recovery_server(settings: &Store) -> Option<crate::store::VpnServer> {
+    let servers = settings.available_vpn_servers();
+    let preferred = settings.default_vpn_server();
+    preferred
+        .and_then(|id| {
+            servers
+                .iter()
+                .find(|server| server.id == id && !server.is_local)
+        })
+        .cloned()
+        .or_else(|| {
+            servers
+                .iter()
+                .find(|server| server.protocol == "amneziawg-panel" && !server.is_local)
+                .cloned()
+        })
+        .or_else(|| servers.iter().find(|server| !server.is_local).cloned())
+        .or_else(|| {
+            preferred
+                .and_then(|id| servers.iter().find(|server| server.id == id))
+                .cloned()
+        })
+        .or_else(|| servers.into_iter().next())
+}
+
 async fn extend_managed_client(
     vpn: &Vpn,
     settings: &Store,
@@ -5596,12 +5621,7 @@ async fn callback_handler(
                     crate::error::Error::Parse(e.to_string())
                 })?
                 .remove(0);
-            let Some(server) = settings.default_vpn_server().and_then(|server_id| {
-                settings
-                    .available_vpn_servers()
-                    .into_iter()
-                    .find(|server| server.id == server_id)
-            }) else {
+            let Some(server) = legacy_recovery_server(&settings) else {
                 settings.release_legacy_request_claim(id);
                 bot.send_message(chat, "Сервер восстановления не настроен или недоступен. Откройте карточку рабочего AWG-сервера и нажмите «🎯 Новые ключи и замена».")
                     .reply_markup(menu::admin_dashboard_menu())
@@ -5651,8 +5671,11 @@ async fn callback_handler(
                         bot.send_message(
                             chat,
                             format!(
-                                "{}\n\nДиагностика для администратора: {error}",
-                                i18n::error_text(lang, &error)
+                                "{}\n\nСервер восстановления: {} · {} · {}\nДиагностика для администратора: {error}",
+                                i18n::error_text(lang, &error),
+                                server.name,
+                                server.location,
+                                if server.is_local { "локальный" } else { &server.protocol }
                             ),
                         )
                         .await?;
@@ -5701,8 +5724,11 @@ async fn callback_handler(
                     bot.send_message(
                         chat,
                         format!(
-                            "{}\n\nДиагностика для администратора: {error}",
-                            i18n::error_text(lang, &error)
+                            "{}\n\nСервер восстановления: {} · {} · {}\nДиагностика для администратора: {error}",
+                            i18n::error_text(lang, &error),
+                            server.name,
+                            server.location,
+                            if server.is_local { "локальный" } else { &server.protocol }
                         ),
                     )
                     .await?;
