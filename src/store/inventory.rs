@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::store::Store;
+use rusqlite::OptionalExtension;
 
 #[derive(Debug, Clone)]
 pub struct InventoryItem {
@@ -10,6 +11,25 @@ pub struct InventoryItem {
     pub rx: u64,
     pub tx: u64,
     pub last_handshake: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRuntimeStats {
+    pub enabled: Option<bool>,
+    pub rx: u64,
+    pub tx: u64,
+    pub last_handshake: Option<i64>,
+    pub observed_at: i64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ServerRuntimeSummary {
+    pub observed: usize,
+    pub enabled: usize,
+    pub online: usize,
+    pub rx: u64,
+    pub tx: u64,
+    pub observed_at: Option<i64>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -23,6 +43,87 @@ pub struct InventoryReport {
 }
 
 impl Store {
+    pub fn client_runtime_stats(&self, name: &str) -> Option<KeyRuntimeStats> {
+        let inventory = self
+            .with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT k.enabled,k.rx,k.tx,k.last_handshake,k.last_seen_at
+                           FROM key_inventory k
+                           JOIN clients c ON c.server_id=k.server_id AND c.name=k.name
+                          WHERE c.name=?1 AND c.removed_at IS NULL AND k.missing_since IS NULL
+                          ORDER BY k.last_seen_at DESC LIMIT 1",
+                        [name],
+                        |row| {
+                            Ok(KeyRuntimeStats {
+                                enabled: Some(row.get::<_, i64>(0)? != 0),
+                                rx: row.get::<_, i64>(1)?.max(0) as u64,
+                                tx: row.get::<_, i64>(2)?.max(0) as u64,
+                                last_handshake: row.get(3)?,
+                                observed_at: row.get(4)?,
+                            })
+                        },
+                    )
+                    .optional()
+            })
+            .ok()
+            .flatten();
+        inventory.or_else(|| {
+            self.with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT t.rx,t.tx,
+                                (SELECT MAX(ts) FROM traffic_samples online
+                                  WHERE online.client_id=c.id AND online.online=1),t.ts
+                           FROM clients c JOIN traffic_samples t ON t.client_id=c.id
+                          WHERE c.name=?1 AND c.removed_at IS NULL
+                          ORDER BY t.ts DESC LIMIT 1",
+                        [name],
+                        |row| {
+                            Ok(KeyRuntimeStats {
+                                enabled: None,
+                                rx: row.get::<_, i64>(0)?.max(0) as u64,
+                                tx: row.get::<_, i64>(1)?.max(0) as u64,
+                                last_handshake: row.get(2)?,
+                                observed_at: row.get(3)?,
+                            })
+                        },
+                    )
+                    .optional()
+            })
+            .ok()
+            .flatten()
+        })
+    }
+
+    pub fn server_runtime_summary(&self, server_id: i64, now: i64) -> ServerRuntimeSummary {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN enabled<>0 THEN 1 ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN last_handshake>0 AND last_handshake>=?2 THEN 1 ELSE 0 END),0),
+                        COALESCE(SUM(rx),0),COALESCE(SUM(tx),0),MAX(last_seen_at)
+                   FROM key_inventory
+                  WHERE server_id=?1 AND missing_since IS NULL",
+                rusqlite::params![
+                    server_id,
+                    now.saturating_sub(crate::vpn::model::ONLINE_THRESHOLD_SECS)
+                ],
+                |row| {
+                    Ok(ServerRuntimeSummary {
+                        observed: row.get::<_, i64>(0)?.max(0) as usize,
+                        enabled: row.get::<_, i64>(1)?.max(0) as usize,
+                        online: row.get::<_, i64>(2)?.max(0) as usize,
+                        rx: row.get::<_, i64>(3)?.max(0) as u64,
+                        tx: row.get::<_, i64>(4)?.max(0) as u64,
+                        observed_at: row.get(5)?,
+                    })
+                },
+            )
+        })
+        .unwrap_or_default()
+    }
+
     pub fn reconcile_inventory(
         &self,
         server_id: i64,
@@ -164,5 +265,62 @@ mod tests {
         );
         assert_eq!(report.panel_only, vec!["only-panel"]);
         assert_eq!(report.database_only, vec!["in-db"]);
+    }
+
+    #[test]
+    fn runtime_stats_expose_panel_handshake_traffic_and_freshness() {
+        let store = Store::open_in_memory();
+        let server = store
+            .add_vpn_server(
+                &NewVpnServer {
+                    name: "NL",
+                    hostname: "nl",
+                    public_ip: "1.2.3.4",
+                    provider: "x",
+                    location: "NL",
+                    protocol: "amneziawg-panel",
+                    opened_at: None,
+                    is_local: false,
+                },
+                1,
+                1,
+            )
+            .unwrap();
+        store.sync_panel_clients(server, &[("alice".into(), "10.0.0.2".into())], 2);
+        store.reconcile_inventory(
+            server,
+            1_000,
+            &[InventoryItem {
+                remote_id: "42".into(),
+                name: "alice".into(),
+                enabled: true,
+                rx: 1_024,
+                tx: 2_048,
+                last_handshake: Some(950),
+            }],
+        );
+
+        assert_eq!(
+            store.client_runtime_stats("alice"),
+            Some(KeyRuntimeStats {
+                enabled: Some(true),
+                rx: 1_024,
+                tx: 2_048,
+                last_handshake: Some(950),
+                observed_at: 1_000,
+            })
+        );
+        assert_eq!(
+            store.server_runtime_summary(server, 1_000),
+            ServerRuntimeSummary {
+                observed: 1,
+                enabled: 1,
+                online: 1,
+                rx: 1_024,
+                tx: 2_048,
+                observed_at: Some(1_000),
+            }
+        );
+        assert_eq!(store.server_runtime_summary(server, 2_000).online, 0);
     }
 }

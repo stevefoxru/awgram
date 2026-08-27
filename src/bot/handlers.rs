@@ -1282,8 +1282,23 @@ fn customer_key_list(
             now_epoch(),
             vpn.client_expiry(&name),
         );
+        let telemetry = settings.client_runtime_stats(&name).map_or_else(
+            || "данных подключения пока нет".to_string(),
+            |runtime| {
+                let handshake = runtime
+                    .last_handshake
+                    .map(|value| {
+                        crate::vpn::model::format_handshake(settings.lang(uid), now_epoch(), value)
+                    })
+                    .unwrap_or_else(|| "никогда".into());
+                format!(
+                    "последнее подключение: {handshake} · трафик: {}",
+                    crate::vpn::model::human_bytes(runtime.rx.saturating_add(runtime.tx))
+                )
+            },
+        );
         lines.push(format!(
-            "{icon} {device}\n   Ключ: {name}\n   Сервер: {location}\n   Статус: {state}\n   Срок: {expiry}"
+            "{icon} {device}\n   Ключ: {name}\n   Сервер: {location}\n   Статус: {state}\n   Срок: {expiry}\n   Активность: {telemetry}"
         ));
         let title = format!("{icon} {device} · {name}")
             .chars()
@@ -1499,7 +1514,7 @@ async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Handl
     Ok(())
 }
 
-fn server_card_text(server: &crate::store::VpnServer, now: i64) -> String {
+fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64) -> String {
     let opened = server
         .opened_at
         .map(crate::calendar::format_date)
@@ -1523,7 +1538,27 @@ fn server_card_text(server: &crate::store::VpnServer, now: i64) -> String {
         .map(|v| (v - now).div_euclid(86_400))
         .map(|v| format!("{v} дн."))
         .unwrap_or_else(|| "—".into());
-    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЛимит: {} ключей\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
+    let assigned = settings.server_client_count(server.id).max(0);
+    let fill = if server.capacity > 0 {
+        assigned.saturating_mul(100) / server.capacity
+    } else {
+        0
+    };
+    let runtime = settings.server_runtime_summary(server.id, now);
+    let telemetry = runtime.observed_at.map_or_else(
+        || "данные ещё не получены".to_string(),
+        |observed_at| {
+            format!(
+                "обновлено {} · online {} · включено {}\nТрафик панели: ↓ {} · ↑ {}",
+                crate::vpn::model::format_handshake(Lang::Ru, now, observed_at),
+                runtime.online,
+                runtime.enabled,
+                crate::vpn::model::human_bytes(runtime.rx),
+                crate::vpn::model::human_bytes(runtime.tx)
+            )
+        },
+    );
+    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%)\nТелеметрия: {telemetry}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
         server.name,server.status,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},if server.enabled_for_provisioning{"включена"}else{"выключена"},if server.protocol=="amneziawg-2"{"AWG 2.0"}else{"AWG 1.0"},server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
@@ -1538,7 +1573,23 @@ async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
         .count();
     let local = servers.iter().filter(|s| s.is_local).count();
     let online = servers.iter().filter(|s| s.status == "online").count();
-    bot.send_message(chat,format!("🖥 Серверы\n\n🟢 Онлайн: {online}/{}\n🏠 Локальных: {local}\n⚠️ Требуют внимания: {attention}\n\nВыберите конкретный сервер. В его карточке действия разделены на подключение, диагностику, ключи и обслуживание.",servers.len())).reply_markup(menu::servers_menu(&servers)).await?;
+    let assigned = servers
+        .iter()
+        .map(|server| settings.server_client_count(server.id).max(0))
+        .sum::<i64>();
+    let capacity = servers
+        .iter()
+        .map(|server| server.capacity.max(0))
+        .sum::<i64>();
+    let panel_online = servers
+        .iter()
+        .map(|server| {
+            settings
+                .server_runtime_summary(server.id, now_epoch())
+                .online
+        })
+        .sum::<usize>();
+    bot.send_message(chat,format!("🖥 Серверы\n\n🟢 Онлайн: {online}/{}\n🏠 Локальных: {local}\n⚠️ Требуют внимания: {attention}\n🔑 Загрузка: {assigned}/{capacity}\n📶 Сейчас подключено: {panel_online}\n\nВыберите сервер: в карточке отображаются свежесть телеметрии, online, трафик и доступные действия.",servers.len())).reply_markup(menu::servers_menu(&servers)).await?;
     Ok(())
 }
 
@@ -3610,9 +3661,12 @@ async fn message_handler(
         if let Some(id) = created {
             dialogue.update(State::Idle).await?;
             let server = settings.vpn_server(id).expect("server was just inserted");
-            bot.send_message(msg.chat.id, server_card_text(&server, now_epoch()))
-                .reply_markup(menu::server_card_menu(id))
-                .await?;
+            bot.send_message(
+                msg.chat.id,
+                server_card_text(&server, &settings, now_epoch()),
+            )
+            .reply_markup(menu::server_card_menu(id))
+            .await?;
         } else {
             bot.send_message(msg.chat.id,"Не удалось сохранить. Допустимы только: amneziawg-2, amneziawg-1 или amneziawg-panel.").await?;
         }
@@ -3660,9 +3714,12 @@ async fn message_handler(
             let server = settings
                 .vpn_server(server_id)
                 .expect("updated server exists");
-            bot.send_message(msg.chat.id, server_card_text(&server, now_epoch()))
-                .reply_markup(menu::server_card_menu(server_id))
-                .await?;
+            bot.send_message(
+                msg.chat.id,
+                server_card_text(&server, &settings, now_epoch()),
+            )
+            .reply_markup(menu::server_card_menu(server_id))
+            .await?;
         } else {
             bot.send_message(
                 msg.chat.id,
@@ -3706,9 +3763,12 @@ async fn message_handler(
             let server = settings
                 .vpn_server(server_id)
                 .expect("updated server exists");
-            bot.send_message(msg.chat.id, server_card_text(&server, now_epoch()))
-                .reply_markup(menu::server_card_menu(server_id))
-                .await?;
+            bot.send_message(
+                msg.chat.id,
+                server_card_text(&server, &settings, now_epoch()),
+            )
+            .reply_markup(menu::server_card_menu(server_id))
+            .await?;
         } else {
             bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Допустимы только: amneziawg-2, amneziawg-1 или amneziawg-panel.").await?;
         }
@@ -5166,7 +5226,7 @@ async fn callback_handler(
         }
         Action::ServerCard(id) => {
             if let Some(server) = settings.vpn_server(id) {
-                bot.send_message(chat, server_card_text(&server, now_epoch()))
+                bot.send_message(chat, server_card_text(&server, &settings, now_epoch()))
                     .reply_markup(menu::server_card_menu(id))
                     .await?;
             }
@@ -7342,9 +7402,39 @@ async fn callback_handler(
             } else {
                 "активен"
             };
+            let server_name = source
+                .as_ref()
+                .map(|server| format!("{} · {}", server.location, server.name))
+                .unwrap_or_else(|| "не определён".into());
+            let telemetry = settings.client_runtime_stats(&name).map_or_else(
+                || "Телеметрия: ожидается первый опрос сервера".to_string(),
+                |runtime| {
+                    let handshake = runtime
+                        .last_handshake
+                        .map(|value| {
+                            crate::vpn::model::format_handshake(lang, now_epoch(), value)
+                        })
+                        .unwrap_or_else(|| "никогда".into());
+                    let observed = crate::vpn::model::format_handshake(
+                        lang,
+                        now_epoch(),
+                        runtime.observed_at,
+                    );
+                    let remote_state = match runtime.enabled {
+                        Some(true) => "включён на сервере",
+                        Some(false) => "отключён на сервере",
+                        None => "состояние получено локально",
+                    };
+                    format!(
+                        "Сервер: {remote_state}\nПоследнее подключение: {handshake}\nТрафик: ↓ {} · ↑ {}\nТелеметрия обновлена: {observed}",
+                        crate::vpn::model::human_bytes(runtime.rx),
+                        crate::vpn::model::human_bytes(runtime.tx)
+                    )
+                },
+            );
             bot.send_message(
                 chat,
-                format!("🔑 {name}\n📱 Устройство: {label}\nСтатус: {status}\nСрок: {expiry}"),
+                format!("🔑 {name}\n📱 Устройство: {label}\n🌍 Сервер: {server_name}\nСтатус: {status}\nСрок: {expiry}\n\n📊 Подключение\n{telemetry}"),
             )
             .reply_markup(menu::customer_key_menu(&name))
             .await?;
