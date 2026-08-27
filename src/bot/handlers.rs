@@ -70,6 +70,8 @@ pub enum Action {
     AdminBulkConfirm,
     AdminUser(i64),
     AdminUserKeys(i64),
+    AdminUserDeleteKeysAsk(i64),
+    AdminUserDeleteKeysConfirm(i64),
     AdminUserPayments(i64),
     AdminUserBalance(i64),
     AdminUserDiscount(i64),
@@ -175,6 +177,7 @@ pub enum Action {
     BuyPaid(i64),
     MyKeys,
     Profile,
+    Portal,
     Balance,
     PaymentApprove(i64),
     PaymentReject(i64),
@@ -258,6 +261,7 @@ fn parse_callback(data: &str) -> Action {
         "buy" => Action::Buy,
         "mykeys" => Action::MyKeys,
         "profile" => Action::Profile,
+        "portal" => Action::Portal,
         "balance" => Action::Balance,
         "set:payment" => Action::PaymentInstructionsAsk,
         "set:acquiring" => Action::AcquiringUrlAsk,
@@ -414,6 +418,14 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("admin:userkeys:") {
                 v.parse()
                     .map(Action::AdminUserKeys)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:userkeys-delete-confirm:") {
+                v.parse()
+                    .map(Action::AdminUserDeleteKeysConfirm)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:userkeys-delete:") {
+                v.parse()
+                    .map(Action::AdminUserDeleteKeysAsk)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("admin:userpay:") {
                 v.parse()
@@ -1744,6 +1756,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | BuyPaid(_)
         | MyKeys
         | Profile
+        | Portal
         | Balance
         | CustomerKey(_)
         | CustomerMove(_)
@@ -1879,6 +1892,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminBulkConfirm
         | AdminUser(_)
         | AdminUserKeys(_)
+        | AdminUserDeleteKeysAsk(_)
+        | AdminUserDeleteKeysConfirm(_)
         | AdminUserPayments(_)
         | AdminUserBalance(_)
         | AdminUserDiscount(_)
@@ -4873,6 +4888,7 @@ async fn callback_handler(
             | Action::BuyPaid(_)
             | Action::MyKeys
             | Action::Profile
+            | Action::Portal
             | Action::Balance
             | Action::CustomerKey(_)
             | Action::CustomerMove(_)
@@ -5864,6 +5880,65 @@ async fn callback_handler(
                 .reply_markup(menu::admin_user_keys_menu(user_id, &names))
                 .await?;
         }
+        Action::AdminUserDeleteKeysAsk(user_id) => {
+            let names = settings.user_client_names(user_id);
+            if names.is_empty() {
+                bot.send_message(chat, "У пользователя нет активных ключей.")
+                    .reply_markup(menu::admin_user_menu(
+                        user_id,
+                        settings.user_blocked(user_id),
+                    ))
+                    .await?;
+            } else {
+                bot.send_message(
+                    chat,
+                    format!(
+                        "⚠️ Удаление всех ключей пользователя {user_id}\n\nБудут удалены {} ключей с соответствующих AWG-серверов и панелей:\n\n{}\n\nПлатежи, баланс и карточка пользователя сохранятся. Операцию нельзя отменить.",
+                        names.len(),
+                        names.join("\n")
+                    ),
+                )
+                .reply_markup(menu::admin_user_delete_keys_confirm_menu(user_id))
+                .await?;
+            }
+        }
+        Action::AdminUserDeleteKeysConfirm(user_id) => {
+            let names = settings.user_client_names(user_id);
+            let mut removed = Vec::new();
+            let mut failed = Vec::new();
+            for name in names {
+                match client_remove(&vpn, &settings, &name).await {
+                    Ok(()) => {
+                        settings.log_event(
+                            now_epoch(),
+                            EventKind::ClientRemove,
+                            Some(&name),
+                            Some(uid),
+                            Some(&format!("all user keys removed; user={user_id}")),
+                        );
+                        removed.push(name);
+                    }
+                    Err(error) => failed.push(format!("{name}: {error}")),
+                }
+            }
+            let mut text = format!(
+                "🗑 Удаление ключей пользователя {user_id}\n\nУдалено: {}",
+                removed.len()
+            );
+            if !failed.is_empty() {
+                text.push_str(&format!(
+                    "\nНе удалось удалить: {}\n\n{}",
+                    failed.len(),
+                    failed.join("\n")
+                ));
+            }
+            bot.send_message(chat, text)
+                .reply_markup(menu::admin_user_menu(
+                    user_id,
+                    settings.user_blocked(user_id),
+                ))
+                .await?;
+        }
         Action::AdminUserPayments(user_id) => {
             let rows = settings.user_payments(user_id, 20);
             let text = if rows.is_empty() {
@@ -5941,6 +6016,85 @@ async fn callback_handler(
         Action::StatsSection(section) => {
             let now = now_epoch();
             let text = match section.as_str() {
+                "servers" => {
+                    let mut lines = Vec::new();
+                    for server in settings.vpn_servers() {
+                        let assigned = settings.server_client_count(server.id);
+                        if server.protocol == "amneziawg-panel" {
+                            let panel = match settings.panel_password(server.id) {
+                                Some(secret) => vpn.panel_clients(&server, &secret).await,
+                                None => Err(crate::error::Error::Parse(
+                                    "пароль панели не настроен".into(),
+                                )),
+                            };
+                            match panel {
+                                Ok(clients) => {
+                                    settings.ingest_panel(
+                                        server.id,
+                                        now,
+                                        &clients
+                                            .iter()
+                                            .map(|client| crate::store::Sample {
+                                                name: client.name.clone(),
+                                                ip: client.address.clone(),
+                                                rx: client.transfer_rx,
+                                                tx: client.transfer_tx,
+                                                last_handshake: client.last_handshake_epoch(),
+                                            })
+                                            .collect::<Vec<_>>(),
+                                    );
+                                    let online = clients
+                                        .iter()
+                                        .filter(|client| {
+                                            client.last_handshake_epoch().is_some_and(|handshake| {
+                                                now.saturating_sub(handshake)
+                                                    < crate::vpn::model::ONLINE_THRESHOLD_SECS
+                                            })
+                                        })
+                                        .count();
+                                    let traffic = clients.iter().fold(0_u64, |total, client| {
+                                        total
+                                            .saturating_add(client.transfer_rx)
+                                            .saturating_add(client.transfer_tx)
+                                    });
+                                    lines.push(format!(
+                                        "🟢 {} · {}\n   AWG 1.0 · панель доступна\n   Ключи: {} (в базе: {assigned}) · онлайн: {online}\n   Трафик панели: {}",
+                                        server.name,
+                                        server.location,
+                                        clients.len(),
+                                        crate::vpn::model::human_bytes(traffic)
+                                    ));
+                                }
+                                Err(error) => lines.push(format!(
+                                    "🔴 {} · {}\n   AWG 1.0 · панель недоступна\n   Ключи в базе: {assigned}\n   Причина: {error}",
+                                    server.name, server.location
+                                )),
+                            }
+                        } else {
+                            lines.push(format!(
+                                "{} {} · {}\n   {} · ключей: {assigned}/{}, статус: {}",
+                                if server.status == "online" {
+                                    "🟢"
+                                } else {
+                                    "⚪"
+                                },
+                                server.name,
+                                server.location,
+                                server.protocol,
+                                server.capacity,
+                                server.status
+                            ));
+                        }
+                    }
+                    format!(
+                        "🖥 Статистика серверов\n\n{}",
+                        if lines.is_empty() {
+                            "Серверы не добавлены.".into()
+                        } else {
+                            lines.join("\n\n")
+                        }
+                    )
+                }
                 "users" => {
                     let s = settings.admin_user_stats(now);
                     format!("👤 Пользователи\n\nВсего: {}\nНовых сегодня: {}\nНовых за 30 дней: {}\nПлатящих: {}\nПришли по рефералам: {}\nЗаблокировано: {}",s.total,s.new_today,s.new_30d,s.paying,s.referred,s.blocked)
@@ -6446,7 +6600,30 @@ async fn callback_handler(
             let me = bot.get_me().await?;
             let username = me.username.clone().unwrap_or_default();
             bot.send_message(chat, format!("👤 Telegram ID: {uid}\nАктивных ключей: {}\nРеферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}", settings.user_client_names(uid).len()))
-                .reply_markup(menu::customer_keyboard()).await?;
+                .reply_markup(menu::profile_menu(cfg.portal_public_url.is_some())).await?;
+        }
+        Action::Portal => {
+            match (
+                &cfg.portal_public_url,
+                settings.issue_portal_token(uid, now_epoch()),
+            ) {
+                (Some(base), Some(token)) => {
+                    let url = format!("{base}/login?token={token}");
+                    bot.send_message(chat, "🌐 Внутренний личный кабинет\n\nСсылка одноразовая и действует 15 минут. После входа сессия сохранится на этом устройстве на 30 дней. Не пересылайте ссылку другим людям.")
+                        .reply_markup(menu::portal_link_menu(&url))
+                        .await?;
+                }
+                (None, _) => {
+                    bot.send_message(chat, "Веб-кабинет пока не настроен администратором.")
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                }
+                _ => {
+                    bot.send_message(chat, "Не удалось создать ссылку входа. Повторите позже.")
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                }
+            }
         }
         Action::PaymentReject(id) => {
             bot.send_message(chat, format!("Укажите причину отказа по заявке #{id}:"))
@@ -9203,6 +9380,8 @@ mod tests {
             AdminBulkConfirm,
             AdminUser(1),
             AdminUserKeys(1),
+            AdminUserDeleteKeysAsk(1),
+            AdminUserDeleteKeysConfirm(1),
             AdminUserPayments(1),
             AdminUserBalance(1),
             AdminUserDiscount(1),
@@ -9352,6 +9531,8 @@ mod tests {
                 AdminBulkConfirm => {}
                 AdminUser(_) => {}
                 AdminUserKeys(_) => {}
+                AdminUserDeleteKeysAsk(_) => {}
+                AdminUserDeleteKeysConfirm(_) => {}
                 AdminUserPayments(_) => {}
                 AdminUserBalance(_) => {}
                 AdminUserDiscount(_) => {}
@@ -9452,6 +9633,7 @@ mod tests {
                 BuyPaid(_) => {}
                 MyKeys => {}
                 Profile => {}
+                Portal => {}
                 Balance => {}
                 PaymentApprove(_) => {}
                 PaymentReject(_) => {}

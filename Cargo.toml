@@ -1,6 +1,6 @@
 [package]
 name = "awgram"
-version = "0.33.4"
+version = "1.0.0"
 edition = "2021"
 # libsqlite3-sys (rusqlite bundled) использует cfg_select! из Rust 1.95,
 # но сам MSRV не объявляет — без этой строки старый тулчейн падает с E0658.
@@ -11,7 +11,7 @@ repository = "https://github.com/stevefoxru/awgram"
 
 [dependencies]
 teloxide = { version = "0.17", default-features = false, features = ["macros", "ctrlc_handler", "rustls"] }
-tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "process", "time"] }
+tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "process", "time", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
@@ -28,6 +28,7 @@ chacha20poly1305 = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "cookies"] }
 qrcode = "0.14"
 image = { version = "0.25", default-features = false, features = ["png"] }
+axum = { version = "0.8", features = ["http1", "json", "tokio"] }
 
 [dev-dependencies]
 tempfile = "3"

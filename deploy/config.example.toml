@@ -11,3 +11,8 @@ state_file = "/etc/awgram/state.json"           # персистентное с�
 # Путь к SQLite-базе бота (настройки, статистика, история, события).
 # Каталог создаёт установщик; переживает переустановки и ребуты.
 db_path = "/var/lib/awgram/awgram.db"
+
+# Внутренний веб-кабинет. Оставьте закомментированным для отключения.
+# Публикуйте через HTTPS reverse proxy (например, Caddy или nginx).
+# portal_bind = "127.0.0.1:8787"
+# portal_public_url = "https://cabinet.example.ru"

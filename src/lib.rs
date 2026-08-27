@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod i18n;
 pub mod operations;
+pub mod portal;
 pub mod store;
 pub mod subscriptions;
 pub mod vpn;

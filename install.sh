@@ -430,6 +430,9 @@ op_timeout_secs = 60
 state_file = "$state_file"
 db_path = "$STATE_DIR/awgram.db"
 controller_only = $([ "$CONTROLLER_ONLY" = 1 ] && printf true || printf false)
+# Внутренний ЛК (v1.0): раскомментируйте и укажите публичный HTTPS-адрес.
+# portal_bind = "127.0.0.1:8787"
+# portal_public_url = "https://cabinet.example.ru"
 EOF
   chmod 640 "$CFG_FILE"
 }

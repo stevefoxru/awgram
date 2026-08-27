@@ -11,6 +11,7 @@ mod commerce;
 mod events;
 mod groups;
 mod nodes;
+mod portal;
 mod server_enrollment;
 mod servers;
 mod settings;
@@ -27,6 +28,7 @@ pub use groups::{
     INVITE_TTL_SECS,
 };
 pub use nodes::{InstallationJob, VpnInstance, VpnNode};
+pub use portal::{PortalKey, PortalOverview};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
 pub use stars::{NewStarOrder, StarOrder, StarPaymentClaim};
@@ -501,6 +503,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     UPDATE vpn_instances
        SET status='unsupported',updated_at=strftime('%s','now')
      WHERE protocol NOT IN ('modern','legacy','amneziawg-2','amneziawg-1','amneziawg-panel');
+    "#,
+    // v19: короткоживущие одноразовые ссылки и серверные сессии внутреннего ЛК.
+    // В БД хранятся только SHA-256 отпечатки секретов.
+    r#"
+    CREATE TABLE web_sessions(
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        activated_at INTEGER,
+        revoked_at INTEGER
+    );
+    CREATE INDEX idx_web_sessions_user ON web_sessions(user_id,expires_at);
     "#,
 ];
 

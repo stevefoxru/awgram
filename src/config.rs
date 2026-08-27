@@ -11,6 +11,8 @@ pub struct Config {
     pub state_file: PathBuf,
     pub db_path: PathBuf,
     pub controller_only: bool,
+    pub portal_bind: Option<String>,
+    pub portal_public_url: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -25,6 +27,8 @@ impl std::fmt::Debug for Config {
             .field("state_file", &self.state_file)
             .field("db_path", &self.db_path)
             .field("controller_only", &self.controller_only)
+            .field("portal_bind", &self.portal_bind)
+            .field("portal_public_url", &self.portal_public_url)
             .finish()
     }
 }
@@ -59,6 +63,10 @@ struct Raw {
     db_path: PathBuf,
     #[serde(default)]
     controller_only: bool,
+    #[serde(default)]
+    portal_bind: Option<String>,
+    #[serde(default)]
+    portal_public_url: Option<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -101,6 +109,11 @@ impl Config {
             state_file: raw.state_file,
             db_path: raw.db_path,
             controller_only: raw.controller_only,
+            portal_bind: raw.portal_bind.filter(|value| !value.trim().is_empty()),
+            portal_public_url: raw
+                .portal_public_url
+                .map(|value| value.trim_end_matches('/').to_string())
+                .filter(|value| value.starts_with("http://") || value.starts_with("https://")),
         })
     }
 }

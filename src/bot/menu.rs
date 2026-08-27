@@ -8,6 +8,22 @@ fn cb(text: &str, data: &str) -> InlineKeyboardButton {
     InlineKeyboardButton::callback(text.to_string(), data.to_string())
 }
 
+pub fn profile_menu(portal_enabled: bool) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if portal_enabled {
+        rows.push(vec![cb("🌐 Открыть веб-кабинет", "portal")]);
+    }
+    rows.push(vec![cb("🔑 Мои ключи", "mykeys")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn portal_link_menu(url: &str) -> InlineKeyboardMarkup {
+    let button = reqwest::Url::parse(url)
+        .map(|url| InlineKeyboardButton::url("🚀 Войти в кабинет", url))
+        .unwrap_or_else(|_| cb("Вернуться", "profile"));
+    InlineKeyboardMarkup::new(vec![vec![button], vec![cb("⬅️ Кабинет", "profile")]])
+}
+
 pub fn customer_keyboard() -> KeyboardMarkup {
     let mut rows = vec![
         vec![
@@ -406,7 +422,11 @@ pub fn bulk_confirm_menu() -> InlineKeyboardMarkup {
 
 pub fn statistics_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("🔐 VPN", "stats"), cb("👤 Пользователи", "stats:users")],
+        vec![
+            cb("🖥 Серверы AWG", "stats:servers"),
+            cb("🔐 Все ключи", "stats"),
+        ],
+        vec![cb("👤 Пользователи", "stats:users")],
         vec![
             cb("💳 Подписки", "stats:subscriptions"),
             cb("📈 Тарифы", "stats:tariffs"),
@@ -491,11 +511,27 @@ pub fn admin_user_keys_menu(user_id: i64, names: &[String]) -> InlineKeyboardMar
             ]
         })
         .collect::<Vec<_>>();
+    if !names.is_empty() {
+        rows.push(vec![cb(
+            "🗑 Удалить все ключи",
+            &format!("admin:userkeys-delete:{user_id}"),
+        )]);
+    }
     rows.push(vec![cb(
         "⬅️ Карточка пользователя",
         &format!("admin:user:{user_id}"),
     )]);
     InlineKeyboardMarkup::new(rows)
+}
+
+pub fn admin_user_delete_keys_confirm_menu(user_id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "🚨 Да, удалить все ключи",
+            &format!("admin:userkeys-delete-confirm:{user_id}"),
+        )],
+        vec![cb("Отмена", &format!("admin:userkeys:{user_id}"))],
+    ])
 }
 
 pub fn buy_terms_menu(prices: [i64; 4]) -> InlineKeyboardMarkup {

@@ -40,6 +40,14 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(bind) = cfg.portal_bind.clone() {
+        let portal_store = store.clone();
+        tokio::spawn(async move {
+            if let Err(error) = awgram::portal::run(&bind, portal_store).await {
+                tracing::error!(%error, %bind, "личный кабинет остановлен");
+            }
+        });
+    }
     store.migrate_state_json(&cfg.state_file);
     if cfg.controller_only {
         let removed = store.remove_empty_local_vpn_servers();
