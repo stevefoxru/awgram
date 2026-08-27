@@ -204,6 +204,70 @@ struct SupportRequest {
     message: String,
 }
 
+#[derive(serde::Deserialize)]
+struct TopupRequest {
+    amount_rubles: i64,
+}
+
+async fn create_topup(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(request): Json<TopupRequest>,
+) -> Response {
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !(100..=100_000).contains(&request.amount_rubles) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Сумма должна быть от 100 до 100 000 ₽",
+        )
+            .into_response();
+    }
+    match state.store.create_payment_request(user_id,0,request.amount_rubles*100,"topup",now_epoch()) {
+        Some(id) => Json(serde_json::json!({"ok":true,"payment_id":id,"instructions":state.store.payment_instructions()})).into_response(),
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ProofRequest {
+    proof: String,
+}
+
+async fn submit_payment_proof(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(request): Json<ProofRequest>,
+) -> Response {
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let proof = request.proof.trim();
+    if proof.is_empty() || proof.chars().count() > 500 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Укажите номер операции или короткий комментарий",
+        )
+            .into_response();
+    }
+    let owned = state.store.payment_request(id).is_some_and(|payment| {
+        payment.user_id == user_id && payment.status == crate::store::PaymentStatus::Pending
+    });
+    if !owned || !state.store.set_payment_proof(id, user_id, proof) {
+        return StatusCode::CONFLICT.into_response();
+    }
+    for admin_id in state.admin_ids.iter() {
+        let _=state.bot.send_message(ChatId(*admin_id),format!("💳 Подтверждение оплаты из веб-кабинета\nЗаявка: #{id}\nПользователь: {user_id}\nКомментарий: {proof}")).await;
+    }
+    Json(serde_json::json!({"ok":true})).into_response()
+}
+
 async fn support(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -337,6 +401,8 @@ pub async fn run(
         .route("/api/keys/{name}/config", get(download_config))
         .route("/api/keys/{name}/qr", get(download_qr))
         .route("/api/support", post(support))
+        .route("/api/payments/topup", post(create_topup))
+        .route("/api/payments/{id}/proof", post(submit_payment_proof))
         .route("/api/payments/webhook", post(acquiring_webhook))
         .with_state(PortalState {
             store,
@@ -359,5 +425,5 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <script>
 const fmt=n=>{const u=['Б','КБ','МБ','ГБ','ТБ'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return `${n.toFixed(i?1:0)} ${u[i]}`};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-fetch('/api/me').then(async r=>{if(!r.ok)throw 0;return r.json()}).then(d=>{const keys=d.keys.map(k=>`<article class="card key"><div><div class="status ${k.server_status==='offline'?'offline':''}">${k.server_status==='offline'?'Недоступен':'Активен'}</div><h2>${esc(k.device)}</h2><div class="muted">${esc(k.name)} · ${esc(k.location)} · AWG 1.0</div><div class="actions"><a class="action" href="/api/keys/${encodeURIComponent(k.name)}/config">Скачать конфиг</a><a class="action" target="_blank" href="/api/keys/${encodeURIComponent(k.name)}/qr">QR-код</a></div></div><div><div class="muted">Последняя активность</div><strong>${k.last_handshake?new Date(k.last_handshake*1000).toLocaleString('ru-RU'):'Нет данных'}</strong></div><div class="metric"><div class="muted">Трафик</div><strong>${fmt(k.rx+k.tx)}</strong></div></article>`).join('');const payments=d.payments.map(p=>`<div class="payment"><strong>#${p.id} · ${(p.amount_kopecks/100).toLocaleString('ru-RU')} ₽</strong><div class="muted">${esc(p.method)} · ${esc(p.status)} · ${new Date(p.created_at*1000).toLocaleDateString('ru-RU')}</div></div>`).join('');document.querySelector('#app').innerHTML=`<header><div class="brand">Zuev<span>VPN</span></div><button id="logout">Выйти</button></header><section class="hero"><article class="card"><span class="pill">Личный кабинет</span><h1>${esc(d.display_name||'Пользователь')}</h1><p class="muted">Ваши подключения, состояние серверов и статистика использования.</p></article><article class="card"><div class="muted">Внутренний баланс</div><div class="balance">${(d.balance_kopecks/100).toLocaleString('ru-RU',{style:'currency',currency:'RUB'})}</div><div class="muted">Активных ключей: ${d.keys.length}</div></article></section><section class="keys">${keys||'<article class="card empty">У вас пока нет активных ключей.</article>'}</section><section class="grid2"><article class="card"><h2>Платежи</h2>${payments||'<p class="muted">Операций пока нет.</p>'}</article><article class="card"><h2>Поддержка</h2><p class="muted">Опишите проблему — обращение появится у администратора.</p><textarea id="supportText" maxlength="1000" placeholder="Что не работает?"></textarea><button id="supportSend">Отправить</button><p id="supportResult" class="muted"></p></article></section>`;document.querySelector('#logout').onclick=()=>fetch('/api/logout',{method:'POST'}).then(()=>location.reload());document.querySelector('#supportSend').onclick=async()=>{const message=document.querySelector('#supportText').value;const r=await fetch('/api/support',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message})});document.querySelector('#supportResult').textContent=r.ok?`Обращение #${(await r.json()).ticket_id} создано.`:'Не удалось создать обращение.'}}).catch(()=>{document.querySelector('#app').innerHTML='<section class="card login"><span class="pill">Требуется вход</span><h1>Откройте кабинет через Telegram</h1><p class="muted">В боте нажмите «Кабинет → Открыть веб-кабинет». Ссылка одноразовая и действует 15 минут.</p></section>'});
+fetch('/api/me').then(async r=>{if(!r.ok)throw 0;return r.json()}).then(d=>{const keys=d.keys.map(k=>`<article class="card key"><div><div class="status ${k.server_status==='offline'?'offline':''}">${k.server_status==='offline'?'Недоступен':'Активен'}</div><h2>${esc(k.device)}</h2><div class="muted">${esc(k.name)} · ${esc(k.location)} · AWG 1.0</div><div class="actions"><a class="action" href="/api/keys/${encodeURIComponent(k.name)}/config">Скачать конфиг</a><a class="action" target="_blank" href="/api/keys/${encodeURIComponent(k.name)}/qr">QR-код</a></div></div><div><div class="muted">Последняя активность</div><strong>${k.last_handshake?new Date(k.last_handshake*1000).toLocaleString('ru-RU'):'Нет данных'}</strong></div><div class="metric"><div class="muted">Трафик</div><strong>${fmt(k.rx+k.tx)}</strong></div></article>`).join('');const payments=d.payments.map(p=>`<div class="payment"><strong>#${p.id} · ${(p.amount_kopecks/100).toLocaleString('ru-RU')} ₽</strong><div class="muted">${esc(p.method)} · ${esc(p.status)} · ${new Date(p.created_at*1000).toLocaleDateString('ru-RU')}</div></div>`).join('');document.querySelector('#app').innerHTML=`<header><div class="brand">Zuev<span>VPN</span></div><button id="logout">Выйти</button></header><section class="hero"><article class="card"><span class="pill">Личный кабинет</span><h1>${esc(d.display_name||'Пользователь')}</h1><p class="muted">Ваши подключения, состояние серверов и статистика использования.</p></article><article class="card"><div class="muted">Внутренний баланс</div><div class="balance">${(d.balance_kopecks/100).toLocaleString('ru-RU',{style:'currency',currency:'RUB'})}</div><div class="muted">Активных ключей: ${d.keys.length}</div></article></section><section class="keys">${keys||'<article class="card empty">У вас пока нет активных ключей.</article>'}</section><section class="grid2"><article class="card"><h2>Платежи</h2><div class="actions"><input id="topupAmount" type="number" min="100" max="100000" placeholder="Сумма, ₽"><button id="topupCreate">Создать заявку</button></div><textarea id="topupProof" maxlength="500" placeholder="После перевода: номер операции или комментарий"></textarea><button id="topupProofSend" disabled>Я оплатил</button><p id="topupResult" class="muted"></p>${payments||'<p class="muted">Операций пока нет.</p>'}</article><article class="card"><h2>Поддержка</h2><p class="muted">Опишите проблему — обращение появится у администратора.</p><textarea id="supportText" maxlength="1000" placeholder="Что не работает?"></textarea><button id="supportSend">Отправить</button><p id="supportResult" class="muted"></p></article></section>`;document.querySelector('#logout').onclick=()=>fetch('/api/logout',{method:'POST'}).then(()=>location.reload());document.querySelector('#supportSend').onclick=async()=>{const message=document.querySelector('#supportText').value;const r=await fetch('/api/support',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message})});document.querySelector('#supportResult').textContent=r.ok?`Обращение #${(await r.json()).ticket_id} создано.`:'Не удалось создать обращение.'};let paymentId=null;document.querySelector('#topupCreate').onclick=async()=>{const amount_rubles=Number(document.querySelector('#topupAmount').value);const r=await fetch('/api/payments/topup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount_rubles})});if(r.ok){const x=await r.json();paymentId=x.payment_id;document.querySelector('#topupResult').textContent=`Заявка #${paymentId}. ${x.instructions}`;document.querySelector('#topupProofSend').disabled=false}else document.querySelector('#topupResult').textContent='Проверьте сумму.'};document.querySelector('#topupProofSend').onclick=async()=>{const proof=document.querySelector('#topupProof').value;const r=await fetch(`/api/payments/${paymentId}/proof`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proof})});document.querySelector('#topupResult').textContent=r.ok?'Подтверждение отправлено администратору.':'Не удалось отправить подтверждение.'}}).catch(()=>{document.querySelector('#app').innerHTML='<section class="card login"><span class="pill">Требуется вход</span><h1>Откройте кабинет через Telegram</h1><p class="muted">В боте нажмите «Кабинет → Открыть веб-кабинет». Ссылка одноразовая и действует 15 минут.</p></section>'});
 </script></body></html>"##;
