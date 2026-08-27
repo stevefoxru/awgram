@@ -7374,10 +7374,23 @@ async fn callback_handler(
                     .map_err(|error| crate::error::Error::Parse(error.to_string()))?
                     .remove(0);
             let expiry = vpn.client_expiry(&name);
+            let Some(replacement_id) =
+                settings.create_key_replacement(uid, &name, &new_name, server_id, now_epoch())
+            else {
+                resume_pending_replacement(&bot, chat, &vpn, &settings, lang, uid, &name).await?;
+                return Ok(());
+            };
             let replacement = if server.is_local {
-                vpn.add(&new_name, None, settings.psk_default()).await?
+                vpn.add(&new_name, None, settings.psk_default()).await
             } else {
-                nonlocal_add(&vpn, &settings, &server, &new_name).await?
+                nonlocal_add(&vpn, &settings, &server, &new_name).await
+            };
+            let replacement = match replacement {
+                Ok(result) => result,
+                Err(error) => {
+                    settings.decide_key_replacement(replacement_id, uid, "cancelled", now_epoch());
+                    return Err(error.into());
+                }
             };
             if let Some(expires_at) = expiry {
                 let result = if server.is_local {
@@ -7391,24 +7404,13 @@ async fn callback_handler(
                     } else {
                         let _ = nonlocal_remove(&vpn, &settings, &server, &new_name).await;
                     }
+                    settings.decide_key_replacement(replacement_id, uid, "cancelled", now_epoch());
                     return Err(error.into());
                 }
             }
             settings.assign_client_group(&new_name, None, now_epoch());
             settings.assign_client_owner(&new_name, Some(uid));
             settings.assign_client_server(&new_name, server_id, &server.protocol);
-            let Some(replacement_id) =
-                settings.create_key_replacement(uid, &name, &new_name, server_id, now_epoch())
-            else {
-                if server.is_local {
-                    let _ = vpn.remove(&new_name).await;
-                } else {
-                    let _ = nonlocal_remove(&vpn, &settings, &server, &new_name).await;
-                }
-                bot.send_message(chat, "Для этого ключа уже выполняется замена.")
-                    .await?;
-                return Ok(());
-            };
             if !settings.retire_client(&name, now_epoch()) {
                 settings.decide_key_replacement(replacement_id, uid, "cancelled", now_epoch());
                 if server.is_local {

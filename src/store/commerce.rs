@@ -1271,7 +1271,7 @@ impl Store {
             connection.execute(
                 "UPDATE payment_requests SET proof=?3
              WHERE id=?1 AND amount_kopecks=?2 AND method='acquiring' AND status='pending'
-               AND (proof IS NULL OR proof=?3)",
+               AND proof IS NULL",
                 rusqlite::params![id, amount_kopecks, format!("acquiring:{transaction_id}")],
             )
         })

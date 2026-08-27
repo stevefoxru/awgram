@@ -787,6 +787,7 @@ pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
             "🛟 Заменить нерабочий ключ",
             &format!("move:choose:{name}"),
         )],
+        vec![cb("📖 Как установить", "guide:awg")],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
 }

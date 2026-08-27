@@ -37,6 +37,10 @@ fn vpn_problem(report: &crate::vpn::wire::CheckReport) -> Option<String> {
 }
 
 async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
+    let removed_sessions = store.prune_portal_sessions(now);
+    if removed_sessions > 0 {
+        tracing::info!(removed_sessions, "устаревшие сессии ЛК удалены");
+    }
     if !cfg.controller_only {
         match vpn.check().await {
             Ok(report) => {
@@ -84,7 +88,59 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     {
         let remote_health = if server.protocol == "amneziawg-panel" {
             match store.panel_password(server.id) {
-                Some(secret) => vpn.panel_clients(&server, &secret).await.map(|_| true),
+                Some(secret) => match vpn.panel_clients(&server, &secret).await {
+                    Ok(clients) => {
+                        let samples = clients
+                            .iter()
+                            .map(|client| crate::store::Sample {
+                                name: client.name.clone(),
+                                ip: client.address.clone(),
+                                rx: client.transfer_rx,
+                                tx: client.transfer_tx,
+                                last_handshake: client.last_handshake_epoch(),
+                            })
+                            .collect::<Vec<_>>();
+                        store.ingest_panel(server.id, now, &samples);
+                        let inventory = clients
+                            .iter()
+                            .map(|client| crate::store::InventoryItem {
+                                remote_id: client.id.clone(),
+                                name: client.name.clone(),
+                                enabled: client.enabled,
+                                rx: client.transfer_rx,
+                                tx: client.transfer_tx,
+                                last_handshake: client.last_handshake_epoch(),
+                            })
+                            .collect::<Vec<_>>();
+                        let report = store.reconcile_inventory(server.id, now, &inventory);
+                        if !report.panel_only.is_empty()
+                            || !report.database_only.is_empty()
+                            || !report.wrong_server.is_empty()
+                            || !report.duplicates.is_empty()
+                        {
+                            let details = format!(
+                                "panel_only={} database_only={} wrong_server={} duplicates={}",
+                                report.panel_only.len(),
+                                report.database_only.len(),
+                                report.wrong_server.len(),
+                                report.duplicates.len()
+                            );
+                            let key = format!("vpn-server-{}-inventory", server.id);
+                            if store.update_monitor_state(&key, "warning", Some(&details), now) {
+                                notify_admins(bot,cfg,format!("🧾 Сверка ключей «{}» обнаружила расхождения\n{}\n\nОткройте карточку сервера → «Сверить ключи с базой».",server.name,details)).await;
+                            }
+                        } else {
+                            store.update_monitor_state(
+                                &format!("vpn-server-{}-inventory", server.id),
+                                "ok",
+                                None,
+                                now,
+                            );
+                        }
+                        Ok(true)
+                    }
+                    Err(error) => Err(error),
+                },
                 None => Err(crate::error::Error::Parse(
                     "пароль панели не настроен".into(),
                 )),

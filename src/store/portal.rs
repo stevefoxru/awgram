@@ -40,6 +40,15 @@ fn token_hash(token: &str) -> String {
 }
 
 impl Store {
+    pub fn prune_portal_sessions(&self, now: i64) -> usize {
+        self.with_conn(|connection| {
+            connection.execute(
+                "DELETE FROM web_sessions WHERE expires_at<?1 OR (revoked_at IS NOT NULL AND revoked_at<?2)",
+                rusqlite::params![now,now-7*86_400],
+            )
+        }).unwrap_or_default()
+    }
+
     pub fn issue_portal_token(&self, user_id: i64, now: i64) -> Option<String> {
         self.user(user_id)?;
         let random: [u8; 32] = rand::rng().random();

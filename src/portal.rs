@@ -226,7 +226,20 @@ async fn support(
         .store
         .open_support_ticket_in_category(user_id, "connection", message, now_epoch())
     {
-        Some(id) => Json(serde_json::json!({"ok":true,"ticket_id":id})).into_response(),
+        Some(id) => {
+            for admin_id in state.admin_ids.iter() {
+                let _ = state
+                    .bot
+                    .send_message(
+                        ChatId(*admin_id),
+                        format!(
+                            "🆘 Новое обращение из веб-кабинета #{id}\nПользователь: {user_id}\n\n{message}"
+                        ),
+                    )
+                    .await;
+            }
+            Json(serde_json::json!({"ok":true,"ticket_id":id})).into_response()
+        }
         None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -288,6 +301,15 @@ async fn acquiring_webhook(
             let _ = state.bot.send_message(ChatId(*admin_id),format!("🏦 Эквайринг подтвердил оплату заявки #{}.\nСумма: {:.2} ₽\nТранзакция: {}\n\nПроверьте заявку в разделе «Финансы» и выполните выдачу.",notice.order_id,notice.amount_kopecks as f64/100.0,notice.transaction_id)).await;
         }
         Json(serde_json::json!({"ok":true})).into_response()
+    } else if state
+        .store
+        .payment_request(notice.order_id)
+        .is_some_and(|payment| {
+            payment.amount_kopecks == notice.amount_kopecks
+                && payment.proof.as_deref() == Some(&format!("acquiring:{}", notice.transaction_id))
+        })
+    {
+        Json(serde_json::json!({"ok":true,"duplicate":true})).into_response()
     } else {
         (
             StatusCode::CONFLICT,
