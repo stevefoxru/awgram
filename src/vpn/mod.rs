@@ -776,7 +776,9 @@ impl Vpn {
             .find(|client| client.name == name)
             .ok_or_else(|| crate::error::Error::ClientNotFound(name.into()))?;
         panel::set_expiry(&url, &password, &client.id, &panel::iso_date(expires_at)).await?;
-        self.cache_client_expiry(name, Some(expires_at))?;
+        if let Err(error) = self.cache_client_expiry(name, Some(expires_at)) {
+            tracing::warn!(%error, client = name, "панель сохранила срок, локальный кэш недоступен");
+        }
         Ok(())
     }
 
