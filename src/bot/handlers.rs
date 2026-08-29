@@ -5360,9 +5360,20 @@ async fn callback_handler(
                 }
                 None => format!("Текущая версия: {current}\nНе удалось проверить GitHub."),
             };
+            let backup_line = settings
+                .monitor_state("database_backup")
+                .map(|(status, details, checked_at)| {
+                    let icon = if status == "ok" { "✅" } else { "❌" };
+                    format!(
+                        "{icon} Проверка БД: {}\n{}",
+                        crate::vpn::model::format_handshake(Lang::Ru, now_epoch(), checked_at),
+                        details.unwrap_or_else(|| "без подробностей".into())
+                    )
+                })
+                .unwrap_or_else(|| "⚪ Резервная копия БД ещё не проверялась".into());
             bot.send_message(
                 chat,
-                format!("⚙️ Система\n\n{update_line}\n\nНастройки, резервные копии, VPN-служба и журнал обновлений."),
+                format!("⚙️ Система\n\n{update_line}\n\n💾 Аварийное восстановление\n{backup_line}\n\nНастройки, VPN-копии, VPN-служба и журнал обновлений."),
             )
             .reply_markup(menu::admin_system_hub())
             .await?;

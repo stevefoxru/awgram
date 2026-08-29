@@ -363,35 +363,61 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     }
 
     let Some(parent) = cfg.db_path.parent() else {
+        store.update_monitor_state(
+            "database_backup",
+            "error",
+            Some("у пути базы нет родительского каталога"),
+            now,
+        );
         return;
     };
     let dir = parent.join("backups");
-    if std::fs::create_dir_all(&dir).is_err() {
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        let details = format!("не удалось подготовить каталог резервных копий: {error}");
+        if store.update_monitor_state("database_backup", "error", Some(&details), now) {
+            notify_admins(bot, cfg, format!("🚨 {details}")).await;
+        }
         return;
     }
     let path = dir.join(format!("awgram-{}.db", now / 86_400));
-    if !path.exists() {
-        match store.backup_database(&path) {
-            Ok(()) => {
-                if store.update_monitor_state("database_backup", "ok", None, now) {
-                    notify_admins(
-                        bot,
-                        cfg,
-                        "✅ Автоматическое резервное копирование БД работает.".into(),
-                    )
-                    .await;
-                }
+    let result = if path.exists() {
+        Ok(())
+    } else {
+        store
+            .backup_database(&path)
+            .map_err(|error| error.to_string())
+    }
+    .and_then(|()| {
+        Store::verify_database_backup(&path).map(|size| {
+            (
+                size,
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("backup.db")
+                    .to_string(),
+            )
+        })
+    });
+    match result {
+        Ok((size, name)) => {
+            let details = format!("{name} · {size} байт · SQLite quick_check=ok");
+            if store.update_monitor_state("database_backup", "ok", Some(&details), now) {
+                notify_admins(
+                    bot,
+                    cfg,
+                    format!("✅ Резервное копирование БД восстановлено.\n{details}"),
+                )
+                .await;
             }
-            Err(error) => {
-                let details = error.to_string();
-                if store.update_monitor_state("database_backup", "error", Some(&details), now) {
-                    notify_admins(
-                        bot,
-                        cfg,
-                        format!("🚨 Не удалось создать резервную копию БД: {details}"),
-                    )
-                    .await;
-                }
+        }
+        Err(details) => {
+            if store.update_monitor_state("database_backup", "error", Some(&details), now) {
+                notify_admins(
+                    bot,
+                    cfg,
+                    format!("🚨 Резервная копия БД не прошла проверку: {details}"),
+                )
+                .await;
             }
         }
     }

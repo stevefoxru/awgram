@@ -800,6 +800,35 @@ impl Store {
             Ok(())
         })
     }
+
+    pub fn verify_database_backup(path: &std::path::Path) -> std::result::Result<u64, String> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| format!("файл резервной копии недоступен: {error}"))?;
+        if metadata.len() == 0 {
+            return Err("файл резервной копии пуст".into());
+        }
+        let connection =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| format!("резервная копия не открывается как SQLite: {error}"))?;
+        let integrity: String = connection
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(|error| format!("проверка SQLite не выполнена: {error}"))?;
+        if integrity != "ok" {
+            return Err(format!("SQLite quick_check: {integrity}"));
+        }
+        let schema_version: Option<String> = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("не удалось прочитать версию схемы: {error}"))?;
+        if schema_version.is_none() {
+            return Err("в резервной копии отсутствует версия схемы".into());
+        }
+        Ok(metadata.len())
+    }
     pub fn staff_role(&self, user_id: i64) -> Option<String> {
         self.with_conn(|c| {
             c.query_row(
@@ -1601,8 +1630,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("backup.db");
         s.backup_database(&path).unwrap();
+        assert!(Store::verify_database_backup(&path).unwrap() > 0);
         let backup = Store::open(&path).unwrap();
         assert!(backup.user(7).is_some());
+    }
+
+    #[test]
+    fn database_backup_verification_rejects_invalid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.db");
+        std::fs::write(&path, b"not sqlite").unwrap();
+        assert!(Store::verify_database_backup(&path).is_err());
     }
 
     #[test]

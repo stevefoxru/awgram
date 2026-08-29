@@ -220,6 +220,10 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
             cb("ℹ️ Справка", "admin:help"),
         ],
         vec![cb("⬆️ Обновить бота", "admin:update")],
+        vec![cb(
+            "🧪 Проверить систему сейчас",
+            "admin:operations:refresh",
+        )],
         vec![cb("📋 Журнал обновления", "admin:update:status")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
