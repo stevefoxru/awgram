@@ -12,6 +12,17 @@ pub struct MonitorState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorEvent {
+    pub id: i64,
+    pub component: String,
+    pub previous_status: Option<String>,
+    pub status: String,
+    pub details: Option<String>,
+    pub created_at: i64,
+    pub acknowledged_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
     pub user_id: i64,
     pub username: Option<String>,
@@ -700,7 +711,20 @@ impl Store {
         details: Option<&str>,
         now: i64,
     ) -> bool {
-        self.with_conn(|c| { let old:Option<String>=c.query_row("SELECT status FROM monitor_state WHERE component=?1",[component],|r|r.get(0)).optional()?; c.execute("INSERT INTO monitor_state(component,status,details,changed_at,checked_at) VALUES(?1,?2,?3,?4,?4) ON CONFLICT(component) DO UPDATE SET status=?2,details=?3,changed_at=CASE WHEN status<>?2 THEN ?4 ELSE changed_at END,checked_at=?4",rusqlite::params![component,status,details,now])?; Ok(old.as_deref()!=Some(status) && (old.is_some() || status!="ok")) }).unwrap_or(false)
+        self.with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let old:Option<String>=tx.query_row("SELECT status FROM monitor_state WHERE component=?1",[component],|r|r.get(0)).optional()?;
+            tx.execute("INSERT INTO monitor_state(component,status,details,changed_at,checked_at) VALUES(?1,?2,?3,?4,?4) ON CONFLICT(component) DO UPDATE SET status=?2,details=?3,changed_at=CASE WHEN status<>?2 THEN ?4 ELSE changed_at END,checked_at=?4",rusqlite::params![component,status,details,now])?;
+            let changed = old.as_deref() != Some(status);
+            if changed && (old.is_some() || status != "ok") {
+                tx.execute(
+                    "INSERT INTO monitor_events(component,previous_status,status,details,created_at) VALUES(?1,?2,?3,?4,?5)",
+                    rusqlite::params![component,old,status,details,now],
+                )?;
+            }
+            tx.commit()?;
+            Ok(changed && (old.is_some() || status != "ok"))
+        }).unwrap_or(false)
     }
 
     pub fn monitor_state(&self, component: &str) -> Option<(String, Option<String>, i64)> {
@@ -735,6 +759,38 @@ impl Store {
             rows.collect()
         })
         .unwrap_or_default()
+    }
+
+    pub fn monitor_events(&self, limit: usize) -> Vec<MonitorEvent> {
+        self.with_conn(|c| {
+            let mut statement = c.prepare(
+                "SELECT id,component,previous_status,status,details,created_at,acknowledged_at
+                 FROM monitor_events ORDER BY created_at DESC,id DESC LIMIT ?1",
+            )?;
+            let rows = statement.query_map([limit as i64], |row| {
+                Ok(MonitorEvent {
+                    id: row.get(0)?,
+                    component: row.get(1)?,
+                    previous_status: row.get(2)?,
+                    status: row.get(3)?,
+                    details: row.get(4)?,
+                    created_at: row.get(5)?,
+                    acknowledged_at: row.get(6)?,
+                })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn acknowledge_monitor_events(&self, now: i64) -> usize {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE monitor_events SET acknowledged_at=?1 WHERE acknowledged_at IS NULL",
+                [now],
+            )
+        })
+        .unwrap_or(0)
     }
 
     pub fn backup_database(&self, path: &std::path::Path) -> rusqlite::Result<()> {
@@ -1524,6 +1580,16 @@ mod tests {
         assert_eq!(states[0].component, "vpn-server-2");
         assert_eq!(states[0].details.as_deref(), Some("slow"));
         assert_eq!(states[1].status, "ok");
+        let events = s.monitor_events(10);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].component, "vpn-server-2");
+        assert_eq!(events[1].status, "ok");
+        assert_eq!(events[1].previous_status.as_deref(), Some("error"));
+        assert_eq!(s.acknowledge_monitor_events(16), 3);
+        assert!(s
+            .monitor_events(10)
+            .iter()
+            .all(|event| event.acknowledged_at == Some(16)));
         assert!(s.set_staff_role(42, None, 1, 15));
         assert_eq!(s.staff_role(42), None);
     }

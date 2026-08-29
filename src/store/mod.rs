@@ -22,8 +22,8 @@ mod stats;
 
 pub use broadcasts::BroadcastRun;
 pub use commerce::{
-    AdminUserProfile, AdminUserStats, FinanceSummary, KeyReplacement, LegacyRequest, MonitorState,
-    PaymentRequest, PaymentStatus, PromoCode, SupportTicket, UserRow,
+    AdminUserProfile, AdminUserStats, FinanceSummary, KeyReplacement, LegacyRequest, MonitorEvent,
+    MonitorState, PaymentRequest, PaymentStatus, PromoCode, SupportTicket, UserRow,
 };
 pub use events::{EventKind, EventRow};
 pub use groups::{
@@ -561,6 +561,20 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(broadcast_id,user_id)
     );
     CREATE INDEX idx_broadcast_delivery_status ON broadcast_deliveries(broadcast_id,status);
+    "#,
+    // v22: неизменяемая история переходов эксплуатационного мониторинга.
+    r#"
+    CREATE TABLE monitor_events(
+        id INTEGER PRIMARY KEY,
+        component TEXT NOT NULL,
+        previous_status TEXT,
+        status TEXT NOT NULL,
+        details TEXT,
+        created_at INTEGER NOT NULL,
+        acknowledged_at INTEGER
+    );
+    CREATE INDEX idx_monitor_events_created ON monitor_events(created_at DESC);
+    CREATE INDEX idx_monitor_events_ack ON monitor_events(acknowledged_at,status);
     "#,
 ];
 

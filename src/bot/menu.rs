@@ -133,7 +133,7 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
     ])
 }
 
-pub fn admin_operations_menu(server_ids: &[i64]) -> InlineKeyboardMarkup {
+pub fn admin_operations_menu(server_ids: &[i64], has_unread: bool) -> InlineKeyboardMarkup {
     let mut rows = server_ids
         .iter()
         .take(8)
@@ -145,6 +145,12 @@ pub fn admin_operations_menu(server_ids: &[i64]) -> InlineKeyboardMarkup {
         })
         .collect::<Vec<_>>();
     rows.push(vec![cb("🔄 Проверить сейчас", "admin:operations:refresh")]);
+    if has_unread {
+        rows.push(vec![cb(
+            "✅ Отметить события просмотренными",
+            "admin:operations:ack",
+        )]);
+    }
     rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
     InlineKeyboardMarkup::new(rows)
 }
@@ -2430,8 +2436,9 @@ mod tests {
 
     #[test]
     fn operations_menu_offers_refresh_and_affected_servers() {
-        let data = all_callback_data(&admin_operations_menu(&[2, 7]));
+        let data = all_callback_data(&admin_operations_menu(&[2, 7], true));
         assert!(data.contains(&"admin:operations:refresh".to_string()));
+        assert!(data.contains(&"admin:operations:ack".to_string()));
         assert!(data.contains(&"server:2".to_string()));
         assert!(data.contains(&"server:7".to_string()));
     }

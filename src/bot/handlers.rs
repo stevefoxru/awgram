@@ -27,6 +27,7 @@ pub enum Action {
     AdminCommunication,
     AdminOperations,
     AdminOperationsRefresh,
+    AdminOperationsAck,
     AdminSystem,
     AdminUpdate,
     AdminUpdateRun,
@@ -232,6 +233,7 @@ fn parse_callback(data: &str) -> Action {
         "admin:communication" => Action::AdminCommunication,
         "admin:operations" => Action::AdminOperations,
         "admin:operations:refresh" => Action::AdminOperationsRefresh,
+        "admin:operations:ack" => Action::AdminOperationsAck,
         "admin:system" => Action::AdminSystem,
         "admin:update" => Action::AdminUpdate,
         "admin:update:run" => Action::AdminUpdateRun,
@@ -1388,6 +1390,11 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
         )
     };
     let states = settings.monitor_states();
+    let events = settings.monitor_events(50);
+    let unread_events = events
+        .iter()
+        .filter(|event| event.acknowledged_at.is_none())
+        .count();
     let incidents = states
         .iter()
         .filter(|state| matches!(state.status.as_str(), "error" | "warning"))
@@ -1438,17 +1445,40 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
         .collect::<Vec<_>>();
     server_ids.sort_unstable();
     server_ids.dedup();
+    let recoveries = events
+        .iter()
+        .filter(|event| {
+            event.status == "ok"
+                && event
+                    .previous_status
+                    .as_deref()
+                    .is_some_and(|status| matches!(status, "warning" | "error"))
+        })
+        .take(5)
+        .map(|event| {
+            format!(
+                "✅ {} · {}",
+                monitor_component_label(settings, &event.component),
+                crate::vpn::model::format_handshake(Lang::Ru, now, event.created_at)
+            )
+        })
+        .collect::<Vec<_>>();
+    let recovery_body = if recoveries.is_empty() {
+        "Восстановлений пока нет.".into()
+    } else {
+        recoveries.join("\n")
+    };
     bot.send_message(
         chat,
         format!(
-            "🚦 Центр состояния\n\nПоследний проход: {}\nАктивных инцидентов: {}\nКомпонентов под наблюдением: {}\n\n{incident_body}\n\n🔄 Незавершённые замены\nОжидают пользователя: {}\nСтарше 24 часов: {stale}\n\n{body}\n\n«Проверить сейчас» запускает штатную диагностику. Она не удаляет ключи и не меняет настройки серверов.",
+            "🚦 Центр состояния\n\nПоследний проход: {}\nАктивных инцидентов: {}\nНепросмотренных событий: {unread_events}\nКомпонентов под наблюдением: {}\n\n{incident_body}\n\n🕓 Недавние восстановления\n{recovery_body}\n\n🔄 Незавершённые замены\nОжидают пользователя: {}\nСтарше 24 часов: {stale}\n\n{body}\n\n«Проверить сейчас» запускает штатную диагностику. Она не удаляет ключи и не меняет настройки серверов.",
             last_check.map_or_else(|| "ещё не выполнялся".into(), |value| crate::vpn::model::format_handshake(Lang::Ru, now, value)),
             incidents.len(),
             states.len(),
             operations.len()
         ),
     )
-    .reply_markup(menu::admin_operations_menu(&server_ids))
+    .reply_markup(menu::admin_operations_menu(&server_ids, unread_events > 0))
     .await?;
     Ok(())
 }
@@ -2101,6 +2131,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminCommunication
         | AdminOperations
         | AdminOperationsRefresh
+        | AdminOperationsAck
         | AdminSystem
         | AdminUpdate
         | AdminUpdateRun
@@ -5291,6 +5322,12 @@ async fn callback_handler(
             )
             .await?;
             crate::operations::run_once(&bot, &cfg, &vpn, &settings).await;
+            admin_operations_screen(&bot, chat, &settings).await?;
+        }
+        Action::AdminOperationsAck => {
+            let count = settings.acknowledge_monitor_events(now_epoch());
+            bot.send_message(chat, format!("✅ Отмечено просмотренными событий: {count}"))
+                .await?;
             admin_operations_screen(&bot, chat, &settings).await?;
         }
         Action::AdminSystem => {
@@ -9931,7 +9968,7 @@ mod tests {
         let keyboards = vec![
             menu::main_menu(Lang::Ru),
             menu::admin_dashboard_menu(),
-            menu::admin_operations_menu(&[1, 2]),
+            menu::admin_operations_menu(&[1, 2], true),
             menu::admin_keys_hub(),
             menu::admin_users_hub(),
             menu::admin_communication_hub(),
@@ -10028,6 +10065,7 @@ mod tests {
             AdminCommunication,
             AdminOperations,
             AdminOperationsRefresh,
+            AdminOperationsAck,
             AdminSystem,
             AdminUpdate,
             AdminUpdateRun,
@@ -10227,6 +10265,7 @@ mod tests {
                 AdminCommunication => {}
                 AdminOperations => {}
                 AdminOperationsRefresh => {}
+                AdminOperationsAck => {}
                 AdminSystem => {}
                 AdminUpdate => {}
                 AdminUpdateRun => {}
@@ -10587,6 +10626,7 @@ mod tests {
             (Action::AdminCommunication, true, false),
             (Action::AdminOperations, true, false),
             (Action::AdminOperationsRefresh, true, false),
+            (Action::AdminOperationsAck, true, false),
             (Action::AdminSystem, true, false),
             (Action::AdminUpdate, true, false),
             (Action::AdminUpdateRun, true, false),
