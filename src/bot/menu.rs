@@ -133,6 +133,22 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn admin_operations_menu(server_ids: &[i64]) -> InlineKeyboardMarkup {
+    let mut rows = server_ids
+        .iter()
+        .take(8)
+        .map(|id| {
+            vec![cb(
+                &format!("🖥 Открыть сервер #{id}"),
+                &format!("server:{id}"),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("🔄 Проверить сейчас", "admin:operations:refresh")]);
+    rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
 pub fn admin_keys_hub() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
@@ -2410,6 +2426,14 @@ mod tests {
         ] {
             assert!(data.contains(&expected.to_string()), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn operations_menu_offers_refresh_and_affected_servers() {
+        let data = all_callback_data(&admin_operations_menu(&[2, 7]));
+        assert!(data.contains(&"admin:operations:refresh".to_string()));
+        assert!(data.contains(&"server:2".to_string()));
+        assert!(data.contains(&"server:7".to_string()));
     }
 
     #[test]

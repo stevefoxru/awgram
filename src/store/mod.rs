@@ -22,7 +22,7 @@ mod stats;
 
 pub use broadcasts::BroadcastRun;
 pub use commerce::{
-    AdminUserProfile, AdminUserStats, FinanceSummary, KeyReplacement, LegacyRequest,
+    AdminUserProfile, AdminUserStats, FinanceSummary, KeyReplacement, LegacyRequest, MonitorState,
     PaymentRequest, PaymentStatus, PromoCode, SupportTicket, UserRow,
 };
 pub use events::{EventKind, EventRow};

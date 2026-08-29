@@ -3,6 +3,15 @@ use rusqlite::OptionalExtension;
 use crate::store::Store;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorState {
+    pub component: String,
+    pub status: String,
+    pub details: Option<String>,
+    pub changed_at: i64,
+    pub checked_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
     pub user_id: i64,
     pub username: Option<String>,
@@ -705,6 +714,27 @@ impl Store {
         })
         .ok()
         .flatten()
+    }
+
+    pub fn monitor_states(&self) -> Vec<MonitorState> {
+        self.with_conn(|c| {
+            let mut statement = c.prepare(
+                "SELECT component,status,details,changed_at,checked_at FROM monitor_state
+                 ORDER BY CASE status WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                          checked_at DESC,component",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(MonitorState {
+                    component: row.get(0)?,
+                    status: row.get(1)?,
+                    details: row.get(2)?,
+                    changed_at: row.get(3)?,
+                    checked_at: row.get(4)?,
+                })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
     }
 
     pub fn backup_database(&self, path: &std::path::Path) -> rusqlite::Result<()> {
@@ -1489,6 +1519,11 @@ mod tests {
         assert!(s.update_monitor_state("vpn", "error", Some("down"), 12));
         assert!(!s.update_monitor_state("vpn", "error", Some("still down"), 13));
         assert!(s.update_monitor_state("vpn", "ok", None, 14));
+        s.update_monitor_state("vpn-server-2", "warning", Some("slow"), 15);
+        let states = s.monitor_states();
+        assert_eq!(states[0].component, "vpn-server-2");
+        assert_eq!(states[0].details.as_deref(), Some("slow"));
+        assert_eq!(states[1].status, "ok");
         assert!(s.set_staff_role(42, None, 1, 15));
         assert_eq!(s.staff_role(42), None);
     }

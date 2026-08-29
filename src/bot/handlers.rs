@@ -26,6 +26,7 @@ pub enum Action {
     AdminUsersHub,
     AdminCommunication,
     AdminOperations,
+    AdminOperationsRefresh,
     AdminSystem,
     AdminUpdate,
     AdminUpdateRun,
@@ -230,6 +231,7 @@ fn parse_callback(data: &str) -> Action {
         "admin:users" => Action::AdminUsersHub,
         "admin:communication" => Action::AdminCommunication,
         "admin:operations" => Action::AdminOperations,
+        "admin:operations:refresh" => Action::AdminOperationsRefresh,
         "admin:system" => Action::AdminSystem,
         "admin:update" => Action::AdminUpdate,
         "admin:update:run" => Action::AdminUpdateRun,
@@ -1385,16 +1387,104 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
             }
         )
     };
+    let states = settings.monitor_states();
+    let incidents = states
+        .iter()
+        .filter(|state| matches!(state.status.as_str(), "error" | "warning"))
+        .collect::<Vec<_>>();
+    let last_check = states.iter().map(|state| state.checked_at).max();
+    let incident_lines = incidents
+        .iter()
+        .take(12)
+        .map(|state| {
+            let icon = if state.status == "error" {
+                "🔴"
+            } else {
+                "🟠"
+            };
+            let label = monitor_component_label(settings, &state.component);
+            let detail = state
+                .details
+                .as_deref()
+                .map(|value| {
+                    truncate_for_message(value.to_string())
+                        .chars()
+                        .take(180)
+                        .collect::<String>()
+                })
+                .unwrap_or_else(|| "без подробностей".into());
+            format!(
+                "{icon} {label}\n{detail}\nПроверено: {}",
+                crate::vpn::model::format_handshake(Lang::Ru, now, state.checked_at)
+            )
+        })
+        .collect::<Vec<_>>();
+    let incident_body = if incident_lines.is_empty() {
+        "🟢 Активных инцидентов нет.".into()
+    } else {
+        format!(
+            "{}{}",
+            incident_lines.join("\n\n"),
+            if incidents.len() > incident_lines.len() {
+                format!("\n\n…и ещё {}", incidents.len() - incident_lines.len())
+            } else {
+                String::new()
+            }
+        )
+    };
+    let mut server_ids = incidents
+        .iter()
+        .filter_map(|state| monitor_server_id(&state.component))
+        .collect::<Vec<_>>();
+    server_ids.sort_unstable();
+    server_ids.dedup();
     bot.send_message(
         chat,
         format!(
-            "🔄 Операции с ключами\n\nОжидают проверки пользователем: {}\nСтарше 24 часов: {stale}\n\n{body}\n\nПовторное нажатие пользователем «Заменить» продолжит существующую операцию и не создаст ещё один ключ.",
+            "🚦 Центр состояния\n\nПоследний проход: {}\nАктивных инцидентов: {}\nКомпонентов под наблюдением: {}\n\n{incident_body}\n\n🔄 Незавершённые замены\nОжидают пользователя: {}\nСтарше 24 часов: {stale}\n\n{body}\n\n«Проверить сейчас» запускает штатную диагностику. Она не удаляет ключи и не меняет настройки серверов.",
+            last_check.map_or_else(|| "ещё не выполнялся".into(), |value| crate::vpn::model::format_handshake(Lang::Ru, now, value)),
+            incidents.len(),
+            states.len(),
             operations.len()
         ),
     )
-    .reply_markup(menu::admin_dashboard_menu())
+    .reply_markup(menu::admin_operations_menu(&server_ids))
     .await?;
     Ok(())
+}
+
+fn monitor_server_id(component: &str) -> Option<i64> {
+    component
+        .strip_prefix("vpn-server-")?
+        .split('-')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn monitor_component_label(settings: &Store, component: &str) -> String {
+    if let Some(id) = monitor_server_id(component) {
+        let server = settings
+            .vpn_server(id)
+            .map(|server| server.name)
+            .unwrap_or_else(|| format!("сервер #{id}"));
+        let suffix = if component.ends_with("-panel-format") {
+            "формат API панели"
+        } else if component.ends_with("-inventory") {
+            "сверка ключей"
+        } else if component.ends_with("-maintenance") {
+            "обслуживание"
+        } else {
+            "доступность"
+        };
+        return format!("{server} · {suffix}");
+    }
+    match component {
+        "vpn" => "Локальная VPN-служба".into(),
+        "database_backup" => "Резервная копия базы".into(),
+        "stale-key-replacements" => "Зависшие замены ключей".into(),
+        value => value.replace('-', " "),
+    }
 }
 
 async fn owners_screen(
@@ -2010,6 +2100,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminUsersHub
         | AdminCommunication
         | AdminOperations
+        | AdminOperationsRefresh
         | AdminSystem
         | AdminUpdate
         | AdminUpdateRun
@@ -5191,6 +5282,15 @@ async fn callback_handler(
             .await?;
         }
         Action::AdminOperations => {
+            admin_operations_screen(&bot, chat, &settings).await?;
+        }
+        Action::AdminOperationsRefresh => {
+            bot.send_message(
+                chat,
+                "⏳ Проверяю серверы, панели, сверку ключей и резервные копии…",
+            )
+            .await?;
+            crate::operations::run_once(&bot, &cfg, &vpn, &settings).await;
             admin_operations_screen(&bot, chat, &settings).await?;
         }
         Action::AdminSystem => {
@@ -9831,6 +9931,7 @@ mod tests {
         let keyboards = vec![
             menu::main_menu(Lang::Ru),
             menu::admin_dashboard_menu(),
+            menu::admin_operations_menu(&[1, 2]),
             menu::admin_keys_hub(),
             menu::admin_users_hub(),
             menu::admin_communication_hub(),
@@ -9926,6 +10027,7 @@ mod tests {
             AdminUsersHub,
             AdminCommunication,
             AdminOperations,
+            AdminOperationsRefresh,
             AdminSystem,
             AdminUpdate,
             AdminUpdateRun,
@@ -10124,6 +10226,7 @@ mod tests {
                 AdminUsersHub => {}
                 AdminCommunication => {}
                 AdminOperations => {}
+                AdminOperationsRefresh => {}
                 AdminSystem => {}
                 AdminUpdate => {}
                 AdminUpdateRun => {}
@@ -10483,6 +10586,7 @@ mod tests {
             (Action::AdminUsersHub, true, false),
             (Action::AdminCommunication, true, false),
             (Action::AdminOperations, true, false),
+            (Action::AdminOperationsRefresh, true, false),
             (Action::AdminSystem, true, false),
             (Action::AdminUpdate, true, false),
             (Action::AdminUpdateRun, true, false),

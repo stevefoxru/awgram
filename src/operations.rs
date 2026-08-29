@@ -5,6 +5,8 @@ use teloxide::prelude::*;
 
 use crate::{config::Config, store::Store, vpn::Vpn};
 
+static MONITOR_RUN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -395,6 +397,12 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     }
 }
 
+/// Немедленный безопасный проход штатного мониторинга из админ-панели.
+pub async fn run_once(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store) {
+    let _guard = MONITOR_RUN.lock().await;
+    tick(bot, cfg, vpn, store, now_epoch()).await;
+}
+
 pub async fn run(bot: Bot, cfg: Arc<Config>, vpn: Arc<Vpn>, store: Arc<Store>) {
     let version = env!("CARGO_PKG_VERSION");
     let previous = store.runtime_version();
@@ -410,7 +418,7 @@ pub async fn run(bot: Bot, cfg: Arc<Config>, vpn: Arc<Vpn>, store: Arc<Store>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
     loop {
         interval.tick().await;
-        tick(&bot, &cfg, &vpn, &store, now_epoch()).await;
+        run_once(&bot, &cfg, &vpn, &store).await;
     }
 }
 
