@@ -417,6 +417,89 @@ impl Store {
         .unwrap_or_default()
     }
 
+    pub fn server_owner_user_ids(&self, id: i64) -> Vec<i64> {
+        self.with_conn(|c| {
+            let mut statement = c.prepare(
+                "SELECT DISTINCT owner_user_id FROM clients
+                 WHERE server_id=?1 AND removed_at IS NULL AND owner_user_id IS NOT NULL
+                 ORDER BY owner_user_id",
+            )?;
+            let rows = statement.query_map([id], |row| row.get(0))?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn prepare_maintenance_notifications(
+        &self,
+        server_id: i64,
+        started_at: i64,
+        user_ids: &[i64],
+    ) -> usize {
+        self.with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let mut inserted = 0usize;
+            for user_id in user_ids {
+                inserted += tx.execute(
+                    "INSERT OR IGNORE INTO maintenance_notifications(server_id,started_at,user_id,updated_at)
+                     VALUES(?1,?2,?3,?2)",
+                    rusqlite::params![server_id, started_at, user_id],
+                )?;
+            }
+            tx.commit()?;
+            Ok(inserted)
+        })
+        .unwrap_or(0)
+    }
+
+    pub fn mark_maintenance_notification(
+        &self,
+        server_id: i64,
+        started_at: i64,
+        user_id: i64,
+        phase: &str,
+        now: i64,
+    ) -> bool {
+        let column = match phase {
+            "start" => "start_delivered",
+            "finish" => "finish_delivered",
+            _ => return false,
+        };
+        self.with_conn(|c| {
+            c.execute(
+                &format!("UPDATE maintenance_notifications SET {column}=1,updated_at=?4 WHERE server_id=?1 AND started_at=?2 AND user_id=?3"),
+                rusqlite::params![server_id, started_at, user_id, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn maintenance_finish_recipients(&self, server_id: i64) -> Option<(i64, Vec<i64>)> {
+        self.with_conn(|c| {
+            let started_at: Option<i64> = c.query_row(
+                "SELECT MAX(started_at) FROM maintenance_notifications WHERE server_id=?1",
+                [server_id],
+                |row| row.get(0),
+            )?;
+            let Some(started_at) = started_at else {
+                return Ok(None);
+            };
+            let mut statement = c.prepare(
+                "SELECT user_id FROM maintenance_notifications
+                 WHERE server_id=?1 AND started_at=?2 AND start_delivered=1 AND finish_delivered=0
+                 ORDER BY user_id",
+            )?;
+            let rows =
+                statement.query_map(rusqlite::params![server_id, started_at], |row| row.get(0))?;
+            Ok(Some((
+                started_at,
+                rows.collect::<rusqlite::Result<Vec<_>>>()?,
+            )))
+        })
+        .ok()
+        .flatten()
+    }
+
     pub fn set_panel_credentials(
         &self,
         id: i64,
@@ -795,6 +878,30 @@ mod tests {
         assert_eq!(server.status, "online");
         assert!(server.enabled_for_provisioning);
         assert!(!store.finish_server_maintenance(id, 104));
+    }
+
+    #[test]
+    fn maintenance_notifications_are_unique_and_resume_after_restart() {
+        let store = Store::open_in_memory();
+        let id = store.ensure_local_vpn_server("vpn", 1, 100).unwrap();
+        for (user_id, name) in [(7, "alice"), (8, "bob")] {
+            store.upsert_user(user_id, None, name, None, 100);
+            let client = format!("{name}-phone");
+            store.assign_client_group(&client, None, 100);
+            assert!(store.assign_client_owner(&client, Some(user_id)));
+            assert!(store.assign_client_server(&client, id, "amneziawg-1"));
+        }
+        let owners = store.server_owner_user_ids(id);
+        assert_eq!(owners, vec![7, 8]);
+        assert_eq!(store.prepare_maintenance_notifications(id, 200, &owners), 2);
+        assert_eq!(store.prepare_maintenance_notifications(id, 200, &owners), 0);
+        assert!(store.mark_maintenance_notification(id, 200, 7, "start", 201));
+        assert_eq!(
+            store.maintenance_finish_recipients(id),
+            Some((200, vec![7]))
+        );
+        assert!(store.mark_maintenance_notification(id, 200, 7, "finish", 202));
+        assert_eq!(store.maintenance_finish_recipients(id), Some((200, vec![])));
     }
 
     #[test]

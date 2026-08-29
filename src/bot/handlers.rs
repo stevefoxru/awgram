@@ -51,6 +51,7 @@ pub enum Action {
     ServerSetDefault(i64),
     ServerMaintenanceAsk(i64),
     ServerMaintenanceStart(i64),
+    ServerMaintenanceStartNotify(i64),
     ServerMaintenanceFinish(i64),
     ServerDeployAsk(i64),
     ServerCheck(i64),
@@ -513,6 +514,10 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:maintenance:start:") {
                 v.parse()
                     .map(Action::ServerMaintenanceStart)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:maintenance:notify:") {
+                v.parse()
+                    .map(Action::ServerMaintenanceStartNotify)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:maintenance:finish:") {
                 v.parse()
@@ -2191,6 +2196,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerSetDefault(_)
         | ServerMaintenanceAsk(_)
         | ServerMaintenanceStart(_)
+        | ServerMaintenanceStartNotify(_)
         | ServerMaintenanceFinish(_)
         | ServerDeployAsk(_)
         | ServerCheck(_)
@@ -5727,6 +5733,49 @@ async fn callback_handler(
                 }
             }
         }
+        Action::ServerMaintenanceStartNotify(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                if server.status == "maintenance" {
+                    bot.send_message(chat, "Сервер уже находится в режиме обслуживания.")
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                } else {
+                    let started_at = now_epoch();
+                    let recipients = settings.server_owner_user_ids(id);
+                    if settings.begin_server_maintenance(id, uid, started_at) {
+                        settings.update_monitor_state(&format!("vpn-server-{id}-maintenance"), "maintenance", Some("плановое обслуживание включено администратором с уведомлением владельцев"), started_at);
+                        settings.prepare_maintenance_notifications(id, started_at, &recipients);
+                        let mut delivered = 0usize;
+                        let mut failed = 0usize;
+                        for user_id in recipients {
+                            let text = format!("🚧 Плановые работы\n\nСервер: {}\nЛокация: {}\n\nВо время обслуживания возможны перерывы VPN. Ваш ключ сохраняется: удалять профиль или покупать новый не нужно. После завершения мы отправим отдельное сообщение.", server.name, server.location);
+                            if bot.send_message(ChatId(user_id), text).await.is_ok() {
+                                delivered += 1;
+                                settings.mark_maintenance_notification(
+                                    id,
+                                    started_at,
+                                    user_id,
+                                    "start",
+                                    now_epoch(),
+                                );
+                            } else {
+                                failed += 1;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                        }
+                        bot.send_message(chat, format!("🚧 «{}» переведён в maintenance.\n\nВладельцев найдено: {}\nДоставлено: {delivered}\nОшибок доставки: {failed}\n\nНовые ключи на сервере временно не выдаются.", server.name, delivered + failed))
+                            .reply_markup(menu::server_card_menu(id)).await?;
+                    } else {
+                        bot.send_message(
+                            chat,
+                            "❌ Не удалось включить режим обслуживания; рассылка не выполнялась.",
+                        )
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                    }
+                }
+            }
+        }
         Action::ServerMaintenanceFinish(id) => {
             if let Some(server) = settings.vpn_server(id) {
                 if server.status != "maintenance" {
@@ -5755,6 +5804,7 @@ async fn callback_handler(
                     } else {
                         vpn.remote_status(&server).await
                     };
+                    let finish_recipients = settings.maintenance_finish_recipients(id);
                     match health {
                         Ok(true) if settings.finish_server_maintenance(id, now_epoch()) => {
                             settings.update_monitor_state(
@@ -5763,7 +5813,27 @@ async fn callback_handler(
                                 None,
                                 now_epoch(),
                             );
-                            bot.send_message(chat, format!("✅ Обслуживание «{}» завершено. Сервер проверен и возвращён в работу; прежний режим выдачи восстановлен.", server.name))
+                            let mut delivered = 0usize;
+                            let mut failed = 0usize;
+                            if let Some((started_at, recipients)) = finish_recipients {
+                                for user_id in recipients {
+                                    let text = format!("✅ Плановые работы завершены\n\nСервер: {}\nЛокация: {}\n\nVPN проверен и снова работает. Профиль и ключ менять не требуется. Если соединение не восстановилось сразу, выключите и включите туннель в приложении.", server.name, server.location);
+                                    if bot.send_message(ChatId(user_id), text).await.is_ok() {
+                                        delivered += 1;
+                                        settings.mark_maintenance_notification(
+                                            id,
+                                            started_at,
+                                            user_id,
+                                            "finish",
+                                            now_epoch(),
+                                        );
+                                    } else {
+                                        failed += 1;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                                }
+                            }
+                            bot.send_message(chat, format!("✅ Обслуживание «{}» завершено. Сервер проверен и возвращён в работу; прежний режим выдачи восстановлен.\n\nУведомление о восстановлении: доставлено {delivered}, ошибок {failed}.", server.name))
                                 .reply_markup(menu::server_card_menu(id)).await?;
                         }
                         Ok(true) => {
@@ -10233,6 +10303,7 @@ mod tests {
             ServerSetDefault(1),
             ServerMaintenanceAsk(1),
             ServerMaintenanceStart(1),
+            ServerMaintenanceStartNotify(1),
             ServerMaintenanceFinish(1),
             ServerDeployAsk(1),
             ServerCheck(1),
@@ -10436,6 +10507,7 @@ mod tests {
                 ServerSetDefault(_) => {}
                 ServerMaintenanceAsk(_) => {}
                 ServerMaintenanceStart(_) => {}
+                ServerMaintenanceStartNotify(_) => {}
                 ServerMaintenanceFinish(_) => {}
                 ServerDeployAsk(_) => {}
                 ServerCheck(_) => {}
@@ -10800,6 +10872,7 @@ mod tests {
             (Action::ServerSetDefault(1), true, false),
             (Action::ServerMaintenanceAsk(1), true, false),
             (Action::ServerMaintenanceStart(1), true, false),
+            (Action::ServerMaintenanceStartNotify(1), true, false),
             (Action::ServerMaintenanceFinish(1), true, false),
             (Action::ServerDeployAsk(1), true, false),
             (Action::ServerCheck(1), true, false),

@@ -369,7 +369,11 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
 pub fn server_maintenance_confirm_menu(id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb(
-            "🚧 Подтвердить начало",
+            "📣 Уведомить владельцев и начать",
+            &format!("server:maintenance:notify:{id}"),
+        )],
+        vec![cb(
+            "🔕 Начать без рассылки",
             &format!("server:maintenance:start:{id}"),
         )],
         vec![cb("❌ Отмена", &format!("server:{id}"))],

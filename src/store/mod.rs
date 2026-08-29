@@ -585,6 +585,20 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         started_by INTEGER NOT NULL
     );
     "#,
+    // v24: адресная доставка начала и завершения плановых работ.
+    r#"
+    CREATE TABLE maintenance_notifications(
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        started_at INTEGER NOT NULL,
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        start_delivered INTEGER NOT NULL DEFAULT 0,
+        finish_delivered INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(server_id,started_at,user_id)
+    );
+    CREATE INDEX idx_maintenance_notifications_finish
+        ON maintenance_notifications(server_id,started_at,start_delivered,finish_delivered);
+    "#,
 ];
 
 pub struct Store {
