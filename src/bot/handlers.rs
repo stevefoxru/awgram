@@ -5687,17 +5687,23 @@ async fn callback_handler(
             .await?;
         }
         Action::ServerSetDefault(id) => {
-            let ready = settings
-                .vpn_server(id)
-                .is_some_and(|server| server.status == "online" && server.enabled_for_provisioning);
-            if ready {
-                settings.set_default_vpn_server(id);
-                bot.send_message(chat, "✅ Сервер назначен источником новых ключей и безопасной замены нерабочих ключей.\n\nПробные ключи теперь также будут выпускаться на нём. При замене старый ключ удаляется только после подтверждения пользователя.")
-                    .reply_markup(menu::server_card_menu(id))
-                    .await?;
-            } else {
-                bot.send_message(chat, "Сначала сервер должен подключиться, пройти проверку и быть включён для выдачи.")
-                    .reply_markup(menu::server_card_menu(id)).await?;
+            if let Some(server) = settings.vpn_server(id) {
+                let assigned = settings.server_client_count(id);
+                if server.status != "online" {
+                    bot.send_message(chat, "Сервер должен иметь статус online. Сначала завершите обслуживание или устраните ошибку подключения.")
+                        .reply_markup(menu::server_card_menu(id)).await?;
+                } else if assigned >= server.capacity {
+                    bot.send_message(chat, format!("На сервере нет свободных мест: {assigned}/{}. Увеличьте лимит после проверки ресурсов или выберите другой сервер.", server.capacity))
+                        .reply_markup(menu::server_card_menu(id)).await?;
+                } else if settings.set_server_provisioning(id, true, now_epoch()) {
+                    settings.set_default_vpn_server(id);
+                    bot.send_message(chat, format!("✅ «{}» назначен сервером новых ключей, восстановления и безопасной замены.\n\nВыдача включена. Свободно мест: {}. При замене старый ключ удаляется только после подтверждения пользователя.", server.name, server.capacity - assigned))
+                        .reply_markup(menu::server_card_menu(id)).await?;
+                } else {
+                    bot.send_message(chat, "❌ Не удалось включить выдачу на сервере.")
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                }
             }
         }
         Action::ServerMaintenanceAsk(id) => {

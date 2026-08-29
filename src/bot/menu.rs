@@ -296,7 +296,7 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb("— КЛЮЧИ —", &format!("server:{id}"))],
         vec![cb(
-            "🎯 Использовать для новых ключей",
+            "🎯 Новые ключи и замена",
             &format!("server:default:{id}"),
         )],
         vec![cb(
