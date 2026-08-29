@@ -49,6 +49,9 @@ pub enum Action {
     ServerEnroll(i64),
     ServerEnrollRevoke(i64),
     ServerSetDefault(i64),
+    ServerMaintenanceAsk(i64),
+    ServerMaintenanceStart(i64),
+    ServerMaintenanceFinish(i64),
     ServerDeployAsk(i64),
     ServerCheck(i64),
     ServerDiagnose(i64),
@@ -506,6 +509,18 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:default:") {
                 v.parse()
                     .map(Action::ServerSetDefault)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:maintenance:start:") {
+                v.parse()
+                    .map(Action::ServerMaintenanceStart)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:maintenance:finish:") {
+                v.parse()
+                    .map(Action::ServerMaintenanceFinish)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:maintenance:") {
+                v.parse()
+                    .map(Action::ServerMaintenanceAsk)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:deploy:") {
                 v.parse()
@@ -1397,17 +1412,17 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
         .count();
     let incidents = states
         .iter()
-        .filter(|state| matches!(state.status.as_str(), "error" | "warning"))
+        .filter(|state| matches!(state.status.as_str(), "error" | "warning" | "maintenance"))
         .collect::<Vec<_>>();
     let last_check = states.iter().map(|state| state.checked_at).max();
     let incident_lines = incidents
         .iter()
         .take(12)
         .map(|state| {
-            let icon = if state.status == "error" {
-                "🔴"
-            } else {
-                "🟠"
+            let icon = match state.status.as_str() {
+                "error" => "🔴",
+                "maintenance" => "🚧",
+                _ => "🟠",
             };
             let label = monitor_component_label(settings, &state.component);
             let detail = state
@@ -1452,7 +1467,7 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
                 && event
                     .previous_status
                     .as_deref()
-                    .is_some_and(|status| matches!(status, "warning" | "error"))
+                    .is_some_and(|status| matches!(status, "warning" | "error" | "maintenance"))
         })
         .take(5)
         .map(|event| {
@@ -2153,6 +2168,9 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerEnroll(_)
         | ServerEnrollRevoke(_)
         | ServerSetDefault(_)
+        | ServerMaintenanceAsk(_)
+        | ServerMaintenanceStart(_)
+        | ServerMaintenanceFinish(_)
         | ServerDeployAsk(_)
         | ServerCheck(_)
         | ServerDiagnose(_)
@@ -5644,6 +5662,94 @@ async fn callback_handler(
                     .reply_markup(menu::server_card_menu(id)).await?;
             }
         }
+        Action::ServerMaintenanceAsk(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                if server.status == "maintenance" {
+                    bot.send_message(chat, "Сервер уже находится в режиме обслуживания. После завершения работ нажмите «✅ Завершить обслуживание».")
+                        .reply_markup(menu::server_card_menu(id)).await?;
+                } else {
+                    bot.send_message(chat, format!("🚧 Начать обслуживание «{}»?\n\nВыдача новых ключей на этом сервере будет временно отключена. Существующие ключи не удаляются, а сбои проверки не запустят массовую замену. Прежний режим выдачи будет восстановлен только после успешной проверки при завершении.", server.name))
+                        .reply_markup(menu::server_maintenance_confirm_menu(id)).await?;
+                }
+            }
+        }
+        Action::ServerMaintenanceStart(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                if server.status == "maintenance" {
+                    bot.send_message(chat, "Сервер уже находится в режиме обслуживания.")
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                } else if settings.begin_server_maintenance(id, uid, now_epoch()) {
+                    settings.update_monitor_state(
+                        &format!("vpn-server-{id}-maintenance"),
+                        "maintenance",
+                        Some("плановое обслуживание включено администратором"),
+                        now_epoch(),
+                    );
+                    bot.send_message(chat, format!("🚧 «{}» переведён в режим обслуживания. Новые ключи на нём временно не выдаются; существующие ключи и конфигурации сохранены.", server.name))
+                        .reply_markup(menu::server_card_menu(id)).await?;
+                } else {
+                    bot.send_message(chat, "❌ Не удалось включить режим обслуживания.")
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                }
+            }
+        }
+        Action::ServerMaintenanceFinish(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                if server.status != "maintenance" {
+                    bot.send_message(chat, "Сервер не находится в режиме обслуживания.")
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                } else {
+                    bot.send_message(
+                        chat,
+                        "⏳ Проверяю VPN/API перед возвратом сервера в работу…",
+                    )
+                    .await?;
+                    let health = if server.is_local {
+                        vpn.check().await.map(|report| report.ok)
+                    } else if server.protocol == "amneziawg-panel" {
+                        match settings.panel_password(id) {
+                            Some(secret) => vpn.panel_probe(&server, &secret).await.map(|_| true),
+                            None => Err(crate::error::Error::Parse(
+                                "пароль панели не настроен".into(),
+                            )),
+                        }
+                    } else if let (Some(node), Some(secret)) =
+                        (settings.vpn_node_for_server(id), settings.node_secret(id))
+                    {
+                        vpn.agent_status(&server, &node, &secret).await
+                    } else {
+                        vpn.remote_status(&server).await
+                    };
+                    match health {
+                        Ok(true) if settings.finish_server_maintenance(id, now_epoch()) => {
+                            settings.update_monitor_state(
+                                &format!("vpn-server-{id}-maintenance"),
+                                "ok",
+                                None,
+                                now_epoch(),
+                            );
+                            bot.send_message(chat, format!("✅ Обслуживание «{}» завершено. Сервер проверен и возвращён в работу; прежний режим выдачи восстановлен.", server.name))
+                                .reply_markup(menu::server_card_menu(id)).await?;
+                        }
+                        Ok(true) => {
+                            bot.send_message(chat, "❌ Проверка прошла, но состояние обслуживания не удалось сохранить. Сервер оставлен в maintenance.")
+                                .reply_markup(menu::server_card_menu(id)).await?;
+                        }
+                        Ok(false) => {
+                            bot.send_message(chat, "⚠️ VPN-служба ещё не готова. Сервер остаётся в maintenance, выдача ключей не включена.")
+                                .reply_markup(menu::server_card_menu(id)).await?;
+                        }
+                        Err(error) => {
+                            bot.send_message(chat, format!("❌ Проверка не пройдена: {error}\n\nСервер остаётся в maintenance, выдача ключей не включена."))
+                                .reply_markup(menu::server_card_menu(id)).await?;
+                        }
+                    }
+                }
+            }
+        }
         Action::ServerDeployAsk(id) => {
             if let Some(server) = settings.vpn_server(id) {
                 if server.is_local {
@@ -5687,12 +5793,15 @@ async fn callback_handler(
                     Ok(false) => "warning",
                     Err(_) => "offline",
                 };
-                settings.set_server_status(id, new_status, now_epoch());
-                if new_status == "offline" {
-                    settings.set_server_provisioning(id, false, now_epoch());
+                if server.status != "maintenance" {
+                    settings.set_server_status(id, new_status, now_epoch());
+                    if new_status == "offline" {
+                        settings.set_server_provisioning(id, false, now_epoch());
+                    }
                 }
                 let affected = settings.server_client_count(id);
                 let text = match result {
+                    Ok(true) if server.status == "maintenance" => format!("✅ «{}» доступен, VPN-служба активна. Сервер остаётся в maintenance до отдельного завершения обслуживания.", server.name),
                     Ok(true) => format!("✅ «{}» доступен, VPN-служба активна.", server.name),
                     Ok(false) => format!("⚠️ «{}» доступен, но VPN-служба не готова.", server.name),
                     Err(error) => format!("❌ «{}» недоступен: {error}\n\n{affected} активных ключей этого сервера отмечены как нерабочие. Их владельцы увидят кнопку безопасной замены.", server.name),
@@ -5795,7 +5904,9 @@ async fn callback_handler(
                         format!("❌ «{}» не прошёл проверку выдачи:\n\n{error}", server.name),
                     ),
                 };
-                settings.set_server_status(id, status, now_epoch());
+                if server.status != "maintenance" {
+                    settings.set_server_status(id, status, now_epoch());
+                }
                 bot.send_message(chat, text)
                     .reply_markup(menu::server_card_menu(id))
                     .await?;
@@ -9975,6 +10086,7 @@ mod tests {
             menu::admin_system_hub(),
             menu::servers_menu(&[]),
             menu::server_card_menu(1),
+            menu::server_maintenance_confirm_menu(1),
             menu::remote_migration_menu(1),
             menu::vpn_service_menu(),
             menu::admin_create_menu(),
@@ -10087,6 +10199,9 @@ mod tests {
             ServerEnroll(1),
             ServerEnrollRevoke(1),
             ServerSetDefault(1),
+            ServerMaintenanceAsk(1),
+            ServerMaintenanceStart(1),
+            ServerMaintenanceFinish(1),
             ServerDeployAsk(1),
             ServerCheck(1),
             ServerDiagnose(1),
@@ -10287,6 +10402,9 @@ mod tests {
                 ServerEnroll(_) => {}
                 ServerEnrollRevoke(_) => {}
                 ServerSetDefault(_) => {}
+                ServerMaintenanceAsk(_) => {}
+                ServerMaintenanceStart(_) => {}
+                ServerMaintenanceFinish(_) => {}
                 ServerDeployAsk(_) => {}
                 ServerCheck(_) => {}
                 ServerDiagnose(_) => {}
@@ -10648,6 +10766,9 @@ mod tests {
             (Action::ServerEnroll(1), true, false),
             (Action::ServerEnrollRevoke(1), true, false),
             (Action::ServerSetDefault(1), true, false),
+            (Action::ServerMaintenanceAsk(1), true, false),
+            (Action::ServerMaintenanceStart(1), true, false),
+            (Action::ServerMaintenanceFinish(1), true, false),
             (Action::ServerDeployAsk(1), true, false),
             (Action::ServerCheck(1), true, false),
             (Action::ServerDiagnose(1), true, false),

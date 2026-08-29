@@ -333,6 +333,68 @@ impl Store {
         .is_ok_and(|changed| changed == 1)
     }
 
+    pub fn begin_server_maintenance(&self, id: i64, actor_id: i64, now: i64) -> bool {
+        self.with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let previous: i64 = tx.query_row(
+                "SELECT enabled_for_provisioning FROM vpn_servers WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO server_maintenance(server_id,previous_provisioning,started_at,started_by)
+                 VALUES(?1,?2,?3,?4) ON CONFLICT(server_id) DO NOTHING",
+                rusqlite::params![id, previous, now, actor_id],
+            )?;
+            let changed = tx.execute(
+                "UPDATE vpn_servers SET status='maintenance',enabled_for_provisioning=0,updated_at=?2 WHERE id=?1",
+                rusqlite::params![id, now],
+            )?;
+            tx.execute(
+                "UPDATE vpn_nodes SET status='maintenance',updated_at=?2 WHERE server_id=?1",
+                rusqlite::params![id, now],
+            )?;
+            tx.execute(
+                "UPDATE vpn_instances SET status='maintenance',updated_at=?2 WHERE server_id=?1 AND is_default=1",
+                rusqlite::params![id, now],
+            )?;
+            tx.commit()?;
+            Ok(changed == 1)
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn finish_server_maintenance(&self, id: i64, now: i64) -> bool {
+        self.with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let previous = tx
+                .query_row(
+                    "SELECT previous_provisioning FROM server_maintenance WHERE server_id=?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            let changed = tx.execute(
+                "UPDATE vpn_servers SET status='online',enabled_for_provisioning=?2,updated_at=?3
+                 WHERE id=?1 AND status='maintenance'",
+                rusqlite::params![id, previous, now],
+            )?;
+            tx.execute(
+                "UPDATE vpn_nodes SET status='online',updated_at=?2 WHERE server_id=?1",
+                rusqlite::params![id, now],
+            )?;
+            tx.execute(
+                "UPDATE vpn_instances SET status='online',updated_at=?2 WHERE server_id=?1 AND is_default=1",
+                rusqlite::params![id, now],
+            )?;
+            tx.execute("DELETE FROM server_maintenance WHERE server_id=?1", [id])?;
+            tx.commit()?;
+            Ok(changed == 1)
+        })
+        .unwrap_or(false)
+    }
+
     pub fn server_client_count(&self, id: i64) -> i64 {
         self.with_conn(|c| {
             c.query_row(
@@ -716,6 +778,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![preferred, first]
         );
+    }
+
+    #[test]
+    fn maintenance_disables_and_restores_previous_provisioning() {
+        let store = Store::open_in_memory();
+        let id = store.ensure_local_vpn_server("vpn", 1, 100).unwrap();
+        assert!(store.set_server_status(id, "online", 101));
+        assert!(store.set_server_provisioning(id, true, 101));
+        assert!(store.begin_server_maintenance(id, 42, 102));
+        let server = store.vpn_server(id).unwrap();
+        assert_eq!(server.status, "maintenance");
+        assert!(!server.enabled_for_provisioning);
+        assert!(store.finish_server_maintenance(id, 103));
+        let server = store.vpn_server(id).unwrap();
+        assert_eq!(server.status, "online");
+        assert!(server.enabled_for_provisioning);
+        assert!(!store.finish_server_maintenance(id, 104));
     }
 
     #[test]

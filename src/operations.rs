@@ -221,7 +221,7 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                     // назначать непроверенный узел основным.
                     store.update_monitor_state(
                         &format!("vpn-server-{}-maintenance", server.id),
-                        "ready",
+                        "maintenance",
                         Some("VPN отвечает; ожидается ручная проверка"),
                         now,
                     );

@@ -316,6 +316,16 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             "🧬 Проверить API панели",
             &format!("server:diagnose:{id}"),
         )],
+        vec![
+            cb(
+                "🚧 Начать обслуживание",
+                &format!("server:maintenance:{id}"),
+            ),
+            cb(
+                "✅ Завершить обслуживание",
+                &format!("server:maintenance:finish:{id}"),
+            ),
+        ],
         vec![cb(
             "🧪 Тестовая выдача ключа",
             &format!("server:probe:{id}"),
@@ -349,6 +359,16 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("⬅️ Все серверы", "admin:servers"),
             cb("🏠 Админ-панель", "admin:dashboard"),
         ],
+    ])
+}
+
+pub fn server_maintenance_confirm_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "🚧 Подтвердить начало",
+            &format!("server:maintenance:start:{id}"),
+        )],
+        vec![cb("❌ Отмена", &format!("server:{id}"))],
     ])
 }
 
@@ -2413,6 +2433,8 @@ mod tests {
             "server:deploy:42",
             "server:check:42",
             "server:diagnose:42",
+            "server:maintenance:42",
+            "server:maintenance:finish:42",
             "server:panel:42",
             "server:panel:sync:42",
             "server:default:42",

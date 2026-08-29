@@ -576,6 +576,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_monitor_events_created ON monitor_events(created_at DESC);
     CREATE INDEX idx_monitor_events_ack ON monitor_events(acknowledged_at,status);
     "#,
+    // v23: управляемое плановое обслуживание без потери прежнего режима выдачи.
+    r#"
+    CREATE TABLE server_maintenance(
+        server_id INTEGER PRIMARY KEY REFERENCES vpn_servers(id) ON DELETE CASCADE,
+        previous_provisioning INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        started_by INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub struct Store {
