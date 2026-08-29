@@ -21,9 +21,21 @@ pub struct PanelClient {
     pub enabled: bool,
     #[serde(default)]
     pub expired_at: Option<String>,
-    #[serde(default, alias = "transferRx", alias = "receivedBytes", alias = "rx")]
+    #[serde(
+        default,
+        alias = "transferRx",
+        alias = "receivedBytes",
+        alias = "rx",
+        deserialize_with = "deserialize_u64ish"
+    )]
     pub transfer_rx: u64,
-    #[serde(default, alias = "transferTx", alias = "sentBytes", alias = "tx")]
+    #[serde(
+        default,
+        alias = "transferTx",
+        alias = "sentBytes",
+        alias = "tx",
+        deserialize_with = "deserialize_u64ish"
+    )]
     pub transfer_tx: u64,
     #[serde(
         default,
@@ -55,6 +67,26 @@ where
         serde_json::Value::Number(value) => Ok(value.to_string()),
         _ => Err(serde::de::Error::custom(
             "ожидался строковый или числовой id",
+        )),
+    }
+}
+
+fn deserialize_u64ish<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(0),
+        Some(serde_json::Value::Number(value)) => value
+            .as_u64()
+            .ok_or_else(|| serde::de::Error::custom("ожидался неотрицательный счётчик")),
+        Some(serde_json::Value::String(value)) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(serde::de::Error::custom),
+        _ => Err(serde::de::Error::custom(
+            "ожидался числовой, строковый или пустой счётчик",
         )),
     }
 }
@@ -508,6 +540,16 @@ mod tests {
         assert_eq!(wrapped.0[0].id, "42");
         assert_eq!(wrapped.0[0].name, "bob");
         assert_eq!(wrapped.1, "data.clients");
+    }
+
+    #[test]
+    fn client_list_accepts_null_and_string_traffic_counters() {
+        let (clients, _) = decode_client_list(
+            br#"[{"id":1,"name":"phone","transferRx":null,"transferTx":"420400000000"}]"#,
+        )
+        .unwrap();
+        assert_eq!(clients[0].transfer_rx, 0);
+        assert_eq!(clients[0].transfer_tx, 420_400_000_000);
     }
 
     #[test]
