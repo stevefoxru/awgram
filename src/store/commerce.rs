@@ -694,6 +694,19 @@ impl Store {
         self.with_conn(|c| { let old:Option<String>=c.query_row("SELECT status FROM monitor_state WHERE component=?1",[component],|r|r.get(0)).optional()?; c.execute("INSERT INTO monitor_state(component,status,details,changed_at,checked_at) VALUES(?1,?2,?3,?4,?4) ON CONFLICT(component) DO UPDATE SET status=?2,details=?3,changed_at=CASE WHEN status<>?2 THEN ?4 ELSE changed_at END,checked_at=?4",rusqlite::params![component,status,details,now])?; Ok(old.as_deref()!=Some(status) && (old.is_some() || status!="ok")) }).unwrap_or(false)
     }
 
+    pub fn monitor_state(&self, component: &str) -> Option<(String, Option<String>, i64)> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT status,details,checked_at FROM monitor_state WHERE component=?1",
+                [component],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
     pub fn backup_database(&self, path: &std::path::Path) -> rusqlite::Result<()> {
         let value = path.to_string_lossy().into_owned();
         self.with_conn(|c| {

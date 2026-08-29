@@ -1561,8 +1561,31 @@ fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64
             )
         },
     );
-    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%)\nТелеметрия: {telemetry}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
-        server.name,server.status,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},if server.enabled_for_provisioning{"включена"}else{"выключена"},if server.protocol=="amneziawg-2"{"AWG 2.0"}else{"AWG 1.0"},server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
+    let panel_health = if server.protocol == "amneziawg-panel" {
+        let api = match server.status.as_str() {
+            "online" => "🟢 доступна",
+            "warning" => "🟠 есть предупреждение",
+            "offline" => "🔴 недоступна",
+            _ => "⚪ ещё не проверена",
+        };
+        let telemetry_health = match runtime.observed_at {
+            Some(observed_at) if now - observed_at <= 15 * 60 => "🟢 актуальна",
+            Some(_) => "🟠 устарела",
+            None => "⚪ не получена",
+        };
+        let format_health = settings
+            .monitor_state(&format!("vpn-server-{}-panel-format", server.id))
+            .map(|(status, _, checked_at)| {
+                let icon = if status == "ok" { "🟢 совместим" } else { "🟠 изменён" };
+                format!("\nAPI панели: {api}\nФормат API: {icon} · проверен {}\nСтатистика: {telemetry_health}", crate::vpn::model::format_handshake(Lang::Ru, now, checked_at))
+            })
+            .unwrap_or_else(|| format!("\nAPI панели: {api}\nФормат API: ⚪ ещё не проверен\nСтатистика: {telemetry_health}"));
+        format!("\nVPN/узел: {}{format_health}", server.status)
+    } else {
+        String::new()
+    };
+    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%)\nТелеметрия: {telemetry}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
+        server.name,server.status,panel_health,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},if server.enabled_for_provisioning{"включена"}else{"выключена"},if server.protocol=="amneziawg-2"{"AWG 2.0"}else{"AWG 1.0"},server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
 async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
@@ -5550,11 +5573,14 @@ async fn callback_handler(
                     match settings.panel_password(id) {
                         Some(secret) => vpn.panel_probe(&server, &secret).await.map(|probe| {
                             format!(
-                                "panel=online\nauth=ok\nclients={}\nresponse={}",
+                                "panel=online\nauth=ok\napi_version={}\napi_variant={}\nclients={}\nresponse_fingerprint={}\nresponse={}",
+                                probe.api_version.as_deref().unwrap_or("не сообщается"),
+                                probe.format_variant,
                                 probe
                                     .client_count
                                     .map(|value| value.to_string())
                                     .unwrap_or_else(|| "unknown".into()),
+                                probe.response_fingerprint,
                                 probe.response_format
                             )
                         }),

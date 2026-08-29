@@ -291,6 +291,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("🔬 Диагностика", &format!("server:diagnose:{id}")),
         ],
         vec![cb(
+            "🧬 Проверить API панели",
+            &format!("server:diagnose:{id}"),
+        )],
+        vec![cb(
             "🧪 Тестовая выдача ключа",
             &format!("server:probe:{id}"),
         )],

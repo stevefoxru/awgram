@@ -5,6 +5,7 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::Rng;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
@@ -37,7 +38,12 @@ pub struct PanelClient {
 pub struct PanelProbe {
     pub client_count: Option<usize>,
     pub response_format: String,
+    pub api_version: Option<String>,
+    pub format_variant: String,
+    pub response_fingerprint: String,
 }
+
+const READ_ATTEMPTS: usize = 3;
 
 fn deserialize_stringish<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
@@ -103,28 +109,51 @@ async fn session(base_url: &str, password: &str) -> Result<(reqwest::Client, req
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|error| Error::Parse(error.to_string()))?;
-    let response = client
-        .post(api_url(&base, "session")?)
-        .json(&serde_json::json!({"password": password, "remember": false}))
-        .send()
-        .await
-        .map_err(|error| Error::Parse(format!("панель недоступна: {error}")))?;
-    if !response.status().is_success() {
-        return Err(Error::Parse(format!(
-            "панель отклонила пароль (HTTP {})",
-            response.status()
-        )));
+    let url = api_url(&base, "session")?;
+    let mut last_error = None;
+    for attempt in 0..READ_ATTEMPTS {
+        match client
+            .post(url.clone())
+            .json(&serde_json::json!({"password": password, "remember": false}))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok((client, base)),
+            Ok(response) if !response.status().is_server_error() => {
+                return Err(Error::Parse(format!(
+                    "панель отклонила пароль (HTTP {})",
+                    response.status()
+                )));
+            }
+            Ok(response) => {
+                last_error = Some(format!(
+                    "временная ошибка панели HTTP {}",
+                    response.status()
+                ))
+            }
+            Err(error) => last_error = Some(format!("панель недоступна: {error}")),
+        }
+        if attempt + 1 < READ_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt as u64 + 1))).await;
+        }
     }
-    Ok((client, base))
+    Err(Error::Parse(
+        last_error.unwrap_or_else(|| "панель не вернула ответ".into()),
+    ))
 }
 
-fn client_array(value: serde_json::Value) -> Option<serde_json::Value> {
+fn client_array(value: serde_json::Value, path: &str) -> Option<(serde_json::Value, String)> {
     match value {
-        value @ serde_json::Value::Array(_) => Some(value),
+        value @ serde_json::Value::Array(_) => Some((value, path.to_string())),
         serde_json::Value::Object(mut object) => {
             for key in ["clients", "data", "result", "items", "rows"] {
                 if let Some(value) = object.remove(key) {
-                    if let Some(value) = client_array(value) {
+                    let nested = if path == "root" {
+                        key.into()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    if let Some(value) = client_array(value, &nested) {
                         return Some(value);
                     }
                 }
@@ -135,18 +164,54 @@ fn client_array(value: serde_json::Value) -> Option<serde_json::Value> {
     }
 }
 
-fn decode_client_list(body: &[u8]) -> std::result::Result<Vec<PanelClient>, String> {
+fn fingerprint(body: &[u8]) -> String {
+    let digest = Sha256::digest(body);
+    format!("{:x}", digest)[..12].to_string()
+}
+
+fn json_shape(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Array(items) => items.first().map_or_else(
+            || "array(empty)".into(),
+            |item| format!("array({})", json_shape(item)),
+        ),
+        serde_json::Value::Object(object) => {
+            let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            keys.truncate(12);
+            format!("object[{}]", keys.join(","))
+        }
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(_) => "boolean".into(),
+        serde_json::Value::Number(_) => "number".into(),
+        serde_json::Value::String(_) => "string".into(),
+    }
+}
+
+fn decode_client_list(body: &[u8]) -> std::result::Result<(Vec<PanelClient>, String), String> {
     let body = body.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(body);
     let value: serde_json::Value = serde_json::from_slice(body).map_err(|error| {
-        let preview = String::from_utf8_lossy(body)
-            .chars()
-            .take(160)
-            .collect::<String>();
-        format!("не JSON: {error}; начало ответа: {preview:?}")
+        format!(
+            "не JSON: {error}; bytes={}; sha256={}",
+            body.len(),
+            fingerprint(body)
+        )
     })?;
-    let array = client_array(value)
-        .ok_or_else(|| "JSON не содержит массива clients/data/result/items/rows".to_string())?;
-    serde_json::from_value(array).map_err(|error| format!("неизвестный формат клиента: {error}"))
+    let shape = json_shape(&value);
+    let (array, variant) = client_array(value, "root").ok_or_else(|| {
+        format!(
+            "JSON не содержит массива clients/data/result/items/rows; shape={shape}; sha256={}",
+            fingerprint(body)
+        )
+    })?;
+    serde_json::from_value(array)
+        .map(|clients| (clients, variant))
+        .map_err(|error| {
+            format!(
+                "неизвестный формат клиента: {error}; shape={shape}; sha256={}",
+                fingerprint(body)
+            )
+        })
 }
 
 async fn fetch_clients(client: &reqwest::Client, base: &reqwest::Url) -> Result<(String, Vec<u8>)> {
@@ -174,29 +239,84 @@ async fn fetch_clients(client: &reqwest::Client, base: &reqwest::Url) -> Result<
     Ok((content_type, body.to_vec()))
 }
 
+async fn fetch_clients_retry(
+    client: &reqwest::Client,
+    base: &reqwest::Url,
+) -> Result<(String, Vec<u8>)> {
+    let mut last = None;
+    for attempt in 0..READ_ATTEMPTS {
+        match fetch_clients(client, base).await {
+            Ok(value) => return Ok(value),
+            Err(error) => last = Some(error),
+        }
+        if attempt + 1 < READ_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt as u64 + 1))).await;
+        }
+    }
+    Err(last.unwrap_or_else(|| Error::Parse("панель не вернула ответ".into())))
+}
+
+async fn detect_api_version(client: &reqwest::Client, base: &reqwest::Url) -> Option<String> {
+    for path in ["version", "release"] {
+        let Ok(url) = api_url(base, path) else {
+            continue;
+        };
+        let Ok(response) = client
+            .get(url)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+        else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(value) = response.json::<serde_json::Value>().await else {
+            continue;
+        };
+        for key in ["version", "release", "tag"] {
+            if let Some(version) = value.get(key).and_then(|value| value.as_str()) {
+                return Some(version.chars().take(40).collect());
+            }
+        }
+    }
+    None
+}
+
 pub async fn list(base_url: &str, password: &str) -> Result<Vec<PanelClient>> {
     let (client, base) = session(base_url, password).await?;
-    let (content_type, body) = fetch_clients(&client, &base).await?;
-    decode_client_list(&body).map_err(|error| {
-        Error::Parse(format!(
-            "ответ панели не распознан (Content-Type {content_type}): {error}"
-        ))
-    })
+    let (content_type, body) = fetch_clients_retry(&client, &base).await?;
+    decode_client_list(&body)
+        .map_err(|error| {
+            Error::Parse(format!(
+                "ответ панели не распознан (Content-Type {content_type}): {error}"
+            ))
+        })
+        .map(|(clients, _)| clients)
 }
 
 pub async fn probe(base_url: &str, password: &str) -> Result<PanelProbe> {
     let (client, base) = session(base_url, password).await?;
-    let (content_type, body) = fetch_clients(&client, &base).await?;
+    let api_version = detect_api_version(&client, &base).await;
+    let (content_type, body) = fetch_clients_retry(&client, &base).await?;
+    let response_fingerprint = fingerprint(&body);
     Ok(match decode_client_list(&body) {
-        Ok(clients) => PanelProbe {
+        Ok((clients, format_variant)) => PanelProbe {
             client_count: Some(clients.len()),
             response_format: format!("совместимый JSON · Content-Type {content_type}"),
+            api_version,
+            format_variant,
+            response_fingerprint,
         },
         Err(error) => PanelProbe {
             client_count: None,
             response_format: format!(
                 "панель и авторизация работают, но формат списка клиентов пока не распознан · Content-Type {content_type} · {error}"
             ),
+            api_version,
+            format_variant: "unknown".into(),
+            response_fingerprint,
         },
     })
 }
@@ -215,13 +335,14 @@ pub async fn create(base_url: &str, password: &str, name: &str) -> Result<PanelC
             response.status()
         )));
     }
-    let (content_type, body) = fetch_clients(&client, &base).await?;
+    let (content_type, body) = fetch_clients_retry(&client, &base).await?;
     decode_client_list(&body)
         .map_err(|error| {
             Error::Parse(format!(
                 "ответ панели не распознан (Content-Type {content_type}): {error}"
             ))
         })?
+        .0
         .into_iter()
         .find(|client| client.name == name)
         .ok_or_else(|| Error::Parse("панель создала ключ, но не вернула его в списке".into()))
@@ -379,21 +500,24 @@ mod tests {
     #[test]
     fn client_list_accepts_direct_and_wrapped_arrays() {
         let direct = decode_client_list(br#"[{"id":"a","name":"alice","enabled":true}]"#).unwrap();
-        assert_eq!(direct[0].id, "a");
+        assert_eq!(direct.0[0].id, "a");
+        assert_eq!(direct.1, "root");
         let wrapped =
             decode_client_list(br#"{"success":true,"data":{"clients":[{"id":42,"name":"bob"}]}}"#)
                 .unwrap();
-        assert_eq!(wrapped[0].id, "42");
-        assert_eq!(wrapped[0].name, "bob");
+        assert_eq!(wrapped.0[0].id, "42");
+        assert_eq!(wrapped.0[0].name, "bob");
+        assert_eq!(wrapped.1, "data.clients");
     }
 
     #[test]
-    fn client_list_accepts_bom_and_reports_html_preview() {
+    fn client_list_accepts_bom_and_redacts_html_response() {
         let with_bom = b"\xef\xbb\xbf[{\"id\":1,\"name\":\"phone\"}]";
-        assert_eq!(decode_client_list(with_bom).unwrap()[0].name, "phone");
+        assert_eq!(decode_client_list(with_bom).unwrap().0[0].name, "phone");
         let error = decode_client_list(b"<html>login</html>").unwrap_err();
         assert!(error.contains("не JSON"));
-        assert!(error.contains("login"));
+        assert!(error.contains("sha256="));
+        assert!(!error.contains("login"));
     }
 
     #[test]
