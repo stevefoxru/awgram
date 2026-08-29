@@ -121,6 +121,12 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
             match store.panel_password(server.id) {
                 Some(secret) => match vpn.panel_clients(&server, &secret).await {
                     Ok(clients) => {
+                        store.update_monitor_state(
+                            &format!("vpn-server-{}-panel-format", server.id),
+                            "ok",
+                            None,
+                            now,
+                        );
                         let samples = clients
                             .iter()
                             .map(|client| crate::store::Sample {
@@ -170,7 +176,28 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                         }
                         Ok(true)
                     }
-                    Err(error) => Err(error),
+                    Err(list_error) => match vpn.panel_probe(&server, &secret).await {
+                        Ok(probe) => {
+                            let details =
+                                format!("list_error={list_error}; probe={}", probe.response_format);
+                            let key = format!("vpn-server-{}-panel-format", server.id);
+                            if store.update_monitor_state(&key, "warning", Some(&details), now) {
+                                notify_admins(
+                                    bot,
+                                    cfg,
+                                    format!(
+                                        "⚠️ Панель «{}» доступна, но формат списка клиентов изменился\n{}\n\nVPN продолжает считаться доступным; SSH-мост для панели не требуется.",
+                                        server.name, probe.response_format
+                                    ),
+                                )
+                                .await;
+                            }
+                            Ok(true)
+                        }
+                        Err(probe_error) => Err(crate::error::Error::Parse(format!(
+                            "список клиентов: {list_error}; проверка панели: {probe_error}"
+                        ))),
+                    },
                 },
                 None => Err(crate::error::Error::Parse(
                     "пароль панели не настроен".into(),

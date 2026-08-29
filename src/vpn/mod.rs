@@ -645,6 +645,15 @@ impl Vpn {
         panel::list(&url, &password).await
     }
 
+    pub async fn panel_probe(
+        &self,
+        server: &crate::store::VpnServer,
+        encrypted_password: &str,
+    ) -> Result<panel::PanelProbe> {
+        let (url, password) = self.panel_auth(server, encrypted_password)?;
+        panel::probe(&url, &password).await
+    }
+
     async fn save_panel_configuration(
         &self,
         server: &crate::store::VpnServer,

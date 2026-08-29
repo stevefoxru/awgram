@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PanelClient {
+    #[serde(deserialize_with = "deserialize_stringish")]
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -30,6 +31,26 @@ pub struct PanelClient {
         alias = "lastHandshake"
     )]
     pub latest_handshake_at: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanelProbe {
+    pub client_count: Option<usize>,
+    pub response_format: String,
+}
+
+fn deserialize_stringish<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(value) => Ok(value),
+        serde_json::Value::Number(value) => Ok(value.to_string()),
+        _ => Err(serde::de::Error::custom(
+            "ожидался строковый или числовой id",
+        )),
+    }
 }
 
 impl PanelClient {
@@ -97,23 +118,87 @@ async fn session(base_url: &str, password: &str) -> Result<(reqwest::Client, req
     Ok((client, base))
 }
 
-pub async fn list(base_url: &str, password: &str) -> Result<Vec<PanelClient>> {
-    let (client, base) = session(base_url, password).await?;
+fn client_array(value: serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        value @ serde_json::Value::Array(_) => Some(value),
+        serde_json::Value::Object(mut object) => {
+            for key in ["clients", "data", "result", "items", "rows"] {
+                if let Some(value) = object.remove(key) {
+                    if let Some(value) = client_array(value) {
+                        return Some(value);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn decode_client_list(body: &[u8]) -> std::result::Result<Vec<PanelClient>, String> {
+    let body = body.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(body);
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|error| {
+        let preview = String::from_utf8_lossy(body)
+            .chars()
+            .take(160)
+            .collect::<String>();
+        format!("не JSON: {error}; начало ответа: {preview:?}")
+    })?;
+    let array = client_array(value)
+        .ok_or_else(|| "JSON не содержит массива clients/data/result/items/rows".to_string())?;
+    serde_json::from_value(array).map_err(|error| format!("неизвестный формат клиента: {error}"))
+}
+
+async fn fetch_clients(client: &reqwest::Client, base: &reqwest::Url) -> Result<(String, Vec<u8>)> {
     let response = client
-        .get(api_url(&base, "wireguard/client")?)
+        .get(api_url(base, "wireguard/client")?)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .send()
         .await
-        .map_err(|error| Error::Parse(error.to_string()))?;
-    if !response.status().is_success() {
-        return Err(Error::Parse(format!(
-            "список клиентов: HTTP {}",
-            response.status()
-        )));
+        .map_err(|error| Error::Parse(format!("запрос списка клиентов: {error}")))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("не указан")
+        .to_string();
+    if !status.is_success() {
+        return Err(Error::Parse(format!("список клиентов: HTTP {status}")));
     }
-    response
-        .json()
+    let body = response
+        .bytes()
         .await
-        .map_err(|error| Error::Parse(format!("ответ панели: {error}")))
+        .map_err(|error| Error::Parse(format!("чтение ответа панели: {error}")))?;
+    Ok((content_type, body.to_vec()))
+}
+
+pub async fn list(base_url: &str, password: &str) -> Result<Vec<PanelClient>> {
+    let (client, base) = session(base_url, password).await?;
+    let (content_type, body) = fetch_clients(&client, &base).await?;
+    decode_client_list(&body).map_err(|error| {
+        Error::Parse(format!(
+            "ответ панели не распознан (Content-Type {content_type}): {error}"
+        ))
+    })
+}
+
+pub async fn probe(base_url: &str, password: &str) -> Result<PanelProbe> {
+    let (client, base) = session(base_url, password).await?;
+    let (content_type, body) = fetch_clients(&client, &base).await?;
+    Ok(match decode_client_list(&body) {
+        Ok(clients) => PanelProbe {
+            client_count: Some(clients.len()),
+            response_format: format!("совместимый JSON · Content-Type {content_type}"),
+        },
+        Err(error) => PanelProbe {
+            client_count: None,
+            response_format: format!(
+                "панель и авторизация работают, но формат списка клиентов пока не распознан · Content-Type {content_type} · {error}"
+            ),
+        },
+    })
 }
 
 pub async fn create(base_url: &str, password: &str, name: &str) -> Result<PanelClient> {
@@ -130,21 +215,13 @@ pub async fn create(base_url: &str, password: &str, name: &str) -> Result<PanelC
             response.status()
         )));
     }
-    let response = client
-        .get(api_url(&base, "wireguard/client")?)
-        .send()
-        .await
-        .map_err(|error| Error::Parse(error.to_string()))?;
-    if !response.status().is_success() {
-        return Err(Error::Parse(format!(
-            "проверка созданного клиента: HTTP {}",
-            response.status()
-        )));
-    }
-    response
-        .json::<Vec<PanelClient>>()
-        .await
-        .map_err(|error| Error::Parse(format!("ответ панели: {error}")))?
+    let (content_type, body) = fetch_clients(&client, &base).await?;
+    decode_client_list(&body)
+        .map_err(|error| {
+            Error::Parse(format!(
+                "ответ панели не распознан (Content-Type {content_type}): {error}"
+            ))
+        })?
         .into_iter()
         .find(|client| client.name == name)
         .ok_or_else(|| Error::Parse("панель создала ключ, но не вернула его в списке".into()))
@@ -298,6 +375,26 @@ pub fn reveal_password(key_path: &Path, encrypted: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_list_accepts_direct_and_wrapped_arrays() {
+        let direct = decode_client_list(br#"[{"id":"a","name":"alice","enabled":true}]"#).unwrap();
+        assert_eq!(direct[0].id, "a");
+        let wrapped =
+            decode_client_list(br#"{"success":true,"data":{"clients":[{"id":42,"name":"bob"}]}}"#)
+                .unwrap();
+        assert_eq!(wrapped[0].id, "42");
+        assert_eq!(wrapped[0].name, "bob");
+    }
+
+    #[test]
+    fn client_list_accepts_bom_and_reports_html_preview() {
+        let with_bom = b"\xef\xbb\xbf[{\"id\":1,\"name\":\"phone\"}]";
+        assert_eq!(decode_client_list(with_bom).unwrap()[0].name, "phone");
+        let error = decode_client_list(b"<html>login</html>").unwrap_err();
+        assert!(error.contains("не JSON"));
+        assert!(error.contains("login"));
+    }
 
     #[test]
     fn password_roundtrip_uses_separate_key_file() {

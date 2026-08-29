@@ -5510,7 +5510,7 @@ async fn callback_handler(
                     vpn.check().await.map(|report| report.ok)
                 } else if server.protocol == "amneziawg-panel" {
                     match settings.panel_password(id) {
-                        Some(secret) => vpn.panel_clients(&server, &secret).await.map(|_| true),
+                        Some(secret) => vpn.panel_probe(&server, &secret).await.map(|_| true),
                         None => Err(crate::error::Error::Parse(
                             "пароль панели не настроен".into(),
                         )),
@@ -5548,10 +5548,16 @@ async fn callback_handler(
                     vpn.diagnose().await
                 } else if server.protocol == "amneziawg-panel" {
                     match settings.panel_password(id) {
-                        Some(secret) => vpn
-                            .panel_clients(&server, &secret)
-                            .await
-                            .map(|clients| format!("panel=online\nclients={}", clients.len())),
+                        Some(secret) => vpn.panel_probe(&server, &secret).await.map(|probe| {
+                            format!(
+                                "panel=online\nauth=ok\nclients={}\nresponse={}",
+                                probe
+                                    .client_count
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| "unknown".into()),
+                                probe.response_format
+                            )
+                        }),
                         None => Err(crate::error::Error::Parse(
                             "пароль панели не настроен".into(),
                         )),
@@ -5565,6 +5571,7 @@ async fn callback_handler(
                 };
                 let text = match result {
                     Ok(output) => format!("🔬 Диагностика «{}»\n\n{}", server.name, truncate_for_message(output)),
+                    Err(error) if server.protocol == "amneziawg-panel" => format!("❌ Не удалось связаться с панелью «{}»: {error}\n\nSSH-мост transfer.sh для панели не используется. Проверьте URL, пароль, доступность HTTP-порта с сервера бота и повторите проверку.", server.name),
                     Err(error) => format!("❌ Диагностика «{}» недоступна: {error}\n\nЕсли узел подключён давно, обновите SSH-мост командой transfer.sh bridge.", server.name),
                 };
                 bot.send_message(chat, text)
