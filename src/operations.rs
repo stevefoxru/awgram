@@ -42,10 +42,48 @@ fn replacement_is_stale(created_at: i64, now: i64) -> bool {
     created_at <= now.saturating_sub(24 * 60 * 60)
 }
 
+fn capacity_status(assigned: i64, capacity: i64) -> (&'static str, i64) {
+    let percent = if capacity > 0 {
+        assigned.max(0).saturating_mul(100) / capacity
+    } else {
+        100
+    };
+    let status = if percent >= 100 {
+        "error"
+    } else if percent >= 90 {
+        "warning90"
+    } else if percent >= 80 {
+        "warning80"
+    } else {
+        "ok"
+    };
+    (status, percent)
+}
+
 async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     let removed_sessions = store.prune_portal_sessions(now);
     if removed_sessions > 0 {
         tracing::info!(removed_sessions, "устаревшие сессии ЛК удалены");
+    }
+
+    for server in store.vpn_servers() {
+        let assigned = store.server_client_count(server.id);
+        let (status, percent) = capacity_status(assigned, server.capacity);
+        let free = server.capacity.saturating_sub(assigned).max(0);
+        let details = format!(
+            "использовано {assigned}/{} ({percent}%), свободно {free}",
+            server.capacity
+        );
+        let key = format!("vpn-server-{}-capacity", server.id);
+        if store.update_monitor_state(&key, status, Some(&details), now) {
+            let text = match status {
+                "error" => format!("🔴 Сервер «{}» заполнен\n{details}\n\nНовая выдача на этот узел автоматически заблокирована лимитом. Выберите другой сервер или увеличьте ёмкость после проверки ресурсов.", server.name),
+                "warning90" => format!("🟠 Сервер «{}» заполнен на 90%\n{details}\n\nРекомендуется заранее подготовить другой узел.", server.name),
+                "warning80" => format!("🟡 Сервер «{}» заполнен на 80%\n{details}", server.name),
+                _ => format!("✅ Нагрузка сервера «{}» вернулась в безопасный диапазон\n{details}", server.name),
+            };
+            notify_admins(bot, cfg, text).await;
+        }
     }
     let stale_replacements = store
         .pending_key_replacements()
@@ -472,5 +510,14 @@ mod tests {
         assert!(!replacement_is_stale(now - 86_399, now));
         assert!(replacement_is_stale(now - 86_400, now));
         assert!(!replacement_is_stale(now + 60, now));
+    }
+
+    #[test]
+    fn capacity_thresholds_are_stable() {
+        assert_eq!(capacity_status(79, 100), ("ok", 79));
+        assert_eq!(capacity_status(80, 100), ("warning80", 80));
+        assert_eq!(capacity_status(90, 100), ("warning90", 90));
+        assert_eq!(capacity_status(100, 100), ("error", 100));
+        assert_eq!(capacity_status(120, 100), ("error", 120));
     }
 }

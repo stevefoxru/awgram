@@ -1412,7 +1412,11 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
         .count();
     let incidents = states
         .iter()
-        .filter(|state| matches!(state.status.as_str(), "error" | "warning" | "maintenance"))
+        .filter(|state| {
+            state.status == "error"
+                || state.status == "maintenance"
+                || state.status.starts_with("warning")
+        })
         .collect::<Vec<_>>();
     let last_check = states.iter().map(|state| state.checked_at).max();
     let incident_lines = incidents
@@ -1422,6 +1426,7 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
             let icon = match state.status.as_str() {
                 "error" => "🔴",
                 "maintenance" => "🚧",
+                "warning80" => "🟡",
                 _ => "🟠",
             };
             let label = monitor_component_label(settings, &state.component);
@@ -1464,10 +1469,9 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
         .iter()
         .filter(|event| {
             event.status == "ok"
-                && event
-                    .previous_status
-                    .as_deref()
-                    .is_some_and(|status| matches!(status, "warning" | "error" | "maintenance"))
+                && event.previous_status.as_deref().is_some_and(|status| {
+                    status == "error" || status == "maintenance" || status.starts_with("warning")
+                })
         })
         .take(5)
         .map(|event| {
@@ -1519,6 +1523,8 @@ fn monitor_component_label(settings: &Store, component: &str) -> String {
             "сверка ключей"
         } else if component.ends_with("-maintenance") {
             "обслуживание"
+        } else if component.ends_with("-capacity") {
+            "ёмкость"
         } else {
             "доступность"
         };
@@ -1682,6 +1688,20 @@ fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64
     } else {
         0
     };
+    let free = server.capacity.saturating_sub(assigned).max(0);
+    let capacity_health = match fill {
+        100.. => "🔴 заполнен",
+        90..=99 => "🟠 почти заполнен",
+        80..=89 => "🟡 повышенная нагрузка",
+        _ => "🟢 есть запас",
+    };
+    let provisioning_status = if !server.enabled_for_provisioning {
+        "выключена"
+    } else if fill >= 100 {
+        "заблокирована лимитом"
+    } else {
+        "включена"
+    };
     let runtime = settings.server_runtime_summary(server.id, now);
     let telemetry = runtime.observed_at.map_or_else(
         || "данные ещё не получены".to_string(),
@@ -1719,8 +1739,8 @@ fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64
     } else {
         String::new()
     };
-    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%)\nТелеметрия: {telemetry}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
-        server.name,server.status,panel_health,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},if server.enabled_for_provisioning{"включена"}else{"выключена"},if server.protocol=="amneziawg-2"{"AWG 2.0"}else{"AWG 1.0"},server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
+    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
+        server.name,server.status,panel_health,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,if server.protocol=="amneziawg-2"{"AWG 2.0"}else{"AWG 1.0"},server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
 async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
@@ -1729,6 +1749,7 @@ async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
         .iter()
         .filter(|s| {
             matches!(s.status.as_str(), "warning" | "offline")
+                || (s.capacity > 0 && settings.server_client_count(s.id) * 100 / s.capacity >= 90)
                 || s.paid_until.is_some_and(|v| v <= now_epoch() + 7 * 86_400)
         })
         .count();
