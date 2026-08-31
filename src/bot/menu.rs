@@ -366,6 +366,49 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn server_inventory_menu(
+    id: i64,
+    panel_only: bool,
+    database_only: bool,
+    wrong_server: bool,
+) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if panel_only {
+        rows.push(vec![cb(
+            "📥 Импортировать ключи панели",
+            &format!("server:panel:sync:{id}"),
+        )]);
+    }
+    if database_only {
+        rows.push(vec![cb(
+            "🗄 Архивировать отсутствующие",
+            &format!("server:panel:archive:{id}"),
+        )]);
+    }
+    if wrong_server {
+        rows.push(vec![cb(
+            "📍 Исправить привязку",
+            &format!("server:panel:rebind:{id}"),
+        )]);
+    }
+    rows.push(vec![cb(
+        "🔄 Проверить ещё раз",
+        &format!("server:panel:audit:{id}"),
+    )]);
+    rows.push(vec![cb("⬅️ К серверу", &format!("server:{id}"))]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn server_inventory_confirm_menu(id: i64, operation: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "✅ Подтвердить",
+            &format!("server:panel:{operation}:confirm:{id}"),
+        )],
+        vec![cb("↩️ Отмена", &format!("server:panel:audit:{id}"))],
+    ])
+}
+
 pub fn server_maintenance_confirm_menu(id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb(

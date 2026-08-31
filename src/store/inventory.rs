@@ -224,6 +224,64 @@ impl Store {
             rusqlite::params![name,reason,actor,now],
         ));
     }
+
+    pub fn archive_database_only_clients(
+        &self,
+        server_id: i64,
+        names: &[String],
+        actor: i64,
+        now: i64,
+    ) -> usize {
+        self.with_conn(|connection| {
+            let tx = connection.unchecked_transaction()?;
+            let mut archived = 0usize;
+            for name in names {
+                tx.execute(
+                    "INSERT INTO client_archive_events(client_name,server_id,owner_user_id,reason,actor_id,archived_at)
+                     SELECT name,server_id,owner_user_id,'missing_from_panel',?3,?4 FROM clients
+                     WHERE name=?1 AND server_id=?2 AND removed_at IS NULL",
+                    rusqlite::params![name, server_id, actor, now],
+                )?;
+                archived += tx.execute(
+                    "UPDATE clients SET removed_at=?3,last_seen=?3
+                     WHERE name=?1 AND server_id=?2 AND removed_at IS NULL",
+                    rusqlite::params![name, server_id, now],
+                )?;
+            }
+            tx.commit()?;
+            Ok(archived)
+        })
+        .unwrap_or(0)
+    }
+
+    pub fn rebind_inventory_clients(&self, server_id: i64, names: &[String], now: i64) -> usize {
+        let Some(server) = self.vpn_server(server_id) else {
+            return 0;
+        };
+        self.with_conn(|connection| {
+            let tx = connection.unchecked_transaction()?;
+            let mut moved = 0usize;
+            for name in names {
+                let assigned: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM clients WHERE server_id=?1 AND removed_at IS NULL",
+                    [server_id],
+                    |row| row.get(0),
+                )?;
+                if assigned >= server.capacity {
+                    break;
+                }
+                moved += tx.execute(
+                    "UPDATE clients SET server_id=?2,protocol='amneziawg-panel',
+                       instance_id=(SELECT id FROM vpn_instances WHERE server_id=?2 AND is_default=1),last_seen=?3
+                     WHERE name=?1 AND removed_at IS NULL AND (server_id IS NULL OR server_id<>?2)",
+                    rusqlite::params![name, server_id, now],
+                )?;
+            }
+            tx.commit()?;
+            Ok(moved)
+        })
+        .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +323,50 @@ mod tests {
         );
         assert_eq!(report.panel_only, vec!["only-panel"]);
         assert_eq!(report.database_only, vec!["in-db"]);
+    }
+
+    #[test]
+    fn remediation_archives_missing_and_rebinds_only_named_clients() {
+        let store = Store::open_in_memory();
+        let add = |name: &'static str, host: &'static str, ip: &'static str| {
+            store
+                .add_vpn_server(
+                    &NewVpnServer {
+                        name,
+                        hostname: host,
+                        public_ip: ip,
+                        provider: "x",
+                        location: "NL",
+                        protocol: "amneziawg-panel",
+                        opened_at: None,
+                        is_local: false,
+                    },
+                    1,
+                    1,
+                )
+                .unwrap()
+        };
+        let old = add("old", "old", "1.1.1.1");
+        let actual = add("actual", "actual", "2.2.2.2");
+        store.sync_panel_clients(
+            old,
+            &[
+                ("missing".into(), "10.0.0.2".into()),
+                ("moved".into(), "10.0.0.3".into()),
+            ],
+            2,
+        );
+
+        assert_eq!(
+            store.archive_database_only_clients(old, &["missing".into()], 7, 3),
+            1
+        );
+        assert!(!store.active_client_names().contains(&"missing".into()));
+        assert_eq!(
+            store.rebind_inventory_clients(actual, &["moved".into()], 4),
+            1
+        );
+        assert_eq!(store.client_vpn_server("moved").unwrap().id, actual);
     }
 
     #[test]

@@ -60,6 +60,10 @@ pub enum Action {
     ServerPanelConnect(i64),
     ServerPanelSync(i64),
     ServerPanelAudit(i64),
+    ServerPanelArchiveMissingAsk(i64),
+    ServerPanelArchiveMissingConfirm(i64),
+    ServerPanelRebindAsk(i64),
+    ServerPanelRebindConfirm(i64),
     LocalMigration,
     LocalMigrationPreflight,
     LocalMigrationStart,
@@ -551,6 +555,22 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::ServerPanelAudit)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:panel:archive:confirm:") {
+                v.parse()
+                    .map(Action::ServerPanelArchiveMissingConfirm)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:panel:archive:") {
+                v.parse()
+                    .map(Action::ServerPanelArchiveMissingAsk)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:panel:rebind:confirm:") {
+                v.parse()
+                    .map(Action::ServerPanelRebindConfirm)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:panel:rebind:") {
+                v.parse()
+                    .map(Action::ServerPanelRebindAsk)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:panel:") {
                 v.parse()
                     .map(Action::ServerPanelConnect)
@@ -809,6 +829,42 @@ fn now_epoch() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+async fn fresh_panel_inventory(
+    vpn: &Vpn,
+    settings: &Store,
+    server: &crate::store::VpnServer,
+) -> Result<crate::store::InventoryReport, crate::error::Error> {
+    let secret = settings
+        .panel_password(server.id)
+        .ok_or_else(|| crate::error::Error::Parse("пароль панели не настроен".into()))?;
+    let clients = vpn.panel_clients(server, &secret).await?;
+    let items = clients
+        .iter()
+        .map(|client| crate::store::InventoryItem {
+            remote_id: client.id.clone(),
+            name: client.name.clone(),
+            enabled: client.enabled,
+            rx: client.transfer_rx,
+            tx: client.transfer_tx,
+            last_handshake: client.last_handshake_epoch(),
+        })
+        .collect::<Vec<_>>();
+    Ok(settings.reconcile_inventory(server.id, now_epoch(), &items))
+}
+
+fn inventory_names(values: &[String]) -> String {
+    if values.is_empty() {
+        "—".into()
+    } else {
+        values
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn star_order_id(payload: &str) -> Option<i64> {
@@ -2205,6 +2261,10 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerPanelConnect(_)
         | ServerPanelSync(_)
         | ServerPanelAudit(_)
+        | ServerPanelArchiveMissingAsk(_)
+        | ServerPanelArchiveMissingConfirm(_)
+        | ServerPanelRebindAsk(_)
+        | ServerPanelRebindConfirm(_)
         | LocalMigration
         | LocalMigrationPreflight
         | LocalMigrationStart
@@ -6103,46 +6163,21 @@ async fn callback_handler(
                 .vpn_server(id)
                 .filter(|server| server.protocol == "amneziawg-panel")
             {
-                let result = match settings.panel_password(id) {
-                    Some(secret) => vpn.panel_clients(&server, &secret).await,
-                    None => Err(crate::error::Error::Parse(
-                        "пароль панели не настроен".into(),
-                    )),
-                };
-                match result {
-                    Ok(clients) => {
-                        let items = clients
-                            .iter()
-                            .map(|client| crate::store::InventoryItem {
-                                remote_id: client.id.clone(),
-                                name: client.name.clone(),
-                                enabled: client.enabled,
-                                rx: client.transfer_rx,
-                                tx: client.transfer_tx,
-                                last_handshake: client.last_handshake_epoch(),
-                            })
-                            .collect::<Vec<_>>();
-                        let report = settings.reconcile_inventory(id, now_epoch(), &items);
-                        let names = |values: &[String]| {
-                            if values.is_empty() {
-                                "—".into()
-                            } else {
-                                values
-                                    .iter()
-                                    .take(20)
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            }
-                        };
+                match fresh_panel_inventory(&vpn, &settings, &server).await {
+                    Ok(report) => {
                         bot.send_message(chat, format!(
                             "🧾 Сверка реестра · {}\n\nВ панели: {}\nСовпало с базой: {}\n\nТолько в панели: {}\n{}\n\nТолько в базе: {}\n{}\n\nЗаписаны за другим сервером: {}\n{}\n\nДубли на нескольких серверах: {}\n{}\n\nНичего не удалено. Несоответствия сохранены для последующего решения.",
                             server.name,report.observed,report.matched,
-                            report.panel_only.len(),names(&report.panel_only),
-                            report.database_only.len(),names(&report.database_only),
-                            report.wrong_server.len(),names(&report.wrong_server),
-                            report.duplicates.len(),names(&report.duplicates)
-                        )).reply_markup(menu::server_card_menu(id)).await?;
+                            report.panel_only.len(),inventory_names(&report.panel_only),
+                            report.database_only.len(),inventory_names(&report.database_only),
+                            report.wrong_server.len(),inventory_names(&report.wrong_server),
+                            report.duplicates.len(),inventory_names(&report.duplicates)
+                        )).reply_markup(menu::server_inventory_menu(
+                            id,
+                            !report.panel_only.is_empty(),
+                            !report.database_only.is_empty(),
+                            report.wrong_server.iter().any(|name| !report.duplicates.contains(name)),
+                        )).await?;
                     }
                     Err(error) => {
                         bot.send_message(
@@ -6151,6 +6186,105 @@ async fn callback_handler(
                         )
                         .reply_markup(menu::server_card_menu(id))
                         .await?;
+                    }
+                }
+            }
+        }
+        Action::ServerPanelArchiveMissingAsk(id) => {
+            if let Some(server) = settings
+                .vpn_server(id)
+                .filter(|server| server.protocol == "amneziawg-panel")
+            {
+                match fresh_panel_inventory(&vpn, &settings, &server).await {
+                    Ok(report) if report.database_only.is_empty() => {
+                        bot.send_message(chat, "✅ Записей, отсутствующих в панели, больше нет.")
+                            .reply_markup(menu::server_inventory_menu(
+                                id,
+                                !report.panel_only.is_empty(),
+                                false,
+                                !report.wrong_server.is_empty(),
+                            ))
+                            .await?;
+                    }
+                    Ok(report) => {
+                        bot.send_message(chat, format!("🗄 Архивирование отсутствующих ключей · {}\n\nБудут скрыты из активной базы и кабинетов: {}\n\nКлючи в панели не удаляются. Событие сохранится в архивном журнале. Перед выполнением бот ещё раз запросит панель.", server.name, inventory_names(&report.database_only)))
+                            .reply_markup(menu::server_inventory_confirm_menu(id, "archive")).await?;
+                    }
+                    Err(error) => {
+                        bot.send_message(chat, format!("❌ Повторная сверка не удалась: {error}"))
+                            .reply_markup(menu::server_card_menu(id))
+                            .await?;
+                    }
+                }
+            }
+        }
+        Action::ServerPanelArchiveMissingConfirm(id) => {
+            if let Some(server) = settings
+                .vpn_server(id)
+                .filter(|server| server.protocol == "amneziawg-panel")
+            {
+                match fresh_panel_inventory(&vpn, &settings, &server).await {
+                    Ok(report) => {
+                        let archived = settings.archive_database_only_clients(
+                            id,
+                            &report.database_only,
+                            uid,
+                            now_epoch(),
+                        );
+                        bot.send_message(chat, format!("✅ Архивировано записей: {archived}. Удалённых ключей в панели: 0.\n\nЗапустите сверку ещё раз, чтобы увидеть актуальный итог."))
+                            .reply_markup(menu::server_inventory_menu(id, !report.panel_only.is_empty(), false, !report.wrong_server.is_empty())).await?;
+                    }
+                    Err(error) => {
+                        bot.send_message(chat, format!("❌ Архивирование отменено: панель не прошла повторную проверку: {error}")).reply_markup(menu::server_card_menu(id)).await?;
+                    }
+                }
+            }
+        }
+        Action::ServerPanelRebindAsk(id) => {
+            if let Some(server) = settings
+                .vpn_server(id)
+                .filter(|server| server.protocol == "amneziawg-panel")
+            {
+                match fresh_panel_inventory(&vpn, &settings, &server).await {
+                    Ok(report) => {
+                        let candidates = report
+                            .wrong_server
+                            .iter()
+                            .filter(|name| !report.duplicates.contains(name))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if candidates.is_empty() {
+                            bot.send_message(chat, "✅ Однозначных записей для перепривязки нет. Дубли требуют ручной проверки.").reply_markup(menu::server_inventory_menu(id, !report.panel_only.is_empty(), !report.database_only.is_empty(), false)).await?;
+                        } else {
+                            bot.send_message(chat, format!("📍 Исправление привязки · {}\n\nБудут привязаны к этому серверу: {}\n\nКонфигурации и ключи в панели не изменяются. Дубли автоматически пропускаются. Перед выполнением бот повторит сверку.", server.name, inventory_names(&candidates))).reply_markup(menu::server_inventory_confirm_menu(id, "rebind")).await?;
+                        }
+                    }
+                    Err(error) => {
+                        bot.send_message(chat, format!("❌ Повторная сверка не удалась: {error}"))
+                            .reply_markup(menu::server_card_menu(id))
+                            .await?;
+                    }
+                }
+            }
+        }
+        Action::ServerPanelRebindConfirm(id) => {
+            if let Some(server) = settings
+                .vpn_server(id)
+                .filter(|server| server.protocol == "amneziawg-panel")
+            {
+                match fresh_panel_inventory(&vpn, &settings, &server).await {
+                    Ok(report) => {
+                        let candidates = report
+                            .wrong_server
+                            .iter()
+                            .filter(|name| !report.duplicates.contains(name))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let moved = settings.rebind_inventory_clients(id, &candidates, now_epoch());
+                        bot.send_message(chat, format!("✅ Исправлена привязка записей: {moved}. Ключи в панели не менялись.\n\nДубли пропущены: {}.", report.duplicates.len())).reply_markup(menu::server_inventory_menu(id, !report.panel_only.is_empty(), !report.database_only.is_empty(), false)).await?;
+                    }
+                    Err(error) => {
+                        bot.send_message(chat, format!("❌ Перепривязка отменена: панель не прошла повторную проверку: {error}")).reply_markup(menu::server_card_menu(id)).await?;
                     }
                 }
             }
@@ -10318,6 +10452,10 @@ mod tests {
             ServerPanelConnect(1),
             ServerPanelSync(1),
             ServerPanelAudit(1),
+            ServerPanelArchiveMissingAsk(1),
+            ServerPanelArchiveMissingConfirm(1),
+            ServerPanelRebindAsk(1),
+            ServerPanelRebindConfirm(1),
             AdminCreate,
             AdminOwners,
             AdminOwnersPage(0),
@@ -10522,6 +10660,10 @@ mod tests {
                 ServerPanelConnect(_) => {}
                 ServerPanelSync(_) => {}
                 ServerPanelAudit(_) => {}
+                ServerPanelArchiveMissingAsk(_) => {}
+                ServerPanelArchiveMissingConfirm(_) => {}
+                ServerPanelRebindAsk(_) => {}
+                ServerPanelRebindConfirm(_) => {}
                 LocalMigration => {}
                 LocalMigrationPreflight => {}
                 LocalMigrationStart => {}
@@ -10887,6 +11029,10 @@ mod tests {
             (Action::ServerPanelConnect(1), true, false),
             (Action::ServerPanelSync(1), true, false),
             (Action::ServerPanelAudit(1), true, false),
+            (Action::ServerPanelArchiveMissingAsk(1), true, false),
+            (Action::ServerPanelArchiveMissingConfirm(1), true, false),
+            (Action::ServerPanelRebindAsk(1), true, false),
+            (Action::ServerPanelRebindConfirm(1), true, false),
             (Action::LocalMigration, true, false),
             (Action::LocalMigrationPreflight, true, false),
             (Action::LocalMigrationStart, true, false),
