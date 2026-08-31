@@ -100,8 +100,20 @@ pub fn admin_keyboard() -> KeyboardMarkup {
             KeyboardButton::new("🔎 Поиск"),
         ],
         vec![
-            KeyboardButton::new("🚨 События"),
-            KeyboardButton::new("🆘 Обращения"),
+            KeyboardButton::new("🖥 Серверы"),
+            KeyboardButton::new("🔑 Ключи"),
+        ],
+        vec![
+            KeyboardButton::new("👥 Пользователи"),
+            KeyboardButton::new("💳 Финансы"),
+        ],
+        vec![
+            KeyboardButton::new("📊 Аналитика"),
+            KeyboardButton::new("💬 Связь"),
+        ],
+        vec![
+            KeyboardButton::new("🔄 Операции"),
+            KeyboardButton::new("⚙️ Система"),
         ],
         vec![KeyboardButton::new("👤 Кабинет")],
     ])

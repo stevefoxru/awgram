@@ -1417,9 +1417,9 @@ async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -
     let total_keys = settings.active_client_names().len();
     let pending_replacements = settings.pending_key_replacements().len();
     bot.send_message(chat,format!(
-        "🏠 Панель управления ZuevVPN\n\n🖥 Инфраструктура\nСерверы: {online_servers}/{} онлайн\nКлючи: {total_keys} активных\n\n👥 Клиенты\nПользователей: {}\nОтключено: {disabled}\nИстекают за 7 дней: {expiring}\n\n💼 Работа\nЗамен ожидает проверки: {pending_replacements}\nПлатежей ожидает: {}\nОбращений открыто: {}\nВыручка за 30 дней: {:.2} ₽\n\n⚙️ Версия бота: v{}\n\nВыберите раздел:",
+        "🏠 Панель управления ZuevVPN\n\n🖥 Инфраструктура\nСерверы: {online_servers}/{} онлайн\nКлючи: {total_keys} активных\n\n👥 Клиенты\nПользователей: {}\nОтключено: {disabled}\nИстекают за 7 дней: {expiring}\n\n💼 Работа\nЗамен ожидает проверки: {pending_replacements}\nПлатежей ожидает: {}\nОбращений открыто: {}\nВыручка за 30 дней: {:.2} ₽\n\n⚙️ Версия бота: v{}\n\nОсновные разделы находятся на постоянной клавиатуре внизу.",
         servers.len(),settings.all_user_ids().len(),month.pending,settings.open_support_count(),month.revenue_kopecks as f64/100.0,env!("CARGO_PKG_VERSION")))
-        .reply_markup(menu::admin_dashboard_menu()).await?;
+        .reply_markup(menu::admin_keyboard()).await?;
     Ok(())
 }
 
@@ -1561,6 +1561,36 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
         ),
     )
     .reply_markup(menu::admin_operations_menu(&server_ids, unread_events > 0))
+    .await?;
+    Ok(())
+}
+
+async fn admin_system_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let release = latest_release_info().await;
+    let update_line = match &release {
+        Some((latest, _, _)) if latest == &current => {
+            format!("✅ Установлена актуальная версия {current}")
+        }
+        Some((latest, _, _)) => format!("⬆️ Доступно обновление: {current} → {latest}"),
+        None => format!("Текущая версия: {current}\nНе удалось проверить GitHub."),
+    };
+    let backup_line = settings
+        .monitor_state("database_backup")
+        .map(|(status, details, checked_at)| {
+            let icon = if status == "ok" { "✅" } else { "❌" };
+            format!(
+                "{icon} Проверка БД: {}\n{}",
+                crate::vpn::model::format_handshake(Lang::Ru, now_epoch(), checked_at),
+                details.unwrap_or_else(|| "без подробностей".into())
+            )
+        })
+        .unwrap_or_else(|| "⚪ Резервная копия БД ещё не проверялась".into());
+    bot.send_message(
+        chat,
+        format!("⚙️ Система\n\n{update_line}\n\n💾 Аварийное восстановление\n{backup_line}\n\nНастройки, VPN-копии, VPN-служба и журнал обновлений."),
+    )
+    .reply_markup(menu::admin_system_hub())
     .await?;
     Ok(())
 }
@@ -2960,6 +2990,62 @@ async fn message_handler(
                 )
                 .await?;
                 dialogue.update(State::AwaitingAdminSearch).await?;
+                return Ok(());
+            }
+            "🖥 Серверы" => {
+                servers_screen(&bot, msg.chat.id, &settings).await?;
+                return Ok(());
+            }
+            "🔑 Ключи" => {
+                bot.send_message(msg.chat.id, "🔑 Ключи\n\nСоздание, состояние, владельцы, группы, восстановление и массовое управление.")
+                    .reply_markup(menu::admin_keys_hub()).await?;
+                return Ok(());
+            }
+            "👥 Пользователи" => {
+                bot.send_message(
+                    msg.chat.id,
+                    "👥 Пользователи\n\nКарточки клиентов, поиск и роли сотрудников.",
+                )
+                .reply_markup(menu::admin_users_hub())
+                .await?;
+                return Ok(());
+            }
+            "📊 Аналитика" => {
+                match managed_clients(&vpn, &settings).await {
+                    Ok(clients) => {
+                        let now = now_epoch();
+                        let summary = settings.traffic_summary(None, now);
+                        let top = settings.top_clients(7, 5, now);
+                        bot.send_message(
+                            msg.chat.id,
+                            format_stats(settings.lang(uid), &clients, now, &summary, &top),
+                        )
+                        .parse_mode(ParseMode::Html)
+                        .reply_markup(menu::statistics_menu())
+                        .await?;
+                    }
+                    Err(error) => {
+                        bot.send_message(msg.chat.id, i18n::error_text(settings.lang(uid), &error))
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
+            "💬 Связь" => {
+                bot.send_message(
+                    msg.chat.id,
+                    "💬 Связь\n\nТехническая поддержка и рассылки пользователям.",
+                )
+                .reply_markup(menu::admin_communication_hub())
+                .await?;
+                return Ok(());
+            }
+            "🔄 Операции" => {
+                admin_operations_screen(&bot, msg.chat.id, &settings).await?;
+                return Ok(());
+            }
+            "⚙️ Система" => {
+                admin_system_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
             "🚨 События" => {
@@ -5525,34 +5611,7 @@ async fn callback_handler(
             admin_operations_screen(&bot, chat, &settings).await?;
         }
         Action::AdminSystem => {
-            let current = format!("v{}", env!("CARGO_PKG_VERSION"));
-            let release = latest_release_info().await;
-            let update_line = match &release {
-                Some((latest, _, _)) if latest == &current => {
-                    format!("✅ Установлена актуальная версия {current}")
-                }
-                Some((latest, _, _)) => {
-                    format!("⬆️ Доступно обновление: {current} → {latest}")
-                }
-                None => format!("Текущая версия: {current}\nНе удалось проверить GitHub."),
-            };
-            let backup_line = settings
-                .monitor_state("database_backup")
-                .map(|(status, details, checked_at)| {
-                    let icon = if status == "ok" { "✅" } else { "❌" };
-                    format!(
-                        "{icon} Проверка БД: {}\n{}",
-                        crate::vpn::model::format_handshake(Lang::Ru, now_epoch(), checked_at),
-                        details.unwrap_or_else(|| "без подробностей".into())
-                    )
-                })
-                .unwrap_or_else(|| "⚪ Резервная копия БД ещё не проверялась".into());
-            bot.send_message(
-                chat,
-                format!("⚙️ Система\n\n{update_line}\n\n💾 Аварийное восстановление\n{backup_line}\n\nНастройки, VPN-копии, VPN-служба и журнал обновлений."),
-            )
-            .reply_markup(menu::admin_system_hub())
-            .await?;
+            admin_system_screen(&bot, chat, &settings).await?;
         }
         Action::AdminUpdate => {
             let current = format!("v{}", env!("CARGO_PKG_VERSION"));
