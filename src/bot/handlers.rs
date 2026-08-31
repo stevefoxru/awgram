@@ -6196,17 +6196,36 @@ async fn callback_handler(
                 };
                 match result {
                     Ok(clients) => {
+                        let now = now_epoch();
+                        let enabled = clients.iter().filter(|client| client.enabled).count();
+                        let connected = clients
+                            .iter()
+                            .filter(|client| {
+                                client.last_handshake_epoch().is_some_and(|handshake| {
+                                    handshake > 0
+                                        && now.saturating_sub(handshake)
+                                            < crate::vpn::model::ONLINE_THRESHOLD_SECS
+                                })
+                            })
+                            .count();
+                        let unreadable = clients
+                            .iter()
+                            .filter(|client| {
+                                client.latest_handshake_at.is_some()
+                                    && client.last_handshake_epoch().is_none()
+                            })
+                            .count();
                         let synced = settings.sync_panel_clients(
                             id,
                             &clients
                                 .iter()
                                 .map(|client| (client.name.clone(), client.address.clone()))
                                 .collect::<Vec<_>>(),
-                            now_epoch(),
+                            now,
                         );
                         settings.ingest_panel(
                             id,
-                            now_epoch(),
+                            now,
                             &clients
                                 .iter()
                                 .map(|client| crate::store::Sample {
@@ -6228,7 +6247,7 @@ async fn callback_handler(
                                 tracing::warn!(%error, client = %client.name, "не удалось сохранить срок ключа панели");
                             }
                         }
-                        bot.send_message(chat, format!("✅ Синхронизация завершена. В панели: {}; обновлено в боте: {synced}.\n\nНовые импортированные ключи не получают владельца автоматически — назначьте его в карточке ключа.", clients.len()))
+                        bot.send_message(chat, format!("✅ Синхронизация завершена.\n\nВ панели: {}\nВключено: {enabled}\nСейчас подключено: {connected}\nHandshake не распознан: {unreadable}\nОбновлено в боте: {synced}.\n\n«Сейчас подключено» означает handshake за последние 5 минут. Отключённое устройство не означает, что его ключ неисправен. Новые импортированные ключи не получают владельца автоматически — назначьте его в карточке ключа.", clients.len()))
                             .reply_markup(menu::server_card_menu(id))
                             .await?;
                     }

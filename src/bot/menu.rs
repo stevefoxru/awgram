@@ -1450,7 +1450,7 @@ fn filter_label(lang: Lang, f: ClientFilter) -> String {
     let name = match (lang, f) {
         (Lang::Ru, ClientFilter::All) => "Все",
         (Lang::En, ClientFilter::All) => "All",
-        (Lang::Ru, ClientFilter::Online) => "Онлайн",
+        (Lang::Ru, ClientFilter::Online) => "Подключены",
         (Lang::En, ClientFilter::Online) => "Online",
         (Lang::Ru, ClientFilter::Offline) => "Оффлайн",
         (Lang::En, ClientFilter::Offline) => "Offline",

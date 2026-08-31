@@ -102,13 +102,16 @@ impl PanelClient {
             });
         }
         let raw = value.as_str()?;
-        raw.parse::<i64>().ok().map(|epoch| {
-            if epoch > 10_000_000_000 {
+        if let Ok(epoch) = raw.parse::<i64>() {
+            return Some(if epoch > 10_000_000_000 {
                 epoch / 1000
             } else {
                 epoch
-            }
-        })
+            });
+        }
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|value| value.timestamp())
     }
 }
 
@@ -550,6 +553,21 @@ mod tests {
         .unwrap();
         assert_eq!(clients[0].transfer_rx, 0);
         assert_eq!(clients[0].transfer_tx, 420_400_000_000);
+    }
+
+    #[test]
+    fn panel_handshake_accepts_unix_milliseconds_and_iso_8601() {
+        let (clients, _) = decode_client_list(
+            br#"[
+                {"id":1,"name":"unix","latestHandshakeAt":"1788179696000"},
+                {"id":2,"name":"iso","latestHandshakeAt":"2026-08-31T12:34:56.000Z"},
+                {"id":3,"name":"empty","latestHandshakeAt":null}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(clients[0].last_handshake_epoch(), Some(1_788_179_696));
+        assert_eq!(clients[1].last_handshake_epoch(), Some(1_788_179_696));
+        assert_eq!(clients[2].last_handshake_epoch(), None);
     }
 
     #[test]
