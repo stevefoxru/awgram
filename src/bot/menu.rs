@@ -574,18 +574,20 @@ pub fn bulk_confirm_menu() -> InlineKeyboardMarkup {
 
 pub fn statistics_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
+        vec![cb("📊 Общая сводка", "stats")],
         vec![
-            cb("🖥 Серверы AWG", "stats:servers"),
-            cb("🔐 Все ключи", "stats"),
+            cb("📶 Подключения", "stats:traffic"),
+            cb("🖥 Серверы", "stats:servers"),
         ],
-        vec![cb("👤 Пользователи", "stats:users")],
         vec![
+            cb("👤 Пользователи", "stats:users"),
             cb("💳 Подписки", "stats:subscriptions"),
-            cb("📈 Тарифы", "stats:tariffs"),
         ],
-        vec![cb("💳 Финансы", "admin:finance"), cb("🗂 Группы", "groups")],
-        vec![cb("🩺 Сервер", "check"), cb("👥 Список ключей", "list")],
-        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+        vec![
+            cb("📈 Тарифы", "stats:tariffs"),
+            cb("💰 Доходы", "stats:finance"),
+        ],
+        vec![cb("🔑 Открыть ключи", "list"), cb("🗂 Группы", "groups")],
     ])
 }
 

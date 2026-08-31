@@ -10,7 +10,7 @@ use teloxide::types::{
 
 use crate::auth::{resolve_role, Role};
 use crate::bot::menu;
-use crate::bot::render::{self, format_client_card, format_stats};
+use crate::bot::render::{self, format_client_card};
 use crate::bot::State;
 use crate::config::Config;
 use crate::i18n::{self, Lang};
@@ -1595,6 +1595,101 @@ async fn admin_system_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Handl
     Ok(())
 }
 
+async fn analytics_overview_text(vpn: &Vpn, settings: &Store) -> crate::error::Result<String> {
+    let now = now_epoch();
+    let clients = managed_clients(vpn, settings).await?;
+    let connected = clients.iter().filter(|client| client.online(now)).count();
+    let never = clients
+        .iter()
+        .filter(|client| client.last_handshake.unwrap_or(0) <= 0)
+        .count();
+    let disabled = clients
+        .iter()
+        .filter(|client| client.status_code == "key_disabled")
+        .count();
+    let unavailable = clients
+        .iter()
+        .filter(|client| client.status_code == "key_error")
+        .count();
+    let without_owner = clients
+        .iter()
+        .filter(|client| settings.client_owner(&client.name).is_none())
+        .count();
+    let expiring = clients
+        .iter()
+        .filter(|client| {
+            vpn.client_expiry(&client.name)
+                .is_some_and(|expiry| expiry > now && expiry <= now + 7 * 86_400)
+        })
+        .count();
+    let traffic = settings.traffic_summary(None, now);
+    let current_week = traffic.d7.rx.saturating_add(traffic.d7.tx);
+    let previous_week = traffic.prev7.rx.saturating_add(traffic.prev7.tx);
+    let trend = if previous_week == 0 {
+        "нет базы сравнения".into()
+    } else {
+        let delta = (current_week as i128 - previous_week as i128) * 100 / previous_week as i128;
+        format!("{delta:+}% к прошлой неделе")
+    };
+    let servers = settings.vpn_servers();
+    let server_online = servers
+        .iter()
+        .filter(|server| server.status == "online")
+        .count();
+    let capacity: i64 = servers.iter().map(|server| server.capacity).sum();
+    let assigned: i64 = servers
+        .iter()
+        .map(|server| settings.server_client_count(server.id))
+        .sum();
+    let stale_telemetry = servers
+        .iter()
+        .filter(|server| {
+            server.protocol == "amneziawg-panel"
+                && settings
+                    .server_runtime_summary(server.id, now)
+                    .observed_at
+                    .is_none_or(|at| now.saturating_sub(at) > 15 * 60)
+        })
+        .count();
+    let users = settings.admin_user_stats(now);
+    let finance7 = settings.finance_summary(now - 7 * 86_400);
+    let finance30 = settings.finance_summary(now - 30 * 86_400);
+    Ok(format!(
+        "📊 Аналитика ZuevVPN\nОбновлено: сейчас\n\n🔑 Ключи\nВсего в базе: {}\nСейчас подключены: {connected}\nНикогда не подключались: {never}\nОтключены в панели: {disabled}\nСервер недоступен: {unavailable}\nБез владельца: {without_owner}\nИстекают за 7 дней: {expiring}\n\n📶 Трафик\nСегодня: {}\n7 дней: {} · {trend}\n30 дней: {}\n\n🖥 Инфраструктура\nСерверы online: {server_online}/{}\nЗагрузка: {assigned}/{capacity}\nПанели с устаревшей телеметрией: {stale_telemetry}\n\n👥 Пользователи\nВсего: {}\nНовых за 30 дней: {}\nПлатящих: {}\n\n💰 Продажи\n7 дней: {} · {:.2} ₽\n30 дней: {} · {:.2} ₽\nОжидают проверки: {}\n\n⚠️ Работа\nЗамен ожидает: {}\nОткрытых обращений: {}",
+        clients.len(),
+        crate::vpn::model::human_bytes(traffic.today.rx + traffic.today.tx),
+        crate::vpn::model::human_bytes(current_week),
+        crate::vpn::model::human_bytes(traffic.d30.rx + traffic.d30.tx),
+        servers.len(),
+        users.total,
+        users.new_30d,
+        users.paying,
+        finance7.approved_sales,
+        finance7.revenue_kopecks as f64 / 100.0,
+        finance30.approved_sales,
+        finance30.revenue_kopecks as f64 / 100.0,
+        finance30.pending,
+        settings.pending_key_replacements().len(),
+        settings.open_support_count(),
+    ))
+}
+
+async fn analytics_screen(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -> HandlerResult {
+    match analytics_overview_text(vpn, settings).await {
+        Ok(text) => {
+            bot.send_message(chat, text)
+                .reply_markup(menu::statistics_menu())
+                .await?;
+        }
+        Err(error) => {
+            bot.send_message(chat, format!("❌ Аналитика временно недоступна: {error}"))
+                .reply_markup(menu::statistics_menu())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 fn monitor_server_id(component: &str) -> Option<i64> {
     component
         .strip_prefix("vpn-server-")?
@@ -3011,24 +3106,7 @@ async fn message_handler(
                 return Ok(());
             }
             "📊 Аналитика" => {
-                match managed_clients(&vpn, &settings).await {
-                    Ok(clients) => {
-                        let now = now_epoch();
-                        let summary = settings.traffic_summary(None, now);
-                        let top = settings.top_clients(7, 5, now);
-                        bot.send_message(
-                            msg.chat.id,
-                            format_stats(settings.lang(uid), &clients, now, &summary, &top),
-                        )
-                        .parse_mode(ParseMode::Html)
-                        .reply_markup(menu::statistics_menu())
-                        .await?;
-                    }
-                    Err(error) => {
-                        bot.send_message(msg.chat.id, i18n::error_text(settings.lang(uid), &error))
-                            .await?;
-                    }
-                }
+                analytics_screen(&bot, msg.chat.id, &vpn, &settings).await?;
                 return Ok(());
             }
             "💬 Связь" => {
@@ -7151,6 +7229,23 @@ async fn callback_handler(
         Action::StatsSection(section) => {
             let now = now_epoch();
             let text = match section.as_str() {
+                "traffic" => {
+                    let clients = managed_clients(&vpn, &settings).await.unwrap_or_default();
+                    let traffic = settings.traffic_summary(None, now);
+                    let connected = clients.iter().filter(|client| client.online(now)).count();
+                    let never = clients
+                        .iter()
+                        .filter(|client| client.last_handshake.unwrap_or(0) <= 0)
+                        .count();
+                    let top = settings
+                        .top_clients(7, 5, now)
+                        .into_iter()
+                        .map(|(name, bytes)| {
+                            format!("• {name}: {}", crate::vpn::model::human_bytes(bytes))
+                        })
+                        .collect::<Vec<_>>();
+                    format!("📶 Подключения и трафик\n\nСейчас подключены: {connected}/{}\nНикогда не подключались: {never}\n\nСегодня: {}\n7 дней: {}\n30 дней: {}\nВсё время: {}\n\n🏆 Топ за 7 дней\n{}\n\nПодключённым считается устройство с handshake за последние 5 минут.", clients.len(), crate::vpn::model::human_bytes(traffic.today.rx + traffic.today.tx), crate::vpn::model::human_bytes(traffic.d7.rx + traffic.d7.tx), crate::vpn::model::human_bytes(traffic.d30.rx + traffic.d30.tx), crate::vpn::model::human_bytes(traffic.total.rx + traffic.total.tx), if top.is_empty() { "—".into() } else { top.join("\n") })
+                }
                 "servers" => {
                     let mut lines = Vec::new();
                     for server in settings.vpn_servers() {
@@ -7235,11 +7330,12 @@ async fn callback_handler(
                     format!("👤 Пользователи\n\nВсего: {}\nНовых сегодня: {}\nНовых за 30 дней: {}\nПлатящих: {}\nПришли по рефералам: {}\nЗаблокировано: {}",s.total,s.new_today,s.new_30d,s.paying,s.referred,s.blocked)
                 }
                 "subscriptions" => {
-                    let clients = vpn.list().await.unwrap_or_default();
+                    let clients = managed_clients(&vpn, &settings).await.unwrap_or_default();
                     let active = clients
                         .iter()
                         .filter(|c| {
-                            !vpn.client_disabled(&c.name)
+                            c.status_code != "key_disabled"
+                                && c.status_code != "key_error"
                                 && vpn.client_expiry(&c.name).is_none_or(|e| e > now)
                         })
                         .count();
@@ -7250,7 +7346,7 @@ async fn callback_handler(
                                 .is_some_and(|e| e > now && e - now <= 7 * 86_400)
                         })
                         .count();
-                    format!("💳 Подписки\n\nАктивных: {active}\nИстекают за 7 дней: {expiring}\nОтключено: {}\nВсего ключей: {}",clients.iter().filter(|c|vpn.client_disabled(&c.name)).count(),clients.len())
+                    format!("💳 Подписки\n\nРабочих: {active}\nИстекают за 7 дней: {expiring}\nОтключено в панели: {}\nСервер недоступен: {}\nВсего ключей: {}",clients.iter().filter(|c|c.status_code=="key_disabled").count(),clients.iter().filter(|c|c.status_code=="key_error").count(),clients.len())
                 }
                 "tariffs" => {
                     let rows = settings.recent_payments(100_000);
@@ -7261,6 +7357,23 @@ async fn callback_handler(
                         })
                         .collect::<Vec<_>>();
                     format!("📈 Популярность тарифов\n\n1 месяц: {}\n3 месяца: {}\n6 месяцев: {}\n12 месяцев: {}",approved.iter().filter(|p|p.months==1).count(),approved.iter().filter(|p|p.months==3).count(),approved.iter().filter(|p|p.months==6).count(),approved.iter().filter(|p|p.months==12).count())
+                }
+                "finance" => {
+                    let d7 = settings.finance_summary(now - 7 * 86_400);
+                    let d30 = settings.finance_summary(now - 30 * 86_400);
+                    let previous = settings.finance_summary(now - 60 * 86_400);
+                    let previous_30_revenue =
+                        previous.revenue_kopecks.saturating_sub(d30.revenue_kopecks);
+                    let trend = if previous_30_revenue == 0 {
+                        "нет базы сравнения".into()
+                    } else {
+                        format!(
+                            "{:+}%",
+                            ((d30.revenue_kopecks as i128 - previous_30_revenue as i128) * 100
+                                / previous_30_revenue.abs() as i128)
+                        )
+                    };
+                    format!("💰 Доходы\n\n7 дней\nПродаж: {}\nВыручка: {:.2} ₽\n\n30 дней\nПродаж: {}\nВыручка: {:.2} ₽\nИзменение к предыдущим 30 дням: {trend}\n\nОжидают проверки: {}\nПополнения баланса: {:.2} ₽\nВозвраты: {:.2} ₽", d7.approved_sales, d7.revenue_kopecks as f64/100.0, d30.approved_sales, d30.revenue_kopecks as f64/100.0, d30.pending, d30.topups_kopecks as f64/100.0, d30.refunds_kopecks as f64/100.0)
                 }
                 _ => "Раздел статистики не найден.".into(),
             };
@@ -8692,57 +8805,40 @@ async fn callback_handler(
             .await;
         }
         Action::Stats => {
-            let scope = match scope_for(&role, &settings, uid) {
-                Some(s) => s,
-                None => {
-                    if let Role::GroupAdmin(groups) = &role {
-                        show_group_select(&bot, chat, msg_id, lang, &settings, groups).await;
-                    }
-                    return Ok(());
-                }
-            };
-            match managed_clients(&vpn, &settings).await {
-                Ok(mut clients) => {
-                    clients.retain(|c| scope.admits(settings.client_group(&c.name)));
-                    let now = now_epoch();
-                    // Суммарный трафик: All — глобальный одним запросом,
-                    // иначе — сумма пер-клиентских сводок отфильтрованного списка.
-                    let summary = if scope == ListScope::All {
-                        settings.traffic_summary(None, now)
-                    } else {
-                        let mut acc = crate::store::TrafficSummary::default();
-                        for c in &clients {
-                            acc.add(&settings.traffic_summary(Some(&c.name), now));
+            if role.is_owner() {
+                analytics_screen(&bot, chat, &vpn, &settings).await?;
+            } else if let Some(scope) = scope_for(&role, &settings, uid) {
+                match managed_clients(&vpn, &settings).await {
+                    Ok(mut clients) => {
+                        clients.retain(|client| scope.admits(settings.client_group(&client.name)));
+                        let now = now_epoch();
+                        let mut summary = crate::store::TrafficSummary::default();
+                        for client in &clients {
+                            summary.add(&settings.traffic_summary(Some(&client.name), now));
                         }
-                        acc
-                    };
-                    let top = if scope == ListScope::All {
-                        settings.top_clients(7, 5, now)
-                    } else {
-                        let names: std::collections::HashSet<&str> =
-                            clients.iter().map(|c| c.name.as_str()).collect();
-                        settings
+                        let names = clients
+                            .iter()
+                            .map(|client| client.name.as_str())
+                            .collect::<std::collections::HashSet<_>>();
+                        let top = settings
                             .top_clients(7, 10_000, now)
                             .into_iter()
-                            .filter(|(n, _)| names.contains(n.as_str()))
+                            .filter(|(name, _)| names.contains(name.as_str()))
                             .take(5)
-                            .collect()
-                    };
-                    edit_or_send(
-                        &bot,
-                        chat,
-                        msg_id,
-                        format_stats(lang, &clients, now, &summary, &top),
-                        if role.is_owner() {
-                            menu::statistics_menu()
-                        } else {
-                            home_menu(&role, lang)
-                        },
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    bot.send_message(chat, i18n::error_text(lang, &e)).await?;
+                            .collect::<Vec<_>>();
+                        edit_or_send(
+                            &bot,
+                            chat,
+                            msg_id,
+                            render::format_stats(lang, &clients, now, &summary, &top),
+                            home_menu(&role, lang),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
                 }
             }
         }
