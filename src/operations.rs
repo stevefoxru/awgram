@@ -213,20 +213,19 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                             {
                                 notify_admins(bot, cfg, format!("🚨 Массовое падение подключений на «{}»\n{}\n\nПроверьте панель и сервер; автоматическая замена ключей не запускается.", server.name, details)).await;
                             }
-                        } else if !already_degraded || current_runtime.online >= 5 {
-                            if store.update_monitor_state(&health_key, "ok", None, now)
-                                && already_degraded
-                            {
-                                notify_admins(
-                                    bot,
-                                    cfg,
-                                    format!(
-                                        "✅ Подключения на «{}» восстановились: сейчас online {}.",
-                                        server.name, current_runtime.online
-                                    ),
-                                )
-                                .await;
-                            }
+                        } else if (!already_degraded || current_runtime.online >= 5)
+                            && store.update_monitor_state(&health_key, "ok", None, now)
+                            && already_degraded
+                        {
+                            notify_admins(
+                                bot,
+                                cfg,
+                                format!(
+                                    "✅ Подключения на «{}» восстановились: сейчас online {}.",
+                                    server.name, current_runtime.online
+                                ),
+                            )
+                            .await;
                         }
                         if !report.panel_only.is_empty()
                             || !report.database_only.is_empty()
