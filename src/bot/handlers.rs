@@ -5262,8 +5262,31 @@ async fn render_clients_list(
             // по глобальному i, срез по странице дал бы сдвиг меток на страницах > 0.
             let expiries: Vec<Option<i64>> =
                 clients.iter().map(|c| vpn.client_expiry(&c.name)).collect();
-            let title =
-                i18n::clients_title_filtered(lang, filter, clients.len(), all_clients.len());
+            let scope_name = match scope {
+                ListScope::All => match lang {
+                    Lang::Ru => "все группы".into(),
+                    Lang::En => "all groups".into(),
+                },
+                ListScope::NoGroup => i18n::no_group_label(lang),
+                ListScope::Group(id) => settings.group(id).map_or_else(
+                    || format!("группа #{id}"),
+                    |group| format!("🗂 {}", i18n::html_escape(&group.name)),
+                ),
+            };
+            let filter_name = match (lang, filter) {
+                (Lang::Ru, crate::vpn::model::ClientFilter::All) => "все статусы",
+                (Lang::En, crate::vpn::model::ClientFilter::All) => "all statuses",
+                (Lang::Ru, crate::vpn::model::ClientFilter::Online) => "online",
+                (Lang::En, crate::vpn::model::ClientFilter::Online) => "online",
+                (Lang::Ru, crate::vpn::model::ClientFilter::Offline) => "не подключены",
+                (Lang::En, crate::vpn::model::ClientFilter::Offline) => "offline",
+                (Lang::Ru, crate::vpn::model::ClientFilter::Never) => "без подключений",
+                (Lang::En, crate::vpn::model::ClientFilter::Never) => "never connected",
+            };
+            let title = match lang {
+                Lang::Ru => format!("🔑 <b>Ключи</b>\nПоказано: {} из {}\nСтатус: {filter_name} · Охват: {scope_name}\n\nВыберите ключ:", clients.len(), all_clients.len()),
+                Lang::En => format!("🔑 <b>Keys</b>\nShown: {} of {}\nStatus: {filter_name} · Scope: {scope_name}\n\nChoose a key:", clients.len(), all_clients.len()),
+            };
             edit_or_send(
                 bot,
                 chat,
@@ -8536,6 +8559,9 @@ async fn callback_handler(
             // Явная кнопка «Все ключи» всегда открывает полный список. Фильтр
             // сохраняется только при пагинации и обновлении уже открытого списка.
             settings.set_client_filter(uid, crate::vpn::model::ClientFilter::All);
+            if role.is_owner() {
+                settings.set_owner_scope(uid, ListScope::All);
+            }
             let scope = match scope_for(&role, &settings, uid) {
                 Some(s) => s,
                 None => {

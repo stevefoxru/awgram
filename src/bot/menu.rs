@@ -1527,18 +1527,25 @@ pub fn clients_list(
     if page > 0 {
         nav.push(cb("◀️", &format!("page:{}", page - 1)));
     }
-    nav.push(cb(&i18n::btn_refresh(lang), &format!("page:{page}")));
+    nav.push(cb(
+        &format!("🔄 {}/{}", page + 1, total_pages),
+        &format!("page:{page}"),
+    ));
     if page + 1 < total_pages {
         nav.push(cb("▶️", &format!("page:{}", page + 1)));
     }
     rows.push(nav);
-    let mut filter_btns = filter_row(lang, current_filter);
+    let filter_btns = filter_row(lang, current_filter);
     // Кнопка «🗂» — фильтр списка по группе; видна только владельцу
     // (групповому админу скоуп и так задаёт его текущая группа).
-    if is_owner {
-        filter_btns.push(cb(&i18n::btn_scope(lang), "gscope"));
-    }
     rows.push(filter_btns);
+    if is_owner {
+        let scope = match lang {
+            Lang::Ru => "🗂 Фильтр по группе",
+            Lang::En => "🗂 Group filter",
+        };
+        rows.push(vec![cb(scope, "gscope")]);
+    }
     // «Перевыпустить всех» — глобальное действие, групповому админу не
     // показываем (Action::RegenAll всё равно owner-only).
     if is_owner {
@@ -1557,19 +1564,21 @@ pub fn clients_empty_menu(
     current_filter: ClientFilter,
     is_owner: bool,
 ) -> InlineKeyboardMarkup {
-    let mut filter_btns = filter_row(lang, current_filter);
-    if is_owner {
-        filter_btns.push(cb(&i18n::btn_scope(lang), "gscope"));
-    }
+    let filter_btns = filter_row(lang, current_filter);
     let show_all = match lang {
         Lang::Ru => "👥 Показать все ключи",
         Lang::En => "👥 Show all keys",
     };
-    InlineKeyboardMarkup::new(vec![
-        vec![cb(show_all, "listfilter:all")],
-        filter_btns,
-        vec![cb(&i18n::btn_back(lang), "menu")],
-    ])
+    let mut rows = vec![vec![cb(show_all, "listfilter:all")], filter_btns];
+    if is_owner {
+        let scope = match lang {
+            Lang::Ru => "🗂 Фильтр по группе",
+            Lang::En => "🗂 Group filter",
+        };
+        rows.push(vec![cb(scope, "gscope")]);
+    }
+    rows.push(vec![cb(&i18n::btn_back(lang), "menu")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn client_card(lang: Lang, name: &str, is_owner: bool) -> InlineKeyboardMarkup {
