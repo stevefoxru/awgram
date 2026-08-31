@@ -45,6 +45,9 @@ pub const ONLINE_THRESHOLD_SECS: i64 = 300;
 ///   🔴 хэндшейк был, но давно; либо key_error
 ///   🟡 ещё ни разу не подключался / нет данных
 pub fn status_mark_at(status_code: &str, last_handshake: Option<i64>, now: i64) -> &'static str {
+    if matches!(status_code, "key_error" | "key_disabled") {
+        return "🔴";
+    }
     match last_handshake {
         Some(hs) if hs > 0 && now - hs < ONLINE_THRESHOLD_SECS => "🟢",
         Some(hs) if hs > 0 => "🔴",
@@ -55,6 +58,21 @@ pub fn status_mark_at(status_code: &str, last_handshake: Option<i64>, now: i64) 
                 "🟡"
             }
         }
+    }
+}
+
+pub fn status_label(lang: Lang, client: &Client, now: i64) -> &'static str {
+    match (lang, client.status_code.as_str(), client.mark(now)) {
+        (Lang::Ru, "key_error", _) => "сервер недоступен",
+        (Lang::En, "key_error", _) => "server unavailable",
+        (Lang::Ru, "key_disabled", _) => "отключён",
+        (Lang::En, "key_disabled", _) => "disabled",
+        (Lang::Ru, _, "🟢") => "online",
+        (Lang::En, _, "🟢") => "online",
+        (Lang::Ru, _, "🔴") => "не подключён",
+        (Lang::En, _, "🔴") => "offline",
+        (Lang::Ru, _, _) => "никогда не подключался",
+        (Lang::En, _, _) => "never connected",
     }
 }
 
@@ -659,6 +677,35 @@ mod tests {
     #[test]
     fn mark_red_for_key_error_even_without_handshake() {
         assert_eq!(status_mark_at("key_error", None, 1_700_000_000), "🔴");
+        assert_eq!(
+            status_mark_at("key_error", Some(1_699_999_990), 1_700_000_000),
+            "🔴"
+        );
+        assert_eq!(
+            status_mark_at("key_disabled", Some(1_699_999_990), 1_700_000_000),
+            "🔴"
+        );
+    }
+
+    #[test]
+    fn labels_explain_key_state_in_words() {
+        let now = 1_700_000_000;
+        assert_eq!(
+            status_label(Lang::Ru, &client("active", Some(now - 10)), now),
+            "online"
+        );
+        assert_eq!(
+            status_label(Lang::Ru, &client("recent", Some(now - 600)), now),
+            "не подключён"
+        );
+        assert_eq!(
+            status_label(Lang::Ru, &client("no_data", None), now),
+            "никогда не подключался"
+        );
+        assert_eq!(
+            status_label(Lang::Ru, &client("key_disabled", None), now),
+            "отключён"
+        );
     }
 
     #[test]

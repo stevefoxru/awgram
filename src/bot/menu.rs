@@ -1503,13 +1503,14 @@ pub fn clients_list(
         .take(per_page)
         .map(|(i, c)| {
             let mark = c.mark(now);
+            let state = crate::vpn::model::status_label(lang, c, now);
             // Компактный handshake («2 мин», «никогда») — требуется stats()
             // (last_handshake есть только в stats --json, не в list --json).
             let hs = format_handshake_compact(lang, now, c.last_handshake.unwrap_or(0));
             let exp = expiries.get(i).copied().flatten();
             let label = match crate::vpn::model::format_expiry_badge(lang, now, exp) {
-                Some(badge) => format!("{mark} {} · {hs} {badge}", c.name),
-                None => format!("{mark} {} · {hs}", c.name),
+                Some(badge) => format!("{mark} {} · {state} · {hs} {badge}", c.name),
+                None => format!("{mark} {} · {state} · {hs}", c.name),
             };
             vec![cb(&label, &format!("client:{}", c.name))]
         })

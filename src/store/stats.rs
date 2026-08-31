@@ -87,7 +87,8 @@ impl Store {
                 "SELECT c.name,c.ip,COALESCE(s.status,'unknown'),
                     COALESCE((SELECT t.rx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY t.ts DESC LIMIT 1),0),
                     COALESCE((SELECT t.tx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY t.ts DESC LIMIT 1),0),
-                    (SELECT t.ts FROM traffic_samples t WHERE t.client_id=c.id AND t.online=1 ORDER BY t.ts DESC LIMIT 1)
+                    (SELECT t.ts FROM traffic_samples t WHERE t.client_id=c.id AND t.online=1 ORDER BY t.ts DESC LIMIT 1),
+                    (SELECT k.enabled FROM key_inventory k WHERE k.server_id=c.server_id AND k.name=c.name AND k.missing_since IS NULL)
                  FROM clients c LEFT JOIN vpn_servers s ON s.id=c.server_id
                  WHERE c.removed_at IS NULL ORDER BY c.name",
             )?;
@@ -98,7 +99,9 @@ impl Store {
                     ip: row.get(1)?,
                     client_ipv6: String::new(),
                     status: server_status.clone(),
-                    status_code: if server_status == "offline" {
+                    status_code: if row.get::<_, Option<i64>>(6)? == Some(0) {
+                        "key_disabled".into()
+                    } else if server_status == "offline" {
                         "key_error".into()
                     } else {
                         "no_data".into()
