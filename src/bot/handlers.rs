@@ -23,6 +23,7 @@ pub enum Action {
     AdminVpn,
     AdminServers,
     AdminKeys,
+    AdminKeyHealth,
     AdminUsersHub,
     AdminCommunication,
     AdminOperations,
@@ -237,6 +238,7 @@ fn parse_callback(data: &str) -> Action {
         "migration:status" => Action::LocalMigrationStatus,
         "migration:rollback" => Action::LocalMigrationRollback,
         "admin:keys" => Action::AdminKeys,
+        "admin:keys:health" => Action::AdminKeyHealth,
         "admin:users" => Action::AdminUsersHub,
         "admin:communication" => Action::AdminCommunication,
         "admin:operations" => Action::AdminOperations,
@@ -2224,6 +2226,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminVpn
         | AdminServers
         | AdminKeys
+        | AdminKeyHealth
         | AdminUsersHub
         | AdminCommunication
         | AdminOperations
@@ -5401,6 +5404,69 @@ async fn callback_handler(
             .reply_markup(menu::admin_keys_hub())
             .await?;
         }
+        Action::AdminKeyHealth => match managed_clients(&vpn, &settings).await {
+            Ok(clients) => {
+                let now = now_epoch();
+                let online = clients.iter().filter(|client| client.online(now)).count();
+                let never = clients
+                    .iter()
+                    .filter(|client| client.last_handshake.unwrap_or(0) <= 0)
+                    .count();
+                let stale = clients.len().saturating_sub(online + never);
+                let traffic = settings.traffic_summary(None, now);
+                let bytes = |value| crate::vpn::model::human_bytes(value);
+                let mut old = clients
+                    .iter()
+                    .filter(|client| client.last_handshake.unwrap_or(0) > 0 && !client.online(now))
+                    .collect::<Vec<_>>();
+                old.sort_by_key(|client| client.last_handshake.unwrap_or(0));
+                let attention = if old.is_empty() {
+                    "—".into()
+                } else {
+                    old.iter()
+                        .take(10)
+                        .map(|client| {
+                            format!(
+                                "• {} · {}",
+                                client.name,
+                                crate::vpn::model::format_handshake(
+                                    Lang::Ru,
+                                    now,
+                                    client.last_handshake.unwrap_or(0)
+                                )
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                let servers = settings
+                    .vpn_servers()
+                    .into_iter()
+                    .filter(|server| server.protocol == "amneziawg-panel")
+                    .map(|server| {
+                        let runtime = settings.server_runtime_summary(server.id, now);
+                        let freshness = runtime.observed_at.map_or_else(
+                            || "нет данных".into(),
+                            |at| crate::vpn::model::format_handshake(Lang::Ru, now, at),
+                        );
+                        format!(
+                            "• {}: {}/{} online · телеметрия {}",
+                            server.name, runtime.online, runtime.enabled, freshness
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                bot.send_message(chat, format!("🩺 Здоровье ключей\n\nВсего: {}\n🟢 Сейчас online: {online}\n🔴 Подключались, но давно: {stale}\n🟡 Никогда не подключались: {never}\n\n📊 Трафик\nСегодня: {}\n7 дней: {}\n30 дней: {}\n\n🖥 Панели\n{}\n\n⚠️ Дольше всего без подключения\n{attention}", clients.len(), bytes(traffic.today.rx + traffic.today.tx), bytes(traffic.d7.rx + traffic.d7.tx), bytes(traffic.d30.rx + traffic.d30.tx), if servers.is_empty() { "—".into() } else { servers.join("\n") }))
+                        .reply_markup(menu::admin_key_health_menu()).await?;
+            }
+            Err(error) => {
+                bot.send_message(
+                    chat,
+                    format!("❌ Не удалось получить здоровье ключей: {error}"),
+                )
+                .reply_markup(menu::admin_keys_hub())
+                .await?;
+            }
+        },
         Action::AdminUsersHub => {
             bot.send_message(
                 chat,
@@ -10415,6 +10481,7 @@ mod tests {
             AdminVpn,
             AdminServers,
             AdminKeys,
+            AdminKeyHealth,
             AdminUsersHub,
             AdminCommunication,
             AdminOperations,
@@ -10623,6 +10690,7 @@ mod tests {
                 AdminVpn => {}
                 AdminServers => {}
                 AdminKeys => {}
+                AdminKeyHealth => {}
                 AdminUsersHub => {}
                 AdminCommunication => {}
                 AdminOperations => {}
@@ -10992,6 +11060,7 @@ mod tests {
             (Action::AdminVpn, true, false),
             (Action::AdminServers, true, false),
             (Action::AdminKeys, true, false),
+            (Action::AdminKeyHealth, true, false),
             (Action::AdminUsersHub, true, false),
             (Action::AdminCommunication, true, false),
             (Action::AdminOperations, true, false),

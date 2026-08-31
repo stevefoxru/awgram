@@ -161,6 +161,7 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
             match store.panel_password(server.id) {
                 Some(secret) => match vpn.panel_clients(&server, &secret).await {
                     Ok(clients) => {
+                        let previous_runtime = store.server_runtime_summary(server.id, now);
                         store.update_monitor_state(
                             &format!("vpn-server-{}-panel-format", server.id),
                             "ok",
@@ -190,6 +191,43 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
                             })
                             .collect::<Vec<_>>();
                         let report = store.reconcile_inventory(server.id, now, &inventory);
+                        let current_runtime = store.server_runtime_summary(server.id, now);
+                        let health_key = format!("vpn-server-{}-key-health", server.id);
+                        let already_degraded = store
+                            .monitor_state(&health_key)
+                            .is_some_and(|(status, _, _)| status == "error");
+                        let sudden_drop = previous_runtime.online >= 5
+                            && previous_runtime
+                                .online
+                                .saturating_sub(current_runtime.online)
+                                >= 5
+                            && current_runtime.online.saturating_mul(3) <= previous_runtime.online;
+                        if sudden_drop || (already_degraded && current_runtime.online < 5) {
+                            let details = format!(
+                                "online снизился с {} до {}; включено {}",
+                                previous_runtime.online,
+                                current_runtime.online,
+                                current_runtime.enabled
+                            );
+                            if store.update_monitor_state(&health_key, "error", Some(&details), now)
+                            {
+                                notify_admins(bot, cfg, format!("🚨 Массовое падение подключений на «{}»\n{}\n\nПроверьте панель и сервер; автоматическая замена ключей не запускается.", server.name, details)).await;
+                            }
+                        } else if !already_degraded || current_runtime.online >= 5 {
+                            if store.update_monitor_state(&health_key, "ok", None, now)
+                                && already_degraded
+                            {
+                                notify_admins(
+                                    bot,
+                                    cfg,
+                                    format!(
+                                        "✅ Подключения на «{}» восстановились: сейчас online {}.",
+                                        server.name, current_runtime.online
+                                    ),
+                                )
+                                .await;
+                            }
+                        }
                         if !report.panel_only.is_empty()
                             || !report.database_only.is_empty()
                             || !report.wrong_server.is_empty()

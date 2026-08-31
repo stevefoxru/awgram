@@ -163,8 +163,21 @@ pub fn admin_keys_hub() -> InlineKeyboardMarkup {
         ],
         vec![cb("🗂 Группы", "groups"), cb("🔗 Владельцы", "admin:owners")],
         vec![cb("🧰 Массовые операции", "admin:bulk:menu")],
+        vec![cb("🩺 Здоровье ключей", "admin:keys:health")],
         vec![cb("♻️ Восстановление старых", "admin:legacy")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn admin_key_health_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🔄 Обновить", "admin:keys:health")],
+        vec![
+            cb("🔴 Неактивные", "listfilter:offline"),
+            cb("🟡 Не подключались", "listfilter:never"),
+        ],
+        vec![cb("📋 Все ключи", "list")],
+        vec![cb("⬅️ К ключам", "admin:keys")],
     ])
 }
 
