@@ -2289,7 +2289,7 @@ mod tests {
         assert!(
             texts_online
                 .iter()
-                .any(|t| t.contains("✅") && t.contains("Онлайн")),
+                .any(|t| t.contains("✅") && t.contains("Подключены")),
             "активный фильтр Online должен иметь ✅: {texts_online:?}"
         );
         // Все остальные фильтры — без ✅
