@@ -8533,8 +8533,9 @@ async fn callback_handler(
             }
         }
         Action::List => {
-            // Экран списка: stats → filter+sort (фильтр из настроек) → скоуп роли → рендер.
-            // Фильтр/сортировку/скоуп см. render_clients_list/scope_for.
+            // Явная кнопка «Все ключи» всегда открывает полный список. Фильтр
+            // сохраняется только при пагинации и обновлении уже открытого списка.
+            settings.set_client_filter(uid, crate::vpn::model::ClientFilter::All);
             let scope = match scope_for(&role, &settings, uid) {
                 Some(s) => s,
                 None => {

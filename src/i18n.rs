@@ -513,8 +513,8 @@ pub fn clients_empty(lang: Lang) -> String {
 /// «клиентов нет» при непустом сервере (#20).
 pub fn clients_empty_filtered(lang: Lang) -> String {
     match lang {
-        Lang::Ru => "Под текущий фильтр не попал ни один клиент.",
-        Lang::En => "No clients match the current filter.",
+        Lang::Ru => "Ключи есть, но выбранный фильтр ничего не нашёл. Нажмите «Показать все ключи» или выберите другой статус ниже.",
+        Lang::En => "Keys exist, but the selected filter found nothing. Choose “Show all keys” or another status below.",
     }
     .to_string()
 }

@@ -1561,7 +1561,15 @@ pub fn clients_empty_menu(
     if is_owner {
         filter_btns.push(cb(&i18n::btn_scope(lang), "gscope"));
     }
-    InlineKeyboardMarkup::new(vec![filter_btns, vec![cb(&i18n::btn_back(lang), "menu")]])
+    let show_all = match lang {
+        Lang::Ru => "👥 Показать все ключи",
+        Lang::En => "👥 Show all keys",
+    };
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(show_all, "listfilter:all")],
+        filter_btns,
+        vec![cb(&i18n::btn_back(lang), "menu")],
+    ])
 }
 
 pub fn client_card(lang: Lang, name: &str, is_owner: bool) -> InlineKeyboardMarkup {
