@@ -925,8 +925,45 @@ impl Store {
         self.with_conn(|c| { let mut s=c.prepare("SELECT id,user_id,status,subject,assigned_to,created_at,updated_at,category,priority FROM support_tickets WHERE status=?1 ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,updated_at DESC LIMIT ?2")?; let rows=s.query_map(rusqlite::params![status,limit as i64], ticket_from_row)?; rows.collect() }).unwrap_or_default()
     }
 
+    pub fn user_support_tickets(&self, user_id: i64, limit: usize) -> Vec<SupportTicket> {
+        self.with_conn(|c| {
+            let mut statement = c.prepare(
+                "SELECT id,user_id,status,subject,assigned_to,created_at,updated_at,category,priority
+                 FROM support_tickets WHERE user_id=?1
+                 ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
+                          updated_at DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(
+                rusqlite::params![user_id, limit as i64],
+                ticket_from_row,
+            )?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
     pub fn support_ticket(&self, id: i64) -> Option<SupportTicket> {
         self.with_conn(|c| c.query_row("SELECT id,user_id,status,subject,assigned_to,created_at,updated_at,category,priority FROM support_tickets WHERE id=?1",[id],ticket_from_row).optional()).ok().flatten()
+    }
+
+    pub fn active_support_ticket_for_user_category(
+        &self,
+        user_id: i64,
+        category: &str,
+    ) -> Option<SupportTicket> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT id,user_id,status,subject,assigned_to,created_at,updated_at,category,priority
+                 FROM support_tickets
+                 WHERE user_id=?1 AND category=?2 AND status IN ('open','in_progress')
+                 ORDER BY updated_at DESC LIMIT 1",
+                rusqlite::params![user_id, category],
+                ticket_from_row,
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
     }
 
     pub fn assign_support_ticket(&self, id: i64, admin_id: i64, now: i64) -> bool {
@@ -1663,6 +1700,16 @@ mod tests {
         let ticket = s.support_ticket(id).unwrap();
         assert_eq!(ticket.category, "payment");
         assert_eq!(ticket.priority, "normal");
+        assert_eq!(
+            s.active_support_ticket_for_user_category(7, "payment")
+                .map(|ticket| ticket.id),
+            Some(id)
+        );
+        assert_eq!(s.user_support_tickets(7, 5).len(), 1);
+        assert!(s.close_support_ticket(id, 1, 31));
+        assert!(s
+            .active_support_ticket_for_user_category(7, "payment")
+            .is_none());
     }
 
     #[test]

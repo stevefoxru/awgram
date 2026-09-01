@@ -93,6 +93,7 @@ pub enum State {
     AwaitingReferralPercent,
     AwaitingSupportMessage {
         category: String,
+        ticket_id: Option<i64>,
     },
     AwaitingSupportReply {
         ticket_id: i64,

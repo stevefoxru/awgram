@@ -1326,6 +1326,45 @@ async fn customer_dashboard(
     Ok(())
 }
 
+async fn customer_support_screen(
+    bot: &Bot,
+    chat: ChatId,
+    uid: i64,
+    settings: &Store,
+) -> HandlerResult {
+    let tickets = settings.user_support_tickets(uid, 5);
+    let ticket_text = if tickets.is_empty() {
+        "Активных и прошлых обращений пока нет.".to_string()
+    } else {
+        tickets
+            .iter()
+            .map(|ticket| {
+                let status = match ticket.status.as_str() {
+                    "open" => "🆕 ожидает ответа",
+                    "in_progress" => "🛠 в работе",
+                    "closed" => "✅ закрыто",
+                    _ => "статус обновляется",
+                };
+                let category = match ticket.category.as_str() {
+                    "connection" => "подключение",
+                    "payment" => "оплата",
+                    "bug" => "ошибка бота",
+                    _ => "другой вопрос",
+                };
+                format!("#{} · {category} · {status}", ticket.id)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    bot.send_message(
+        chat,
+        format!("🆘 Центр помощи\n\nВаши последние обращения:\n{ticket_text}\n\nВыберите тему. Если по ней уже есть открытая заявка, следующее сообщение дополнит её вместо создания дубля."),
+    )
+    .reply_markup(menu::support_category_menu())
+    .await?;
+    Ok(())
+}
+
 struct CustomerKeyView {
     text: String,
     title: String,
@@ -2873,11 +2912,26 @@ async fn message_handler(
             }
         }
     }
-    if let State::AwaitingSupportMessage { category } = state.clone() {
+    if let State::AwaitingSupportMessage {
+        category,
+        ticket_id,
+    } = state.clone()
+    {
         let subject = msg.text().unwrap_or("Вложение");
-        let ticket = settings
-            .open_support_ticket_in_category(uid, &category, subject, now_epoch())
-            .unwrap_or(0);
+        let ticket = ticket_id.unwrap_or_else(|| {
+            settings
+                .open_support_ticket_in_category(uid, &category, subject, now_epoch())
+                .unwrap_or(0)
+        });
+        if ticket == 0 {
+            bot.send_message(
+                msg.chat.id,
+                "Не удалось создать обращение. Повторите позже.",
+            )
+            .await?;
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
         settings.add_support_message(
             ticket,
             uid,
@@ -2887,14 +2941,33 @@ async fn message_handler(
             now_epoch(),
         );
         for owner in &cfg.admin_ids {
-            let _ = bot.send_message(ChatId(*owner), format!("🆘 Обращение #{ticket} от пользователя {uid}\nОтветьте на пересланное сообщение командой /reply_{uid} и затем отправьте ответ.")).await;
+            let _ = bot
+                .send_message(
+                    ChatId(*owner),
+                    format!(
+                        "🆘 {} #{ticket} от пользователя {uid}\nОтветьте из карточки обращения.",
+                        if ticket_id.is_some() {
+                            "Дополнение обращения"
+                        } else {
+                            "Новое обращение"
+                        }
+                    ),
+                )
+                .await;
             let _ = bot
                 .forward_message(ChatId(*owner), msg.chat.id, msg.id)
                 .await;
         }
         bot.send_message(
             msg.chat.id,
-            format!("✅ Обращение #{ticket} передано. Администратор ответит в этом чате."),
+            format!(
+                "✅ {} #{ticket} передано. Администратор ответит в этом чате.",
+                if ticket_id.is_some() {
+                    "Дополнение обращения"
+                } else {
+                    "Новое обращение"
+                }
+            ),
         )
         .reply_markup(menu::customer_keyboard())
         .await?;
@@ -4452,9 +4525,7 @@ async fn message_handler(
     }
     if role == Role::Denied && settings.user_blocked(uid) {
         if msg.text() == Some("🆘 Поддержка") {
-            bot.send_message(msg.chat.id, "Выберите тему обращения:")
-                .reply_markup(menu::support_category_menu())
-                .await?;
+            customer_support_screen(&bot, msg.chat.id, uid, &settings).await?;
         } else {
             bot.send_message(msg.chat.id,"⛔ Доступ к боту приостановлен. Обратитесь в поддержку, если считаете это ошибкой.").reply_markup(menu::customer_keyboard()).await?;
         }
@@ -4508,9 +4579,7 @@ async fn message_handler(
                 bot.send_message(msg.chat.id, "📖 Инструкции по подключению\n\nВыберите приложение или откройте диагностику, если VPN уже настроен, но не подключается.").reply_markup(menu::instructions_menu()).await?;
             }
             "🆘 Поддержка" => {
-                bot.send_message(msg.chat.id, "Выберите тему обращения:")
-                    .reply_markup(menu::support_category_menu())
-                    .await?;
+                customer_support_screen(&bot, msg.chat.id, uid, &settings).await?;
             }
             "🎟 Промокод" => {
                 bot.send_message(msg.chat.id, "Введите промокод:").await?;
@@ -6792,6 +6861,11 @@ async fn callback_handler(
                     "🔴 Срок действия закончился. Сначала продлите подключение."
                 } else if runtime
                     .as_ref()
+                    .is_some_and(|value| value.observed_at < now.saturating_sub(15 * 60))
+                {
+                    "🟠 Данные панели устарели, поэтому бот не будет ошибочно объявлять ключ нерабочим. Отправьте диагностику — администратор обновит сведения сервера."
+                } else if runtime
+                    .as_ref()
                     .is_some_and(|value| value.enabled == Some(false))
                 {
                     "🔴 Ключ отключён на сервере. Отправьте диагностику администратору."
@@ -8264,13 +8338,17 @@ async fn callback_handler(
                 category.as_str(),
                 "connection" | "payment" | "bug" | "general"
             ) {
-                bot.send_message(
-                    chat,
-                    "Опишите проблему одним сообщением. Можно приложить скриншот или документ.",
-                )
-                .await?;
+                let existing = settings.active_support_ticket_for_user_category(uid, &category);
+                let prompt = existing.as_ref().map_or_else(
+                    || "Опишите проблему одним сообщением. Можно приложить скриншот или документ.".to_string(),
+                    |ticket| format!("У вас уже есть активное обращение #{} по этой теме (статус: {}). Следующее сообщение будет добавлено в него — новая заявка не создастся.", ticket.id, if ticket.status == "in_progress" { "в работе" } else { "ожидает ответа" }),
+                );
+                bot.send_message(chat, prompt).await?;
                 dialogue
-                    .update(State::AwaitingSupportMessage { category })
+                    .update(State::AwaitingSupportMessage {
+                        category,
+                        ticket_id: existing.map(|ticket| ticket.id),
+                    })
                     .await?;
             }
         }
@@ -8321,25 +8399,39 @@ async fn callback_handler(
                     .unwrap_or_else(|| "бессрочно".into()),
                 vpn.client_disabled(&name)
             );
-            let Some(ticket) =
-                settings.open_support_ticket_in_category(uid, "connection", &subject, now)
-            else {
-                bot.send_message(chat, "Не удалось создать обращение. Повторите позже.")
-                    .await?;
-                return Ok(());
+            let existing = settings.active_support_ticket_for_user_category(uid, "connection");
+            let ticket = if let Some(ticket) = existing.as_ref() {
+                settings.add_support_message(
+                    ticket.id,
+                    uid,
+                    false,
+                    (chat.0, msg_id.0),
+                    Some(&subject),
+                    now,
+                );
+                ticket.id
+            } else {
+                let Some(ticket) =
+                    settings.open_support_ticket_in_category(uid, "connection", &subject, now)
+                else {
+                    bot.send_message(chat, "Не удалось создать обращение. Повторите позже.")
+                        .await?;
+                    return Ok(());
+                };
+                ticket
             };
             for owner in &cfg.admin_ids {
                 let _ = bot
                     .send_message(
                         ChatId(*owner),
-                        format!("🩺 Автодиагностика · обращение #{ticket}\nПользователь: {uid}\n\n{subject}"),
+                        format!("🩺 Автодиагностика · {} обращения #{ticket}\nПользователь: {uid}\n\n{subject}", if existing.is_some() { "дополнение" } else { "новое" }),
                     )
                     .reply_markup(menu::support_ticket_menu(ticket))
                     .await;
             }
             bot.send_message(
                 chat,
-                format!("✅ Безопасная диагностика отправлена в обращение #{ticket}. Приватный ключ и файл конфигурации не передавались."),
+                format!("✅ Безопасная диагностика {} в обращение #{ticket}. Новая дублирующая заявка не создавалась. Приватный ключ и файл конфигурации не передавались.", if existing.is_some() { "добавлена" } else { "отправлена" }),
             )
             .reply_markup(menu::customer_key_menu(&name))
             .await?;
