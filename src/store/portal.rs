@@ -14,6 +14,8 @@ pub struct PortalKey {
     pub rx: u64,
     pub tx: u64,
     pub last_handshake: Option<i64>,
+    pub enabled: Option<bool>,
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -24,6 +26,28 @@ pub struct PortalOverview {
     pub balance_kopecks: i64,
     pub keys: Vec<PortalKey>,
     pub payments: Vec<PortalPayment>,
+    pub balance_history: Vec<PortalBalanceEntry>,
+    pub tickets: Vec<PortalTicket>,
+    pub expiry_notifications: bool,
+    pub maintenance_notifications: bool,
+    pub discount_percent: i64,
+    pub referral_count: i64,
+    pub referral_percent: u8,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortalBalanceEntry {
+    pub amount_kopecks: i64,
+    pub kind: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortalTicket {
+    pub id: i64,
+    pub category: String,
+    pub status: String,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -142,9 +166,9 @@ impl Store {
         .unwrap_or(false)
     }
 
-    pub fn portal_overview(&self, user_id: i64) -> Option<PortalOverview> {
+    pub fn portal_overview(&self, user_id: i64, now: i64) -> Option<PortalOverview> {
         let user = self.user(user_id)?;
-        let keys = self.with_conn(|connection| {
+        let mut keys = self.with_conn(|connection| {
             let mut statement = connection.prepare(
                 "SELECT c.name,COALESCE(c.device_label,'Не указано'),
                         COALESCE(s.location,'Не определён'),c.protocol,
@@ -161,9 +185,19 @@ impl Store {
                 rx: row.get::<_, i64>(5)?.max(0) as u64,
                 tx: row.get::<_, i64>(6)?.max(0) as u64,
                 last_handshake: row.get(7)?,
+                enabled: None,
+                expires_at: None,
             }))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         }).unwrap_or_default();
+        for key in &mut keys {
+            if let Some(runtime) = self.client_runtime_stats(&key.name) {
+                key.rx = runtime.rx;
+                key.tx = runtime.tx;
+                key.last_handshake = runtime.last_handshake;
+                key.enabled = runtime.enabled;
+            }
+        }
         let payments = self
             .with_conn(|connection| {
                 let mut statement = connection.prepare(
@@ -182,6 +216,27 @@ impl Store {
                 rows.collect::<rusqlite::Result<Vec<_>>>()
             })
             .unwrap_or_default();
+        let balance_history = self
+            .balance_history(user_id, 10)
+            .into_iter()
+            .map(|entry| PortalBalanceEntry {
+                amount_kopecks: entry.amount_kopecks,
+                kind: entry.kind,
+                created_at: entry.created_at,
+            })
+            .collect();
+        let tickets = self
+            .user_support_tickets(user_id, 10)
+            .into_iter()
+            .map(|ticket| PortalTicket {
+                id: ticket.id,
+                category: ticket.category,
+                status: ticket.status,
+                updated_at: ticket.updated_at,
+            })
+            .collect();
+        let (expiry_notifications, maintenance_notifications) =
+            self.notification_preferences(user_id);
         Some(PortalOverview {
             user_id,
             display_name: user.display_name,
@@ -189,6 +244,13 @@ impl Store {
             balance_kopecks: self.balance_kopecks(user_id),
             keys,
             payments,
+            balance_history,
+            tickets,
+            expiry_notifications,
+            maintenance_notifications,
+            discount_percent: self.peek_purchase_discount(user_id, now),
+            referral_count: self.referral_count(user_id),
+            referral_percent: self.referral_percent(),
         })
     }
 }
@@ -207,5 +269,10 @@ mod tests {
         assert_eq!(store.portal_user_id(&session, 104), Some(7));
         assert!(store.portal_logout(&session, 105));
         assert_eq!(store.portal_user_id(&session, 106), None);
+        let overview = store.portal_overview(7, 106).unwrap();
+        assert_eq!(overview.balance_kopecks, 0);
+        assert!(overview.expiry_notifications);
+        assert!(overview.maintenance_notifications);
+        assert_eq!(overview.discount_percent, 0);
     }
 }
