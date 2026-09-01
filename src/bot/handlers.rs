@@ -30,6 +30,8 @@ pub enum Action {
     AdminOperationsRefresh,
     AdminOperationsAck,
     AdminSystem,
+    DatabaseBackupNow,
+    DatabaseBackupAudit,
     AdminUpdate,
     AdminUpdateRun,
     AdminUpdateStatus,
@@ -245,6 +247,8 @@ fn parse_callback(data: &str) -> Action {
         "admin:operations:refresh" => Action::AdminOperationsRefresh,
         "admin:operations:ack" => Action::AdminOperationsAck,
         "admin:system" => Action::AdminSystem,
+        "admin:db-backup" => Action::DatabaseBackupNow,
+        "admin:db-backup-audit" => Action::DatabaseBackupAudit,
         "admin:update" => Action::AdminUpdate,
         "admin:update:run" => Action::AdminUpdateRun,
         "admin:update:status" => Action::AdminUpdateStatus,
@@ -2434,6 +2438,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminOperationsRefresh
         | AdminOperationsAck
         | AdminSystem
+        | DatabaseBackupNow
+        | DatabaseBackupAudit
         | AdminUpdate
         | AdminUpdateRun
         | AdminUpdateStatus
@@ -5796,6 +5802,44 @@ async fn callback_handler(
         }
         Action::AdminSystem => {
             admin_system_screen(&bot, chat, &settings).await?;
+        }
+        Action::DatabaseBackupNow => {
+            bot.send_message(chat, "⏳ Создаю независимую копию SQLite и проверяю её…")
+                .await?;
+            let text =
+                match crate::operations::create_database_backup(&cfg, &settings, now_epoch(), true)
+                {
+                    Ok(details) => {
+                        settings.update_monitor_state(
+                            "database_backup",
+                            "ok",
+                            Some(&details),
+                            now_epoch(),
+                        );
+                        format!("✅ Резервная копия создана и проверена\n\n{details}")
+                    }
+                    Err(error) => {
+                        settings.update_monitor_state(
+                            "database_backup",
+                            "error",
+                            Some(&error),
+                            now_epoch(),
+                        );
+                        format!("❌ Резервная копия не создана: {error}")
+                    }
+                };
+            bot.send_message(chat, text)
+                .reply_markup(menu::admin_system_hub())
+                .await?;
+        }
+        Action::DatabaseBackupAudit => {
+            let text = match crate::operations::audit_database_backups(&cfg) {
+                Ok(details) => format!("✅ Архив резервных копий исправен\n\n{details}\n\nSQLite-копии проверяются отдельно; рабочая база и VPN не изменяются."),
+                Err(error) => format!("❌ Аудит резервных копий не пройден: {error}"),
+            };
+            bot.send_message(chat, text)
+                .reply_markup(menu::admin_system_hub())
+                .await?;
         }
         Action::AdminUpdate => {
             let current = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -10927,6 +10971,8 @@ mod tests {
             AdminOperationsRefresh,
             AdminOperationsAck,
             AdminSystem,
+            DatabaseBackupNow,
+            DatabaseBackupAudit,
             AdminUpdate,
             AdminUpdateRun,
             AdminUpdateStatus,
@@ -11136,6 +11182,8 @@ mod tests {
                 AdminOperationsRefresh => {}
                 AdminOperationsAck => {}
                 AdminSystem => {}
+                DatabaseBackupNow => {}
+                DatabaseBackupAudit => {}
                 AdminUpdate => {}
                 AdminUpdateRun => {}
                 AdminUpdateStatus => {}
@@ -11506,6 +11554,8 @@ mod tests {
             (Action::AdminOperationsRefresh, true, false),
             (Action::AdminOperationsAck, true, false),
             (Action::AdminSystem, true, false),
+            (Action::DatabaseBackupNow, true, false),
+            (Action::DatabaseBackupAudit, true, false),
             (Action::AdminUpdate, true, false),
             (Action::AdminUpdateRun, true, false),
             (Action::AdminUpdateStatus, true, false),

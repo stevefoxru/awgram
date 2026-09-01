@@ -1,17 +1,119 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
 use teloxide::prelude::*;
 
 use crate::{config::Config, store::Store, vpn::Vpn};
 
 static MONITOR_RUN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const DATABASE_BACKUP_KEEP: usize = 14;
 
 fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn database_backup_dir(cfg: &Config) -> Result<std::path::PathBuf, String> {
+    cfg.db_path
+        .parent()
+        .map(|parent| parent.join("backups"))
+        .ok_or_else(|| "у пути базы нет родительского каталога".into())
+}
+
+pub fn create_database_backup(
+    cfg: &Config,
+    store: &Store,
+    now: i64,
+    force: bool,
+) -> Result<String, String> {
+    let dir = database_backup_dir(cfg)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("не удалось подготовить каталог копий: {error}"))?;
+    let suffix = if force {
+        now
+    } else {
+        now.div_euclid(86_400) * 86_400
+    };
+    let path = dir.join(format!("awgram-{suffix}.db"));
+    if force && path.exists() {
+        return Err("копия с таким идентификатором уже существует".into());
+    }
+    if !path.exists() {
+        store
+            .backup_database(&path)
+            .map_err(|error| format!("SQLite backup: {error}"))?;
+    }
+    let size = Store::verify_database_backup(&path)?;
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("не удалось прочитать созданную копию: {error}"))?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    std::fs::write(
+        path.with_extension("db.sha256"),
+        format!(
+            "{digest}  {}\n",
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("awgram.db")
+        ),
+    )
+    .map_err(|error| format!("не удалось записать SHA-256: {error}"))?;
+    let removed = Store::rotate_database_backups(&dir, DATABASE_BACKUP_KEEP)?;
+    Ok(format!(
+        "{} · {size} байт · quick_check=ok · SHA-256 {}… · удалено старых: {removed}",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("awgram.db"),
+        &digest[..12]
+    ))
+}
+
+pub fn audit_database_backups(cfg: &Config) -> Result<String, String> {
+    let dir = database_backup_dir(cfg)?;
+    let files = Store::database_backup_files(&dir);
+    if files.is_empty() {
+        return Err("резервные копии базы не найдены".into());
+    }
+    let mut total = 0u64;
+    let mut manifests_created = 0usize;
+    for path in &files {
+        total = total.saturating_add(Store::verify_database_backup(path)?);
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("не удалось прочитать {}: {error}", path.display()))?;
+        let actual = format!("{:x}", Sha256::digest(bytes));
+        let checksum_path = path.with_extension("db.sha256");
+        if checksum_path.exists() {
+            let expected = std::fs::read_to_string(&checksum_path).map_err(|error| {
+                format!("не удалось прочитать SHA-256 {}: {error}", path.display())
+            })?;
+            if expected.split_whitespace().next() != Some(actual.as_str()) {
+                return Err(format!("контрольная сумма не совпала: {}", path.display()));
+            }
+        } else {
+            std::fs::write(
+                &checksum_path,
+                format!(
+                    "{actual}  {}\n",
+                    path.file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("awgram.db")
+                ),
+            )
+            .map_err(|error| format!("не удалось создать SHA-256: {error}"))?;
+            manifests_created += 1;
+        }
+    }
+    let rehearsal_schema = Store::rehearse_database_restore(&files[0])?;
+    Ok(format!(
+        "проверено копий: {} · общий размер: {total} байт · quick_check и SHA-256: ok · тестовое восстановление: ok (схема {rehearsal_schema}) · создано старых манифестов: {manifests_created} · последняя: {}",
+        files.len(),
+        files[0]
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("неизвестно")
+    ))
 }
 
 async fn notify_admins(bot: &Bot, cfg: &Config, text: String) -> bool {
@@ -437,45 +539,8 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         notify_admins(bot,cfg,format!("💳 Оплата VPN-сервера {urgency}\n\n🖥 {}\n🏢 {}\n🌐 {}\n📅 Оплачен до: {}\n💰 Сумма: {}",server.name,server.provider,server.public_ip,crate::calendar::format_date(paid_until),cost)).await;
     }
 
-    let Some(parent) = cfg.db_path.parent() else {
-        store.update_monitor_state(
-            "database_backup",
-            "error",
-            Some("у пути базы нет родительского каталога"),
-            now,
-        );
-        return;
-    };
-    let dir = parent.join("backups");
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        let details = format!("не удалось подготовить каталог резервных копий: {error}");
-        if store.update_monitor_state("database_backup", "error", Some(&details), now) {
-            notify_admins(bot, cfg, format!("🚨 {details}")).await;
-        }
-        return;
-    }
-    let path = dir.join(format!("awgram-{}.db", now / 86_400));
-    let result = if path.exists() {
-        Ok(())
-    } else {
-        store
-            .backup_database(&path)
-            .map_err(|error| error.to_string())
-    }
-    .and_then(|()| {
-        Store::verify_database_backup(&path).map(|size| {
-            (
-                size,
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("backup.db")
-                    .to_string(),
-            )
-        })
-    });
-    match result {
-        Ok((size, name)) => {
-            let details = format!("{name} · {size} байт · SQLite quick_check=ok");
+    match create_database_backup(cfg, store, now, false) {
+        Ok(details) => {
             if store.update_monitor_state("database_backup", "ok", Some(&details), now) {
                 notify_admins(
                     bot,

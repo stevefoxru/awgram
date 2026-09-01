@@ -914,10 +914,119 @@ impl Store {
             )
             .optional()
             .map_err(|error| format!("не удалось прочитать версию схемы: {error}"))?;
-        if schema_version.is_none() {
+        let Some(schema_version) = schema_version else {
             return Err("в резервной копии отсутствует версия схемы".into());
+        };
+        let schema_version = schema_version
+            .parse::<usize>()
+            .map_err(|_| "в резервной копии некорректная версия схемы".to_string())?;
+        if schema_version == 0 || schema_version > crate::store::MIGRATIONS.len() {
+            return Err(format!(
+                "неподдерживаемая версия схемы резервной копии: {schema_version}"
+            ));
+        }
+        for table in ["users", "clients", "vpn_servers", "balance_ledger"] {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("не удалось проверить таблицу {table}: {error}"))?;
+            if exists != 1 {
+                return Err(format!("в резервной копии отсутствует таблица {table}"));
+            }
         }
         Ok(metadata.len())
+    }
+
+    pub fn database_backup_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut files = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("awgram-")
+                            && name.ends_with(".db")
+                            && name[7..name.len() - 3]
+                                .chars()
+                                .all(|character| character.is_ascii_digit())
+                    })
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| {
+            let modified = |path: &std::path::Path| {
+                std::fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+            };
+            modified(right)
+                .cmp(&modified(left))
+                .then_with(|| right.file_name().cmp(&left.file_name()))
+        });
+        files
+    }
+
+    pub fn rehearse_database_restore(path: &std::path::Path) -> Result<i64, String> {
+        Self::verify_database_backup(path)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| "у резервной копии нет родительского каталога".to_string())?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let rehearsal = parent.join(format!(
+            ".awgram-restore-test-{}-{nonce}.db",
+            std::process::id()
+        ));
+        std::fs::copy(path, &rehearsal)
+            .map_err(|error| format!("не удалось подготовить тест восстановления: {error}"))?;
+        let result = Self::open(&rehearsal)
+            .map(|store| store.schema_version())
+            .map_err(|error| format!("тестовое восстановление не удалось: {error}"));
+        for artifact in [
+            rehearsal.clone(),
+            std::path::PathBuf::from(format!("{}-wal", rehearsal.display())),
+            std::path::PathBuf::from(format!("{}-shm", rehearsal.display())),
+        ] {
+            if artifact.exists() {
+                let _ = std::fs::remove_file(artifact);
+            }
+        }
+        result
+    }
+
+    pub fn rotate_database_backups(
+        dir: &std::path::Path,
+        keep: usize,
+    ) -> std::result::Result<usize, String> {
+        let files = Self::database_backup_files(dir);
+        let mut removed = 0usize;
+        for path in files.into_iter().skip(keep.max(1)) {
+            std::fs::remove_file(&path).map_err(|error| {
+                format!(
+                    "не удалось удалить старую копию {}: {error}",
+                    path.display()
+                )
+            })?;
+            let checksum = path.with_extension("db.sha256");
+            if checksum.exists() {
+                std::fs::remove_file(&checksum).map_err(|error| {
+                    format!(
+                        "не удалось удалить контрольную сумму {}: {error}",
+                        checksum.display()
+                    )
+                })?;
+            }
+            removed += 1;
+        }
+        Ok(removed)
     }
     pub fn staff_role(&self, user_id: i64) -> Option<String> {
         self.with_conn(|c| {
@@ -1814,8 +1923,39 @@ mod tests {
         let path = dir.path().join("backup.db");
         s.backup_database(&path).unwrap();
         assert!(Store::verify_database_backup(&path).unwrap() > 0);
+        assert_eq!(
+            Store::rehearse_database_restore(&path).unwrap(),
+            crate::store::MIGRATIONS.len() as i64
+        );
         let backup = Store::open(&path).unwrap();
         assert!(backup.user(7).is_some());
+    }
+
+    #[test]
+    fn database_backup_rotation_only_removes_old_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..16 {
+            let path = dir.path().join(format!("awgram-{index}.db"));
+            std::fs::write(&path, b"backup").unwrap();
+            std::fs::write(path.with_extension("db.sha256"), b"checksum").unwrap();
+        }
+        let unrelated = dir.path().join("customer.db");
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        assert_eq!(Store::rotate_database_backups(dir.path(), 14).unwrap(), 2);
+        assert_eq!(Store::database_backup_files(dir.path()).len(), 14);
+        assert!(unrelated.exists());
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "sha256"))
+                .count(),
+            14
+        );
     }
 
     #[test]

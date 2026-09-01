@@ -274,6 +274,10 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
             cb("💾 Резервные копии", "backup"),
         ],
         vec![
+            cb("🗄 Копия БД сейчас", "admin:db-backup"),
+            cb("🔍 Проверить архив БД", "admin:db-backup-audit"),
+        ],
+        vec![
             cb("🛡 VPN-служба", "admin:vpn"),
             cb("ℹ️ Справка", "admin:help"),
         ],
