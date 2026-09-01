@@ -91,6 +91,13 @@ pub struct FinanceSummary {
     pub pending: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BalanceEntry {
+    pub amount_kopecks: i64,
+    pub kind: String,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct AdminUserStats {
     pub total: i64,
@@ -606,9 +613,52 @@ impl Store {
                 discount.filter(|_| until.is_none_or(|expires| expires > now))
             })
             .unwrap_or(0);
-        personal
-            .max(self.take_promo_discount(user_id))
-            .clamp(0, 100)
+        let promo = self
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT promo_discount FROM users WHERE user_id=?1",
+                    [user_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        if promo >= personal && promo > 0 {
+            self.take_promo_discount(user_id).clamp(0, 100)
+        } else {
+            personal.clamp(0, 100)
+        }
+    }
+
+    /// Показывает доступную скидку, не расходуя одноразовый промокод.
+    pub fn peek_purchase_discount(&self, user_id: i64, now: i64) -> i64 {
+        let (personal, promo) = self
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT personal_discount,personal_discount_until,promo_discount
+                     FROM users WHERE user_id=?1",
+                    [user_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+            })
+            .ok()
+            .map(|(discount, until, promo)| {
+                (
+                    discount
+                        .filter(|_| until.is_none_or(|expires| expires > now))
+                        .unwrap_or(0),
+                    promo.unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+        personal.max(promo).clamp(0, 100)
     }
 
     pub fn set_personal_discount(
@@ -1278,6 +1328,24 @@ impl Store {
         .unwrap_or(0)
     }
 
+    pub fn balance_history(&self, user_id: i64, limit: usize) -> Vec<BalanceEntry> {
+        self.with_conn(|c| {
+            let mut statement = c.prepare(
+                "SELECT amount_kopecks,kind,created_at FROM balance_ledger
+                 WHERE user_id=?1 ORDER BY created_at DESC,id DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(rusqlite::params![user_id, limit as i64], |row| {
+                Ok(BalanceEntry {
+                    amount_kopecks: row.get(0)?,
+                    kind: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
     /// Идемпотентная проводка: повторный reference ничего не начисляет.
     pub fn add_ledger_entry(
         &self,
@@ -1600,6 +1668,10 @@ mod tests {
         assert!(!s.add_ledger_entry(2, 20_000, "topup", "p:1", None, 30));
         assert!(s.add_ledger_entry(2, -5_000, "purchase", "buy:1", None, 31));
         assert_eq!(s.balance_kopecks(2), 15_000);
+        let history = s.balance_history(2, 10);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].kind, "purchase");
+        assert_eq!(history[0].amount_kopecks, -5_000);
     }
 
     #[test]
@@ -1713,8 +1785,10 @@ mod tests {
         assert_eq!(profile.admin_note.as_deref(), Some("VIP"));
         assert!(s.create_promo("FRIEND25", 25, Some(1), None, 1, 20));
         assert_eq!(s.activate_promo(7, "friend25", 21), Some(25));
-        assert_eq!(s.take_promo_discount(7), 25);
-        assert_eq!(s.take_promo_discount(7), 0);
+        assert_eq!(s.peek_purchase_discount(7, 21), 25);
+        assert_eq!(s.peek_purchase_discount(7, 21), 25);
+        assert_eq!(s.purchase_discount(7, 21), 25);
+        assert_eq!(s.peek_purchase_discount(7, 21), 0);
         assert_eq!(s.activate_promo(7, "FRIEND25", 22), None);
         let id = s
             .open_support_ticket_in_category(7, "payment", "Не прошла оплата", 30)

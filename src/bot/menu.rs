@@ -13,7 +13,14 @@ pub fn profile_menu(portal_enabled: bool) -> InlineKeyboardMarkup {
     if portal_enabled {
         rows.push(vec![cb("🌐 Открыть веб-кабинет", "portal")]);
     }
-    rows.push(vec![cb("🔑 Мои ключи", "mykeys")]);
+    rows.push(vec![
+        cb("🔑 Мои ключи", "mykeys"),
+        cb("💰 Баланс", "balance"),
+    ]);
+    rows.push(vec![
+        cb("➕ Купить ключ", "buy"),
+        cb("🎟 Промокод", "legacy:promo"),
+    ]);
     InlineKeyboardMarkup::new(rows)
 }
 

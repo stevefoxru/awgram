@@ -7540,7 +7540,9 @@ async fn callback_handler(
                     return Ok(());
                 };
                 let base = settings.tariff_price_kopecks(months).unwrap_or(0);
-                let discount = settings.purchase_discount(uid, now_epoch()).clamp(0, 100);
+                let discount = settings
+                    .peek_purchase_discount(uid, now_epoch())
+                    .clamp(0, 100);
                 let amount = base.saturating_mul(100 - discount) / 100;
                 let discount_line = if discount > 0 {
                     format!("\n🎁 Скидка: {discount}%")
@@ -7588,7 +7590,11 @@ async fn callback_handler(
                 }
                 return Ok(());
             }
-            let discount = settings.purchase_discount(uid, now_epoch());
+            let discount = if method == "balance" {
+                settings.peek_purchase_discount(uid, now_epoch())
+            } else {
+                settings.purchase_discount(uid, now_epoch())
+            };
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
             if method == "balance" {
                 let balance = settings.balance_kopecks(uid);
@@ -7788,14 +7794,38 @@ async fn callback_handler(
             request.await?;
         }
         Action::Balance => {
+            let entries = settings.balance_history(uid, 10);
+            let history = if entries.is_empty() {
+                "Операций пока нет.".to_string()
+            } else {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        let reason = match entry.kind.as_str() {
+                            "topup" => "пополнение",
+                            "purchase" => "покупка или продление",
+                            "refund" => "возврат",
+                            "referral" => "реферальное начисление",
+                            "adjustment" | "admin_adjustment" => "корректировка администратором",
+                            _ => "операция баланса",
+                        };
+                        format!(
+                            "{} {:+.2} ₽ · {reason}",
+                            crate::calendar::format_date(entry.created_at),
+                            entry.amount_kopecks as f64 / 100.0
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             bot.send_message(
                 chat,
                 format!(
-                    "💰 Баланс: {:.2} ₽",
-                    settings.balance_kopecks(uid) as f64 / 100.0
+                    "💰 Внутренний баланс\n\nДоступно: {:.2} ₽\n\nПоследние операции:\n{history}\n\nПоложительная сумма — начисление, отрицательная — списание.",
+                    settings.balance_kopecks(uid) as f64 / 100.0,
                 ),
             )
-            .reply_markup(menu::customer_keyboard())
+            .reply_markup(menu::profile_menu(cfg.portal_public_url.is_some()))
             .await?;
         }
         Action::Renew(name) => {
@@ -7927,7 +7957,9 @@ async fn callback_handler(
                     .max(now_epoch())
                     .saturating_add(seconds);
                 let base = settings.tariff_price_kopecks(months).unwrap_or(0);
-                let discount = settings.purchase_discount(uid, now_epoch()).clamp(0, 100);
+                let discount = settings
+                    .peek_purchase_discount(uid, now_epoch())
+                    .clamp(0, 100);
                 let amount = base.saturating_mul(100 - discount) / 100;
                 let discount_line = if discount > 0 {
                     format!("\n🎁 Скидка: {discount}%")
@@ -7974,7 +8006,11 @@ async fn callback_handler(
                 }
                 return Ok(());
             }
-            let discount = settings.purchase_discount(uid, now_epoch());
+            let discount = if method == "balance" {
+                settings.peek_purchase_discount(uid, now_epoch())
+            } else {
+                settings.purchase_discount(uid, now_epoch())
+            };
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
             let seconds = duration_seconds(expiry).unwrap_or(0);
             if method == "balance" {
@@ -8064,7 +8100,18 @@ async fn callback_handler(
         Action::Profile => {
             let me = bot.get_me().await?;
             let username = me.username.clone().unwrap_or_default();
-            bot.send_message(chat, format!("👤 Telegram ID: {uid}\nАктивных ключей: {}\nРеферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}", settings.user_client_names(uid).len()))
+            let user = settings.user(uid);
+            let display_name = user
+                .as_ref()
+                .map(|user| user.display_name.as_str())
+                .unwrap_or("пользователь");
+            let discount = settings.peek_purchase_discount(uid, now_epoch());
+            let discount_text = if discount > 0 {
+                format!("{discount}% на следующую покупку")
+            } else {
+                "нет активной скидки".into()
+            };
+            bot.send_message(chat, format!("👤 Профиль\n\n{display_name}\nTelegram ID: {uid}\n🔑 Ключей: {}\n💰 Баланс: {:.2} ₽\n🎟 Скидка: {discount_text}\n👥 Приглашено: {}\n🎁 Реферальное начисление: {}% от покупки\n\nВаша ссылка:\nhttps://t.me/{username}?start=ref_{uid}\n\nНачисления за приглашённых автоматически появляются в истории баланса.", settings.user_client_names(uid).len(), settings.balance_kopecks(uid) as f64 / 100.0, settings.referral_count(uid), settings.referral_percent()))
                 .reply_markup(menu::profile_menu(cfg.portal_public_url.is_some())).await?;
         }
         Action::Portal => {
