@@ -118,6 +118,9 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
     if now >= crate::calendar::start_of_december(year) && now <= crate::calendar::end_of_year(year)
     {
         for (name, user_id) in store.legacy_clients() {
+            if !store.notification_preferences(user_id).0 {
+                continue;
+            }
             let Some(expires_at) = vpn.client_expiry(&name) else {
                 continue;
             };
@@ -138,6 +141,9 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
         }
     }
     for user_id in store.all_user_ids() {
+        if !store.notification_preferences(user_id).0 {
+            continue;
+        }
         for name in store.user_client_names(user_id) {
             let Some(expires_at) = vpn.client_expiry(&name) else {
                 continue;

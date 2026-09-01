@@ -154,6 +154,46 @@ pub struct KeyReplacement {
 }
 
 impl Store {
+    pub fn notification_preferences(&self, user_id: i64) -> (bool, bool) {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT expiry_enabled,maintenance_enabled
+                 FROM user_notification_preferences WHERE user_id=?1",
+                [user_id],
+                |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .unwrap_or((true, true))
+    }
+
+    pub fn set_notification_preference(
+        &self,
+        user_id: i64,
+        kind: &str,
+        enabled: bool,
+        now: i64,
+    ) -> bool {
+        let column = match kind {
+            "expiry" => "expiry_enabled",
+            "maintenance" => "maintenance_enabled",
+            _ => return false,
+        };
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO user_notification_preferences(user_id,updated_at)
+                 VALUES(?1,?2)",
+                rusqlite::params![user_id, now],
+            )?;
+            c.execute(
+                &format!("UPDATE user_notification_preferences SET {column}=?2,updated_at=?3 WHERE user_id=?1"),
+                rusqlite::params![user_id, enabled as i64, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
     pub fn pending_key_replacements(&self) -> Vec<KeyReplacement> {
         self.with_conn(|connection| {
             let mut statement = connection.prepare(
@@ -1672,6 +1712,18 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].kind, "purchase");
         assert_eq!(history[0].amount_kopecks, -5_000);
+    }
+
+    #[test]
+    fn notification_preferences_default_to_enabled_and_persist() {
+        let s = Store::open_in_memory();
+        s.upsert_user(7, Some("alice"), "Alice", None, 10);
+        assert_eq!(s.notification_preferences(7), (true, true));
+        assert!(s.set_notification_preference(7, "expiry", false, 11));
+        assert_eq!(s.notification_preferences(7), (false, true));
+        assert!(s.set_notification_preference(7, "maintenance", false, 12));
+        assert_eq!(s.notification_preferences(7), (false, false));
+        assert!(!s.set_notification_preference(7, "unknown", true, 13));
     }
 
     #[test]

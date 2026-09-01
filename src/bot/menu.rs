@@ -21,7 +21,33 @@ pub fn profile_menu(portal_enabled: bool) -> InlineKeyboardMarkup {
         cb("➕ Купить ключ", "buy"),
         cb("🎟 Промокод", "legacy:promo"),
     ]);
+    rows.push(vec![cb("🔔 Уведомления", "guide:notifications")]);
     InlineKeyboardMarkup::new(rows)
+}
+
+pub fn notification_settings_menu(expiry: bool, maintenance: bool) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            if expiry {
+                "✅ Срок действия: включены"
+            } else {
+                "❌ Срок действия: выключены"
+            },
+            &format!("guide:notify-expiry-{}", if expiry { "off" } else { "on" }),
+        )],
+        vec![cb(
+            if maintenance {
+                "✅ Технические работы: включены"
+            } else {
+                "❌ Технические работы: выключены"
+            },
+            &format!(
+                "guide:notify-maintenance-{}",
+                if maintenance { "off" } else { "on" }
+            ),
+        )],
+        vec![cb("⬅️ Профиль", "profile")],
+    ])
 }
 
 pub fn portal_link_menu(url: &str) -> InlineKeyboardMarkup {
@@ -1861,6 +1887,17 @@ mod tests {
         let renewal = all_callback_data(&renew_balance_confirm_menu("alice", 3, 1_700_000_000));
         assert!(renewal.contains(&"renew:method:alice:3:balance-go-1700000000".to_string()));
         assert!(renewal.contains(&"mykey:alice".to_string()));
+    }
+
+    #[test]
+    fn notification_menu_toggles_each_optional_category() {
+        let enabled = all_callback_data(&notification_settings_menu(true, true));
+        assert!(enabled.contains(&"guide:notify-expiry-off".to_string()));
+        assert!(enabled.contains(&"guide:notify-maintenance-off".to_string()));
+
+        let disabled = all_callback_data(&notification_settings_menu(false, false));
+        assert!(disabled.contains(&"guide:notify-expiry-on".to_string()));
+        assert!(disabled.contains(&"guide:notify-maintenance-on".to_string()));
     }
 
     #[test]

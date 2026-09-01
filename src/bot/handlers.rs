@@ -6139,7 +6139,11 @@ async fn callback_handler(
                         .await?;
                 } else {
                     let started_at = now_epoch();
-                    let recipients = settings.server_owner_user_ids(id);
+                    let recipients = settings
+                        .server_owner_user_ids(id)
+                        .into_iter()
+                        .filter(|user_id| settings.notification_preferences(*user_id).1)
+                        .collect::<Vec<_>>();
                     if settings.begin_server_maintenance(id, uid, started_at) {
                         settings.update_monitor_state(&format!("vpn-server-{id}-maintenance"), "maintenance", Some("плановое обслуживание включено администратором с уведомлением владельцев"), started_at);
                         settings.prepare_maintenance_notifications(id, started_at, &recipients);
@@ -6823,6 +6827,24 @@ async fn callback_handler(
             dialogue.update(State::AwaitingReferralPercent).await?;
         }
         Action::Guide(kind) => {
+            if kind == "notifications" || kind.starts_with("notify-") {
+                if let Some(value) = kind.strip_prefix("notify-") {
+                    let mut parts = value.rsplitn(2, '-');
+                    let enabled = match parts.next() {
+                        Some("on") => Some(true),
+                        Some("off") => Some(false),
+                        _ => None,
+                    };
+                    if let (Some(enabled), Some(preference)) = (enabled, parts.next()) {
+                        settings.set_notification_preference(uid, preference, enabled, now_epoch());
+                    }
+                }
+                let (expiry, maintenance) = settings.notification_preferences(uid);
+                bot.send_message(chat, "🔔 Уведомления\n\nЗдесь можно отключить обычные напоминания об окончании подписки и сообщения о плановых работах.\n\nСообщения о списании или возврате денег, результате покупки, безопасности и ответы поддержки отключить нельзя.")
+                    .reply_markup(menu::notification_settings_menu(expiry, maintenance))
+                    .await?;
+                return Ok(());
+            }
             let (guide, key_name) = kind
                 .split_once(':')
                 .map_or((kind.as_str(), None), |(guide, name)| (guide, Some(name)));

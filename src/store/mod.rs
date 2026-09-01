@@ -22,8 +22,8 @@ mod stats;
 
 pub use broadcasts::BroadcastRun;
 pub use commerce::{
-    AdminUserProfile, AdminUserStats, FinanceSummary, KeyReplacement, LegacyRequest, MonitorEvent,
-    MonitorState, PaymentRequest, PaymentStatus, PromoCode, SupportTicket, UserRow,
+    AdminUserProfile, AdminUserStats, BalanceEntry, FinanceSummary, KeyReplacement, LegacyRequest,
+    MonitorEvent, MonitorState, PaymentRequest, PaymentStatus, PromoCode, SupportTicket, UserRow,
 };
 pub use events::{EventKind, EventRow};
 pub use groups::{
@@ -598,6 +598,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_maintenance_notifications_finish
         ON maintenance_notifications(server_id,started_at,start_delivered,finish_delivered);
+    "#,
+    // v25: пользовательские настройки необязательных уведомлений.
+    r#"
+    CREATE TABLE user_notification_preferences(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        expiry_enabled INTEGER NOT NULL DEFAULT 1,
+        maintenance_enabled INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL
+    );
     "#,
 ];
 
