@@ -7420,7 +7420,7 @@ async fn callback_handler(
         }
         Action::Buy => {
             let servers = settings.available_vpn_servers();
-            bot.send_message(chat, if servers.is_empty() { "Сейчас нет доступных локаций. Администратор уже может проверить лимиты серверов." } else { "Выберите локацию и протокол:" })
+            bot.send_message(chat, if servers.is_empty() { "Сейчас нет доступных локаций. Администратор уже может проверить лимиты серверов." } else { "🌍 Шаг 1 из 3 · Выберите локацию\n\nПоказаны только серверы, которые доступны для новых ключей. Число свободных мест обновляется из учёта панели." })
                 .reply_markup(menu::buy_servers_menu(&servers, &settings))
                 .await?;
         }
@@ -7430,14 +7430,22 @@ async fn callback_handler(
                 .into_iter()
                 .any(|server| server.id == server_id);
             if available && settings.set_purchase_server(uid, server_id, now_epoch()) {
-                bot.send_message(chat, "📅 Шаг 2 из 3 · Выберите срок подписки:")
-                    .reply_markup(menu::buy_terms_menu([
-                        settings.tariff_price_kopecks(1).unwrap_or(0),
-                        settings.tariff_price_kopecks(3).unwrap_or(0),
-                        settings.tariff_price_kopecks(6).unwrap_or(0),
-                        settings.tariff_price_kopecks(12).unwrap_or(0),
-                    ]))
-                    .await?;
+                let server = settings.vpn_server(server_id);
+                let selected = server.as_ref().map_or_else(
+                    || "выбранная локация".to_string(),
+                    |server| format!("{} · AWG 1.0", server.location),
+                );
+                bot.send_message(
+                    chat,
+                    format!("✅ Выбрано: {selected}\n\n📅 Шаг 2 из 3 · Выберите срок подписки:"),
+                )
+                .reply_markup(menu::buy_terms_menu([
+                    settings.tariff_price_kopecks(1).unwrap_or(0),
+                    settings.tariff_price_kopecks(3).unwrap_or(0),
+                    settings.tariff_price_kopecks(6).unwrap_or(0),
+                    settings.tariff_price_kopecks(12).unwrap_or(0),
+                ]))
+                .await?;
             } else {
                 bot.send_message(chat, "Эта локация заполнена или временно недоступна.")
                     .await?;
@@ -7445,14 +7453,27 @@ async fn callback_handler(
         }
         Action::BuyTerm(months) => {
             if tariff_duration(months).is_some() {
-                if settings.purchase_server(uid).is_none() {
+                let Some(server) = settings.purchase_server(uid).and_then(|server_id| {
+                    settings
+                        .available_vpn_servers()
+                        .into_iter()
+                        .find(|server| server.id == server_id)
+                }) else {
                     let servers = settings.available_vpn_servers();
-                    bot.send_message(chat, "Сначала выберите сервер подключения:")
+                    bot.send_message(chat, "Выбранная локация стала недоступна или заполнилась. Выберите сервер заново:")
                         .reply_markup(menu::buy_servers_menu(&servers, &settings))
                         .await?;
                     return Ok(());
-                }
-                bot.send_message(chat, "💳 Шаг 3 из 3 · Выберите способ оплаты:")
+                };
+                let base = settings.tariff_price_kopecks(months).unwrap_or(0);
+                let discount = settings.purchase_discount(uid, now_epoch()).clamp(0, 100);
+                let amount = base.saturating_mul(100 - discount) / 100;
+                let discount_line = if discount > 0 {
+                    format!("\n🎁 Скидка: {discount}%")
+                } else {
+                    String::new()
+                };
+                bot.send_message(chat, format!("💳 Шаг 3 из 3 · Оплата\n\n📍 {}\n🛡 AWG 1.0\n📅 Срок: {months} мес.\n💰 Итого: {:.2} ₽{discount_line}\n💼 На балансе: {:.2} ₽\n\nВыберите способ оплаты:", server.location, amount as f64 / 100.0, settings.balance_kopecks(uid) as f64 / 100.0))
                     .reply_markup(menu::buy_method_menu(
                         months,
                         settings.acquiring_url_template().is_some(),
@@ -7495,6 +7516,36 @@ async fn callback_handler(
             }
             let discount = settings.purchase_discount(uid, now_epoch());
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
+            if method == "balance" {
+                let balance = settings.balance_kopecks(uid);
+                if balance < amount {
+                    bot.send_message(chat, format!("Недостаточно средств на внутреннем балансе.\n\nДоступно: {:.2} ₽\nСтоимость: {:.2} ₽\nНе хватает: {:.2} ₽\n\nПополните баланс и повторите покупку — выбранная локация сохранится.", balance as f64 / 100.0, amount as f64 / 100.0, amount.saturating_sub(balance) as f64 / 100.0))
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    return Ok(());
+                }
+                let Some(server) = settings.purchase_server(uid).and_then(|server_id| {
+                    settings
+                        .available_vpn_servers()
+                        .into_iter()
+                        .find(|server| server.id == server_id)
+                }) else {
+                    bot.send_message(
+                        chat,
+                        "Выбранная локация больше недоступна. Выберите её заново.",
+                    )
+                    .reply_markup(menu::buy_servers_menu(
+                        &settings.available_vpn_servers(),
+                        &settings,
+                    ))
+                    .await?;
+                    return Ok(());
+                };
+                bot.send_message(chat, format!("Подтвердите покупку\n\n📍 {}\n📅 {months} мес.\n💰 Будет списано: {:.2} ₽\n💼 Баланс после покупки: {:.2} ₽\n\nКлюч начнёт создаваться только после подтверждения.", server.location, amount as f64 / 100.0, settings.balance_kopecks(uid).saturating_sub(amount) as f64 / 100.0))
+                    .reply_markup(menu::buy_balance_confirm_menu(months))
+                    .await?;
+                return Ok(());
+            }
             if method == "acquiring" {
                 let Some(server_id) = settings.purchase_server(uid) else {
                     return Ok(());
@@ -7518,7 +7569,7 @@ async fn callback_handler(
                         .replace("{user_id}", &uid.to_string());
                     bot.send_message(chat, format!("🏦 Онлайн-оплата · заказ #{id}\n\nК оплате: {:.2} ₽\n\nПерейдите по защищённой ссылке платёжного провайдера:\n{url}\n\nПосле подключения webhook подтверждение и выдача ключа будут выполняться автоматически; пока заказ подтверждается администратором.", amount as f64/100.0)).await?;
                 }
-            } else if method == "balance" {
+            } else if method == "balance-go" {
                 let Some(server_id) = settings.purchase_server(uid).filter(|selected| {
                     settings
                         .available_vpn_servers()
@@ -7830,6 +7881,19 @@ async fn callback_handler(
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
             let seconds = duration_seconds(expiry).unwrap_or(0);
             if method == "balance" {
+                let balance = settings.balance_kopecks(uid);
+                if balance < amount {
+                    bot.send_message(chat, format!("Недостаточно средств для продления.\n\nДоступно: {:.2} ₽\nСтоимость: {:.2} ₽\nНе хватает: {:.2} ₽", balance as f64 / 100.0, amount as f64 / 100.0, amount.saturating_sub(balance) as f64 / 100.0))
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    return Ok(());
+                }
+                bot.send_message(chat, format!("Подтвердите продление\n\n🔑 {name}\n📅 На {months} мес.\n💰 Будет списано: {:.2} ₽\n💼 Баланс после продления: {:.2} ₽", amount as f64 / 100.0, settings.balance_kopecks(uid).saturating_sub(amount) as f64 / 100.0))
+                    .reply_markup(menu::renew_balance_confirm_menu(&name, months))
+                    .await?;
+                return Ok(());
+            }
+            if method == "balance-go" {
                 let reference = format!("renew:{uid}:{name}:{}", now_epoch());
                 if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
                     bot.send_message(chat, "Недостаточно средств на внутреннем балансе.")
@@ -7840,7 +7904,10 @@ async fn callback_handler(
                     Ok(epoch) => {
                         bot.send_message(
                             chat,
-                            format!("✅ Ключ {name} продлён. Новый срок (Unix): {epoch}"),
+                            format!(
+                                "✅ Ключ {name} продлён до {}.",
+                                crate::calendar::format_date(epoch)
+                            ),
                         )
                         .reply_markup(menu::customer_keyboard())
                         .await?;

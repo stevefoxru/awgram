@@ -706,7 +706,7 @@ pub fn buy_terms_menu(prices: [i64; 4]) -> InlineKeyboardMarkup {
 
 pub fn buy_servers_menu(
     servers: &[crate::store::VpnServer],
-    _store: &crate::store::Store,
+    store: &crate::store::Store,
 ) -> InlineKeyboardMarkup {
     let mut rows = servers
         .iter()
@@ -716,14 +716,36 @@ pub fn buy_servers_menu(
             } else {
                 "AWG 1.0 · стабильно"
             };
+            let used = store.server_client_count(server.id);
+            let free = server.capacity.saturating_sub(used);
             vec![cb(
-                &format!("📍 {} · {protocol}", server.location),
+                &format!("📍 {} · {protocol} · свободно {free}", server.location),
                 &format!("buy:server:{}", server.id),
             )]
         })
         .collect::<Vec<_>>();
     rows.push(vec![cb("⬅️ Кабинет", "profile")]);
     InlineKeyboardMarkup::new(rows)
+}
+
+pub fn buy_balance_confirm_menu(months: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "✅ Списать баланс и создать ключ",
+            &format!("buy:method:{months}:balance-go"),
+        )],
+        vec![cb("Отмена", "buy")],
+    ])
+}
+
+pub fn renew_balance_confirm_menu(name: &str, months: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "✅ Списать баланс и продлить",
+            &format!("renew:method:{name}:{months}:balance-go"),
+        )],
+        vec![cb("Отмена", &format!("mykey:{name}"))],
+    ])
 }
 
 pub fn buy_method_menu(months: i64, acquiring: bool) -> InlineKeyboardMarkup {
@@ -1817,6 +1839,17 @@ mod tests {
         let confirm = all_callback_data(&customer_refresh_confirm_menu("alice"));
         assert!(confirm.contains(&"refreshgo:alice".to_string()));
         assert!(confirm.contains(&"mykey:alice".to_string()));
+    }
+
+    #[test]
+    fn balance_purchase_and_renewal_require_explicit_confirmation() {
+        let purchase = all_callback_data(&buy_balance_confirm_menu(12));
+        assert!(purchase.contains(&"buy:method:12:balance-go".to_string()));
+        assert!(!purchase.contains(&"buy:method:12:balance".to_string()));
+
+        let renewal = all_callback_data(&renew_balance_confirm_menu("alice", 3));
+        assert!(renewal.contains(&"renew:method:alice:3:balance-go".to_string()));
+        assert!(renewal.contains(&"mykey:alice".to_string()));
     }
 
     #[test]
