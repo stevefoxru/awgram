@@ -892,28 +892,29 @@ pub fn broadcast_audience_menu() -> InlineKeyboardMarkup {
 }
 
 pub fn customer_keys_menu(items: &[(String, String)]) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(items.iter().map(|(name, title)| {
-        vec![
-            cb(title, &format!("mykey:{name}")),
-            cb("📅 Продлить", &format!("renew:{name}")),
-            cb("✏️", &format!("device:label:{name}")),
-        ]
-    }))
+    InlineKeyboardMarkup::new(
+        items
+            .iter()
+            .map(|(name, title)| vec![cb(title, &format!("mykey:{name}"))]),
+    )
 }
 
 pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("♻️ Получить новый конфиг", &format!("refresh:{name}"))],
+        vec![cb(
+            "📲 Получить конфигурацию и QR",
+            &format!("refresh:{name}"),
+        )],
+        vec![cb("📖 Как установить", &format!("guide:install:{name}"))],
+        vec![cb("🩺 Не подключается", &format!("guide:trouble:{name}"))],
         vec![
             cb("📅 Продлить", &format!("renew:{name}")),
             cb("✏️ Устройство", &format!("device:label:{name}")),
         ],
         vec![cb(
-            "🛟 Заменить нерабочий ключ",
+            "🛟 Замена при недоступном сервере",
             &format!("move:choose:{name}"),
         )],
-        vec![cb("📖 Как установить", &format!("guide:install:{name}"))],
-        vec![cb("🩺 Не подключается", &format!("guide:trouble:{name}"))],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
 }

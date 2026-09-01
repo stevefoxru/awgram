@@ -1292,23 +1292,13 @@ async fn customer_dashboard(
         .unwrap_or_else(|| "пользователь".into());
     let now = now_epoch();
     let names = settings.user_client_names(uid);
-    let working = names
+    let views = names
         .iter()
-        .filter(|name| {
-            settings
-                .client_vpn_server(name)
-                .is_some_and(|server| server.status == "online")
-                && vpn.client_expiry(name).is_none_or(|expiry| expiry > now)
-        })
-        .count();
-    let broken = names
-        .iter()
-        .filter(|name| {
-            settings
-                .client_vpn_server(name)
-                .is_none_or(|server| server.status != "online")
-        })
-        .count();
+        .map(|name| customer_key_view(settings, vpn, uid, name, now))
+        .collect::<Vec<_>>();
+    let ready = views.iter().filter(|view| view.ready).count();
+    let attention = views.iter().filter(|view| !view.ready).count();
+    let connected = views.iter().filter(|view| view.connected).count();
     let expiring = names
         .iter()
         .filter(|name| {
@@ -1325,7 +1315,8 @@ async fn customer_dashboard(
     bot.send_message(
         chat,
         format!(
-            "🏠 Личный кабинет\nЗдравствуйте, {display_name}!\n\n🔐 Подключения\n✅ Работают: {working}\n❌ Требуют замены: {broken}\n⏳ Истекают за 7 дней: {expiring}{operation_line}\n\n💰 Баланс: {:.2} ₽\n👥 Приглашено друзей: {}\n\nБыстрый старт:\n• «🔑 Мои ключи» — подключение и замена\n• «➕ Купить ключ» — новое устройство\n• «🆘 Поддержка» — помощь с подключением\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
+            "🏠 Личный кабинет\nЗдравствуйте, {display_name}!\n\n🔐 Ваши ключи: {}\n✅ Готовы к работе: {ready}\n⚠️ Требуют внимания: {attention}\n📶 Подключены сейчас: {connected}\n⏳ Истекают за 7 дней: {expiring}{operation_line}\n\n💰 Баланс: {:.2} ₽\n👥 Приглашено друзей: {}\n\n«Готов к работе» означает, что ключ включён и сервер доступен. Устройство может быть не подключено прямо сейчас — это не поломка ключа.\n\nБыстрый старт:\n• «🔑 Мои ключи» — конфигурация, QR и состояние\n• «➕ Купить ключ» — новое устройство\n• «🆘 Поддержка» — помощь с подключением\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
+            names.len(),
             settings.balance_kopecks(uid) as f64 / 100.0,
             settings.referral_count(uid),
         ),
@@ -1333,6 +1324,95 @@ async fn customer_dashboard(
     .reply_markup(menu::customer_keyboard())
     .await?;
     Ok(())
+}
+
+struct CustomerKeyView {
+    text: String,
+    title: String,
+    ready: bool,
+    connected: bool,
+}
+
+fn customer_key_view(
+    settings: &Store,
+    vpn: &Vpn,
+    uid: i64,
+    name: &str,
+    now: i64,
+) -> CustomerKeyView {
+    let device = settings
+        .device_label(name)
+        .unwrap_or_else(|| "устройство не указано".into());
+    let server = settings.client_vpn_server(name);
+    let runtime = settings.client_runtime_stats(name);
+    let expired = vpn.client_expiry(name).is_some_and(|expiry| expiry <= now);
+    let server_unavailable = server
+        .as_ref()
+        .is_none_or(|server| server.status != "online");
+    let disabled = runtime
+        .as_ref()
+        .and_then(|value| value.enabled)
+        .is_some_and(|enabled| !enabled)
+        || vpn.client_disabled(name);
+    let (icon, health, ready) = if expired {
+        ("⌛", "подписка истекла", false)
+    } else if server_unavailable {
+        ("❌", "сервер недоступен — нужна замена", false)
+    } else if disabled {
+        ("⏸", "ключ отключён", false)
+    } else {
+        ("✅", "готов к работе", true)
+    };
+    let connected = ready
+        && runtime.as_ref().is_some_and(|value| {
+            value.last_handshake.is_some_and(|handshake| {
+                handshake > 0
+                    && handshake >= now.saturating_sub(crate::vpn::model::ONLINE_THRESHOLD_SECS)
+            })
+        });
+    let connection = if connected {
+        "🟢 устройство подключено сейчас".to_string()
+    } else if let Some(handshake) = runtime.as_ref().and_then(|value| value.last_handshake) {
+        format!(
+            "⚪ последнее подключение: {}",
+            crate::vpn::model::format_handshake(settings.lang(uid), now, handshake)
+        )
+    } else {
+        "⚪ подключений ещё не было".to_string()
+    };
+    let server_name = server.as_ref().map_or_else(
+        || "не определён".to_string(),
+        |server| format!("{} · {}", server.location, server.name),
+    );
+    let protocol = server.as_ref().map_or("AWG 1.0", |server| {
+        if server.protocol == "amneziawg-2" {
+            "AWG 2.0"
+        } else {
+            "AWG 1.0"
+        }
+    });
+    let expiry = crate::vpn::model::format_expiry(settings.lang(uid), now, vpn.client_expiry(name));
+    let traffic = runtime.as_ref().map_or_else(
+        || "пока нет данных".to_string(),
+        |value| {
+            format!(
+                "↓ {} · ↑ {}",
+                crate::vpn::model::human_bytes(value.rx),
+                crate::vpn::model::human_bytes(value.tx)
+            )
+        },
+    );
+    CustomerKeyView {
+        text: format!(
+            "{icon} {device}\nКлюч: {name}\nИсправность: {health}\nПодключение: {connection}\nСервер: {server_name}\nПротокол: {protocol}\nСрок: {expiry}\nТрафик: {traffic}"
+        ),
+        title: format!("{icon} {device} · {name}")
+            .chars()
+            .take(60)
+            .collect(),
+        ready,
+        connected,
+    }
 }
 
 fn customer_key_list(
@@ -1344,52 +1424,9 @@ fn customer_key_list(
     let mut lines = Vec::with_capacity(names.len());
     let mut buttons = Vec::with_capacity(names.len());
     for name in names {
-        let device = settings
-            .device_label(&name)
-            .unwrap_or_else(|| "устройство не указано".into());
-        let server = settings.client_vpn_server(&name);
-        let unavailable = server
-            .as_ref()
-            .is_none_or(|server| server.status != "online");
-        let (icon, state) = if unavailable {
-            ("❌", "НЕ РАБОТАЕТ — требуется замена".to_string())
-        } else if vpn.client_disabled(&name) {
-            ("⏸", "отключён".to_string())
-        } else {
-            ("✅", "работает".to_string())
-        };
-        let location = server
-            .as_ref()
-            .map(|server| server.location.as_str())
-            .unwrap_or("сервер не определён");
-        let expiry = crate::vpn::model::format_expiry(
-            settings.lang(uid),
-            now_epoch(),
-            vpn.client_expiry(&name),
-        );
-        let telemetry = settings.client_runtime_stats(&name).map_or_else(
-            || "данных подключения пока нет".to_string(),
-            |runtime| {
-                let handshake = runtime
-                    .last_handshake
-                    .map(|value| {
-                        crate::vpn::model::format_handshake(settings.lang(uid), now_epoch(), value)
-                    })
-                    .unwrap_or_else(|| "никогда".into());
-                format!(
-                    "последнее подключение: {handshake} · трафик: {}",
-                    crate::vpn::model::human_bytes(runtime.rx.saturating_add(runtime.tx))
-                )
-            },
-        );
-        lines.push(format!(
-            "{icon} {device}\n   Ключ: {name}\n   Сервер: {location}\n   Статус: {state}\n   Срок: {expiry}\n   Активность: {telemetry}"
-        ));
-        let title = format!("{icon} {device} · {name}")
-            .chars()
-            .take(60)
-            .collect::<String>();
-        buttons.push((name.clone(), title));
+        let view = customer_key_view(settings, vpn, uid, &name, now_epoch());
+        lines.push(view.text);
+        buttons.push((name.clone(), view.title));
     }
     (lines, buttons)
 }
@@ -4449,7 +4486,7 @@ async fn message_handler(
                     "🔑 У вас пока нет ключей. Вы можете приобрести ключ или обратиться в поддержку.".to_string()
                 } else {
                     format!(
-                        "🔑 Ваши подключения\n\n{}\n\n❌ Нерабочий ключ откройте и замените кнопкой восстановления.",
+                        "🔑 Ваши подключения\n\n{}\n\nИсправность ключа и подключение устройства показаны отдельно. Откройте нужную карточку для QR, конфигурации и инструкции.",
                         lines.join("\n\n")
                     )
                 };
@@ -7614,7 +7651,7 @@ async fn callback_handler(
             let text = if lines.is_empty() {
                 "У вас пока нет ключей.".to_string()
             } else {
-                format!("🔑 Ваши подключения\n\n{}\n\n❌ Нерабочий ключ откройте и замените кнопкой восстановления.", lines.join("\n\n"))
+                format!("🔑 Ваши подключения\n\n{}\n\nИсправность ключа и подключение устройства показаны отдельно. Откройте нужную карточку для QR, конфигурации и инструкции.", lines.join("\n\n"))
             };
             let mut request = bot.send_message(chat, text);
             if !buttons.is_empty() {
@@ -8321,25 +8358,6 @@ async fn callback_handler(
             if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
             }
-            let label = settings
-                .device_label(&name)
-                .unwrap_or_else(|| "не указано".into());
-            let expiry =
-                crate::vpn::model::format_expiry(lang, now_epoch(), vpn.client_expiry(&name));
-            let source = settings.client_vpn_server(&name);
-            let source_unavailable = source
-                .as_ref()
-                .is_none_or(|server| server.status != "online");
-            if source_unavailable {
-                let location = source
-                    .as_ref()
-                    .map(|server| server.location.as_str())
-                    .unwrap_or("не определён");
-                bot.send_message(chat, format!("❌ Нерабочее подключение\n\nКлюч: {name}\nУстройство: {label}\nСтарый сервер: {location}\nСтатус: сервер недоступен\nСрок: {expiry}\n\nКонфигурация старого сервера больше не поможет. Нажмите «Заменить нерабочий ключ», проверьте новый и подтвердите замену."))
-                    .reply_markup(menu::customer_key_menu(&name))
-                    .await?;
-                return Ok(());
-            }
             let expired = vpn
                 .client_expiry(&name)
                 .is_some_and(|value| value <= now_epoch());
@@ -8348,63 +8366,16 @@ async fn callback_handler(
                     .reply_markup(menu::expired_subscription_menu(&name)).await?;
                 return Ok(());
             }
-            let status = if vpn.client_disabled(&name) {
-                "отключён"
-            } else {
-                "активен"
-            };
-            let server_name = source
-                .as_ref()
-                .map(|server| format!("{} · {}", server.location, server.name))
-                .unwrap_or_else(|| "не определён".into());
-            let telemetry = settings.client_runtime_stats(&name).map_or_else(
-                || "Телеметрия: ожидается первый опрос сервера".to_string(),
-                |runtime| {
-                    let handshake = runtime
-                        .last_handshake
-                        .map(|value| {
-                            crate::vpn::model::format_handshake(lang, now_epoch(), value)
-                        })
-                        .unwrap_or_else(|| "никогда".into());
-                    let observed = crate::vpn::model::format_handshake(
-                        lang,
-                        now_epoch(),
-                        runtime.observed_at,
-                    );
-                    let remote_state = match runtime.enabled {
-                        Some(true) => "включён на сервере",
-                        Some(false) => "отключён на сервере",
-                        None => "состояние получено локально",
-                    };
-                    format!(
-                        "Сервер: {remote_state}\nПоследнее подключение: {handshake}\nТрафик: ↓ {} · ↑ {}\nТелеметрия обновлена: {observed}",
-                        crate::vpn::model::human_bytes(runtime.rx),
-                        crate::vpn::model::human_bytes(runtime.tx)
-                    )
-                },
-            );
+            let view = customer_key_view(&settings, &vpn, uid, &name, now_epoch());
             bot.send_message(
                 chat,
-                format!("🔑 {name}\n📱 Устройство: {label}\n🌍 Сервер: {server_name}\nСтатус: {status}\nСрок: {expiry}\n\n📊 Подключение\n{telemetry}"),
+                format!(
+                    "🔑 Карточка подключения\n\n{}\n\nКонфигурация и QR отправляются только по кнопке ниже.",
+                    view.text
+                ),
             )
             .reply_markup(menu::customer_key_menu(&name))
             .await?;
-            let files = match settings.client_vpn_server(&name) {
-                Some(server) if !server.is_local => {
-                    nonlocal_files(&vpn, &settings, &server, &name).await
-                }
-                _ => vpn.existing_files(&name),
-            };
-            match files {
-                Ok(res) => {
-                    if let Err(e) = render::send_client_files(&bot, chat, lang, &res).await {
-                        bot.send_message(chat, i18n::error_text(lang, &e)).await?;
-                    }
-                }
-                Err(e) => {
-                    bot.send_message(chat, i18n::error_text(lang, &e)).await?;
-                }
-            }
         }
         Action::CustomerMove(name) => {
             if settings.client_owner(&name) != Some(uid) {
