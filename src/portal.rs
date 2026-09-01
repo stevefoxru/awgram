@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -49,6 +51,41 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    let values = [
+        ("cache-control", "no-store, max-age=0"),
+        ("pragma", "no-cache"),
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "DENY"),
+        ("referrer-policy", "no-referrer"),
+        (
+            "content-security-policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        ),
+    ];
+    for (name, value) in values {
+        if let Ok(value) = value.parse() {
+            headers.insert(name, value);
+        }
+    }
+    headers.insert(
+        "permissions-policy",
+        "camera=(), microphone=(), geolocation=(), payment=()"
+            .parse()
+            .expect("static header is valid"),
+    );
+    response
+}
+
+fn same_site_request(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|value| matches!(value, "same-origin" | "same-site" | "none"))
+}
+
 async fn login(State(state): State<PortalState>, Query(query): Query<LoginQuery>) -> Response {
     let Some(session) = state.store.activate_portal_token(&query.token, now_epoch()) else {
         return (
@@ -58,7 +95,7 @@ async fn login(State(state): State<PortalState>, Query(query): Query<LoginQuery>
             .into_response();
     };
     let cookie = format!(
-        "awgram_session={session}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{}",
+        "awgram_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
         30 * 86_400,
         if state.secure_cookie { "; Secure" } else { "" }
     );
@@ -87,15 +124,21 @@ async fn me(State(state): State<PortalState>, headers: HeaderMap) -> Response {
 }
 
 async fn logout(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if let Some(value) = session(&headers) {
         state.store.portal_logout(value, now_epoch());
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        "awgram_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
-            .parse()
-            .expect("static cookie is valid"),
+        format!(
+            "awgram_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{}",
+            if state.secure_cookie { "; Secure" } else { "" }
+        )
+        .parse()
+        .expect("cookie is valid"),
     );
     response
 }
@@ -220,6 +263,9 @@ async fn update_notifications(
     headers: HeaderMap,
     Json(request): Json<NotificationRequest>,
 ) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(user_id) =
         session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
     else {
@@ -246,6 +292,9 @@ async fn create_topup(
     headers: HeaderMap,
     Json(request): Json<TopupRequest>,
 ) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(user_id) =
         session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
     else {
@@ -275,6 +324,9 @@ async fn submit_payment_proof(
     AxumPath(id): AxumPath<i64>,
     Json(request): Json<ProofRequest>,
 ) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(user_id) =
         session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
     else {
@@ -305,6 +357,9 @@ async fn support(
     headers: HeaderMap,
     Json(request): Json<SupportRequest>,
 ) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(user_id) =
         session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
     else {
@@ -458,6 +513,7 @@ pub async fn run(
         .route("/api/payments/topup", post(create_topup))
         .route("/api/payments/{id}/proof", post(submit_payment_proof))
         .route("/api/payments/webhook", post(acquiring_webhook))
+        .layer(middleware::from_fn(security_headers))
         .with_state(PortalState {
             store,
             vpn,
@@ -494,3 +550,19 @@ fetch('/api/me').then(async r=>{if(!r.ok)throw 0;return r.json()}).then(d=>{
  let paymentId=null;document.querySelector('#topupCreate').onclick=async()=>{const amount_rubles=Number(document.querySelector('#topupAmount').value);const r=await fetch('/api/payments/topup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount_rubles})});if(r.ok){const x=await r.json();paymentId=x.payment_id;document.querySelector('#topupResult').textContent=`Заявка #${paymentId}. ${x.instructions}`;document.querySelector('#topupProofSend').disabled=false}else document.querySelector('#topupResult').textContent='Проверьте сумму.'};document.querySelector('#topupProofSend').onclick=async()=>{const proof=document.querySelector('#topupProof').value;const r=await fetch(`/api/payments/${paymentId}/proof`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proof})});document.querySelector('#topupResult').textContent=r.ok?'Подтверждение отправлено администратору.':'Не удалось отправить подтверждение.'}
 }).catch(()=>{document.querySelector('#app').innerHTML='<section class="card login"><span class="pill">Требуется вход</span><h1>Откройте кабинет через Telegram</h1><p class="muted">В боте нажмите «Кабинет → Открыть веб-кабинет». Ссылка одноразовая и действует 15 минут.</p></section>'});
 </script></body></html>"##;
+
+#[cfg(test)]
+mod tests {
+    use super::same_site_request;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn state_changes_reject_cross_site_browser_requests() {
+        let mut headers = HeaderMap::new();
+        assert!(same_site_request(&headers));
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(same_site_request(&headers));
+        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        assert!(!same_site_request(&headers));
+    }
+}
