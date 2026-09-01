@@ -728,21 +728,25 @@ pub fn buy_servers_menu(
     InlineKeyboardMarkup::new(rows)
 }
 
-pub fn buy_balance_confirm_menu(months: i64) -> InlineKeyboardMarkup {
+pub fn buy_balance_confirm_menu(months: i64, nonce: u64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb(
             "✅ Списать баланс и создать ключ",
-            &format!("buy:method:{months}:balance-go"),
+            &format!("buy:method:{months}:balance-go-{nonce}"),
         )],
         vec![cb("Отмена", "buy")],
     ])
 }
 
-pub fn renew_balance_confirm_menu(name: &str, months: i64) -> InlineKeyboardMarkup {
+pub fn renew_balance_confirm_menu(
+    name: &str,
+    months: i64,
+    expected_expiry: i64,
+) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb(
             "✅ Списать баланс и продлить",
-            &format!("renew:method:{name}:{months}:balance-go"),
+            &format!("renew:method:{name}:{months}:balance-go-{expected_expiry}"),
         )],
         vec![cb("Отмена", &format!("mykey:{name}"))],
     ])
@@ -1843,12 +1847,12 @@ mod tests {
 
     #[test]
     fn balance_purchase_and_renewal_require_explicit_confirmation() {
-        let purchase = all_callback_data(&buy_balance_confirm_menu(12));
-        assert!(purchase.contains(&"buy:method:12:balance-go".to_string()));
+        let purchase = all_callback_data(&buy_balance_confirm_menu(12, 42));
+        assert!(purchase.contains(&"buy:method:12:balance-go-42".to_string()));
         assert!(!purchase.contains(&"buy:method:12:balance".to_string()));
 
-        let renewal = all_callback_data(&renew_balance_confirm_menu("alice", 3));
-        assert!(renewal.contains(&"renew:method:alice:3:balance-go".to_string()));
+        let renewal = all_callback_data(&renew_balance_confirm_menu("alice", 3, 1_700_000_000));
+        assert!(renewal.contains(&"renew:method:alice:3:balance-go-1700000000".to_string()));
         assert!(renewal.contains(&"mykey:alice".to_string()));
     }
 

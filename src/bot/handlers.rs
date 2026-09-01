@@ -7615,8 +7615,9 @@ async fn callback_handler(
                     .await?;
                     return Ok(());
                 };
+                let nonce: u64 = rand::random();
                 bot.send_message(chat, format!("Подтвердите покупку\n\n📍 {}\n📅 {months} мес.\n💰 Будет списано: {:.2} ₽\n💼 Баланс после покупки: {:.2} ₽\n\nКлюч начнёт создаваться только после подтверждения.", server.location, amount as f64 / 100.0, settings.balance_kopecks(uid).saturating_sub(amount) as f64 / 100.0))
-                    .reply_markup(menu::buy_balance_confirm_menu(months))
+                    .reply_markup(menu::buy_balance_confirm_menu(months, nonce))
                     .await?;
                 return Ok(());
             }
@@ -7643,7 +7644,10 @@ async fn callback_handler(
                         .replace("{user_id}", &uid.to_string());
                     bot.send_message(chat, format!("🏦 Онлайн-оплата · заказ #{id}\n\nК оплате: {:.2} ₽\n\nПерейдите по защищённой ссылке платёжного провайдера:\n{url}\n\nПосле подключения webhook подтверждение и выдача ключа будут выполняться автоматически; пока заказ подтверждается администратором.", amount as f64/100.0)).await?;
                 }
-            } else if method == "balance-go" {
+            } else if let Some(nonce) = method.strip_prefix("balance-go-") {
+                let Ok(nonce) = nonce.parse::<u64>() else {
+                    return Ok(());
+                };
                 let Some(server_id) = settings.purchase_server(uid).filter(|selected| {
                     settings
                         .available_vpn_servers()
@@ -7661,10 +7665,9 @@ async fn callback_handler(
                     .await?;
                     return Ok(());
                 };
-                let nonce: u64 = rand::random();
-                let reference = format!("balance:{uid}:{server_id}:{}:{nonce}", now_epoch());
+                let reference = format!("balance:{uid}:{server_id}:{months}:{nonce}");
                 if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
-                    bot.send_message(chat, format!("Недостаточно средств на внутреннем балансе. Доступно: {:.2} ₽, требуется: {:.2} ₽.", settings.balance_kopecks(uid) as f64 / 100.0, amount as f64 / 100.0))
+                    bot.send_message(chat, format!("Эта покупка уже обработана либо на балансе недостаточно средств. Доступно: {:.2} ₽, требуется: {:.2} ₽. Проверьте раздел «Мои ключи» перед повторной покупкой.", settings.balance_kopecks(uid) as f64 / 100.0, amount as f64 / 100.0))
                         .reply_markup(menu::customer_keyboard())
                         .await?;
                     return Ok(());
@@ -7809,7 +7812,21 @@ async fn callback_handler(
                     bot.send_message(chat,format!("🔧 Технический тариф\n\nКлюч: {name}\nПродление: {:.2} ₽\nНовый срок: 31.12.{}",price as f64 / 100.0,crate::calendar::year_at(target))).reply_markup(menu::legacy_renew_menu(&name, price)).await?;
                     return Ok(());
                 }
-                bot.send_message(chat, format!("Выберите срок продления ключа {name}:"))
+                let current_expiry = vpn
+                    .client_expiry(&name)
+                    .map(crate::calendar::format_date)
+                    .unwrap_or_else(|| "бессрочно".into());
+                let auto = settings
+                    .auto_renew(&name, uid)
+                    .map(|(months, enabled)| {
+                        if enabled {
+                            format!("включено на {months} мес.")
+                        } else {
+                            "выключено".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "выключено".to_string());
+                bot.send_message(chat, format!("📅 Продление подключения\n\n🔑 Ключ: {name}\nТекущий срок: {current_expiry}\n🔁 Автопродление: {auto}\n\nВыберите новый период. Он прибавится к текущему сроку, а если срок уже истёк — к сегодняшней дате:"))
                     .reply_markup(menu::renew_terms_menu(
                         &name,
                         [
@@ -7820,17 +7837,7 @@ async fn callback_handler(
                         ],
                     ))
                     .await?;
-                let auto = settings
-                    .auto_renew(&name, uid)
-                    .map(|(m, on)| {
-                        if on {
-                            format!("Сейчас включено: {m} мес.")
-                        } else {
-                            "Сейчас выключено".to_string()
-                        }
-                    })
-                    .unwrap_or_else(|| "Сейчас выключено".to_string());
-                bot.send_message(chat, format!("🔁 Автопродление\n{auto}"))
+                bot.send_message(chat, "🔁 Настройка автопродления\n\nСредства списываются только за сутки до окончания. При ошибке сервера сумма автоматически возвращается. Если денег недостаточно, ключ не продлевается и бот присылает предупреждение.")
                     .reply_markup(menu::auto_renew_menu(&name))
                     .await?;
             } else {
@@ -7911,7 +7918,23 @@ async fn callback_handler(
         }
         Action::RenewTerm(name, months) => {
             if settings.client_owner(&name) == Some(uid) && tariff_duration(months).is_some() {
-                bot.send_message(chat, "Выберите способ оплаты продления:")
+                let seconds = tariff_duration(months)
+                    .and_then(duration_seconds)
+                    .unwrap_or(0);
+                let current = vpn.client_expiry(&name);
+                let target = current
+                    .unwrap_or(now_epoch())
+                    .max(now_epoch())
+                    .saturating_add(seconds);
+                let base = settings.tariff_price_kopecks(months).unwrap_or(0);
+                let discount = settings.purchase_discount(uid, now_epoch()).clamp(0, 100);
+                let amount = base.saturating_mul(100 - discount) / 100;
+                let discount_line = if discount > 0 {
+                    format!("\n🎁 Скидка: {discount}%")
+                } else {
+                    String::new()
+                };
+                bot.send_message(chat, format!("💳 Продление ключа\n\n🔑 {name}\n📅 Новый срок: {}\n💰 Итого: {:.2} ₽{discount_line}\n💼 На балансе: {:.2} ₽\n\nВыберите способ оплаты:", crate::calendar::format_date(target), amount as f64 / 100.0, settings.balance_kopecks(uid) as f64 / 100.0))
                     .reply_markup(menu::renew_method_menu(&name, months))
                     .await?;
             }
@@ -7962,13 +7985,25 @@ async fn callback_handler(
                         .await?;
                     return Ok(());
                 }
+                let expected_expiry = vpn.client_expiry(&name).unwrap_or(0);
                 bot.send_message(chat, format!("Подтвердите продление\n\n🔑 {name}\n📅 На {months} мес.\n💰 Будет списано: {:.2} ₽\n💼 Баланс после продления: {:.2} ₽", amount as f64 / 100.0, settings.balance_kopecks(uid).saturating_sub(amount) as f64 / 100.0))
-                    .reply_markup(menu::renew_balance_confirm_menu(&name, months))
+                    .reply_markup(menu::renew_balance_confirm_menu(&name, months, expected_expiry))
                     .await?;
                 return Ok(());
             }
-            if method == "balance-go" {
-                let reference = format!("renew:{uid}:{name}:{}", now_epoch());
+            if let Some(expected) = method.strip_prefix("balance-go-") {
+                let Ok(expected_expiry) = expected.parse::<i64>() else {
+                    return Ok(());
+                };
+                if vpn.client_expiry(&name).unwrap_or(0) != expected_expiry {
+                    bot.send_message(chat, "Срок ключа уже изменился — вероятно, продление было выполнено другим нажатием. Откройте карточку ключа и проверьте новую дату.")
+                        .reply_markup(menu::customer_key_menu(&name))
+                        .await?;
+                    return Ok(());
+                }
+                let attempt_bucket = now_epoch() / 600;
+                let reference =
+                    format!("renew:{uid}:{name}:{expected_expiry}:{months}:{attempt_bucket}");
                 if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
                     bot.send_message(chat, "Недостаточно средств на внутреннем балансе.")
                         .await?;
@@ -8005,6 +8040,10 @@ async fn callback_handler(
                 {
                     bot.send_message(chat, format!("Заявка #{id} на продление ключа {name}\nСрок: {months} мес.\nСумма: {} ₽\n\n{}", amount / 100, settings.payment_instructions()))
                         .reply_markup(menu::payment_paid_menu(id)).await?;
+                } else {
+                    bot.send_message(chat, "По этому ключу уже есть заявка на продление, ожидающая проверки. Добавлять ещё одну оплату не нужно.")
+                        .reply_markup(menu::customer_key_menu(&name))
+                        .await?;
                 }
             }
         }
@@ -8013,7 +8052,7 @@ async fn callback_handler(
                 bot.send_message(
                     chat,
                     if enabled {
-                        format!("✅ Автопродление ключа {name} включено на тариф {months} мес.")
+                        format!("✅ Автопродление ключа {name} включено на {months} мес. Списание произойдёт за сутки до окончания по действующей на тот момент цене.")
                     } else {
                         format!("Автопродление ключа {name} выключено.")
                     },

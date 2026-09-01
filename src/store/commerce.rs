@@ -1371,13 +1371,19 @@ impl Store {
         now: i64,
     ) -> Option<i64> {
         self.with_conn(|c| {
-            c.execute(
+            let changed = c.execute(
                 "INSERT INTO payment_requests(user_id,months,amount_kopecks,method,client_name,created_at)
-                 VALUES(?1,?2,?3,'manual',?4,?5)",
+                 SELECT ?1,?2,?3,'manual',?4,?5
+                 WHERE NOT EXISTS(
+                    SELECT 1 FROM payment_requests
+                    WHERE user_id=?1 AND client_name=?4 AND method='manual' AND status='pending'
+                 )",
                 rusqlite::params![user_id, months, amount_kopecks, client_name, now],
             )?;
-            Ok(c.last_insert_rowid())
-        }).ok()
+            Ok((changed == 1).then(|| c.last_insert_rowid()))
+        })
+        .ok()
+        .flatten()
     }
 
     pub fn create_legacy_renewal_request(
@@ -1610,6 +1616,22 @@ mod tests {
             s.payment_request(id).unwrap().status,
             PaymentStatus::Approved
         );
+    }
+
+    #[test]
+    fn manual_renewal_request_is_unique_while_pending() {
+        let s = Store::open_in_memory();
+        s.upsert_user(1, Some("alice"), "Alice", None, 10);
+        let first = s
+            .create_renewal_request(1, "alice_phone", 3, 60_000, 11)
+            .unwrap();
+        assert!(s
+            .create_renewal_request(1, "alice_phone", 6, 100_000, 12)
+            .is_none());
+        assert!(s.decide_payment(first, PaymentStatus::Rejected, 99, None, 13));
+        assert!(s
+            .create_renewal_request(1, "alice_phone", 6, 100_000, 14)
+            .is_some());
     }
 
     #[test]

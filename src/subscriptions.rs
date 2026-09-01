@@ -24,6 +24,35 @@ fn threshold_days(left: i64) -> Option<i64> {
     }
 }
 
+async fn set_managed_expiry(
+    vpn: &Vpn,
+    store: &Store,
+    name: &str,
+    expires_at: i64,
+) -> crate::error::Result<()> {
+    match store.client_vpn_server(name) {
+        Some(server) if !server.is_local && server.protocol == "amneziawg-panel" => {
+            let secret = store
+                .panel_password(server.id)
+                .ok_or_else(|| crate::error::Error::Parse("пароль панели не настроен".into()))?;
+            vpn.panel_set_expiry(&server, &secret, name, expires_at)
+                .await
+        }
+        Some(server) if !server.is_local => {
+            if let (Some(node), Some(secret)) = (
+                store.vpn_node_for_server(server.id),
+                store.node_secret(server.id),
+            ) {
+                vpn.agent_set_expiry(&server, &node, &secret, name, expires_at)
+                    .await
+            } else {
+                vpn.remote_set_expiry(&server, name, expires_at).await
+            }
+        }
+        _ => vpn.set_client_expiry(name, Some(expires_at)).await,
+    }
+}
+
 pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
     for (name, user_id, months) in store.auto_renew_clients() {
         let Some(expires_at) = vpn.client_expiry(&name) else {
@@ -53,8 +82,9 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
             let _ = bot.send_message(ChatId(user_id), format!("⚠️ Автопродление ключа «{name}» не выполнено: недостаточно средств. Пополните баланс до истечения срока.")).await;
             continue;
         }
-        match vpn.extend_client(&name, seconds, now).await {
-            Ok(new_expiry) => {
+        let new_expiry = expires_at.max(now).saturating_add(seconds);
+        match set_managed_expiry(vpn, store, &name, new_expiry).await {
+            Ok(()) => {
                 store.finish_renewal_attempt(&name, expires_at, "done");
                 if let Some(referrer) = store.user(user_id).and_then(|u| u.referrer_id) {
                     let reward = amount * i64::from(store.referral_percent()) / 100;
@@ -67,7 +97,7 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
                         now,
                     );
                 }
-                let _ = bot.send_message(ChatId(user_id), format!("✅ Ключ «{name}» автоматически продлён на {months} мес. С баланса списано {} ₽. Новый срок (Unix): {new_expiry}", amount / 100)).await;
+                let _ = bot.send_message(ChatId(user_id), format!("✅ Автопродление выполнено\n\n🔑 {name}\n📅 Новый срок: {}\n💰 Списано: {:.2} ₽\n💼 Остаток: {:.2} ₽", crate::calendar::format_date(new_expiry), amount as f64 / 100.0, store.balance_kopecks(user_id) as f64 / 100.0)).await;
             }
             Err(error) => {
                 store.add_ledger_entry(
@@ -80,6 +110,7 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
                 );
                 store.finish_renewal_attempt(&name, expires_at, "failed");
                 tracing::error!(%error, client=%name, "ошибка автопродления");
+                let _ = bot.send_message(ChatId(user_id), format!("⚠️ Автопродление ключа «{name}» не выполнено из-за ошибки сервера. Списанная сумма полностью возвращена на внутренний баланс. Попробуйте продлить ключ вручную позже.")).await;
             }
         }
     }
