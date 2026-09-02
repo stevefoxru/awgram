@@ -100,6 +100,10 @@ pub enum Action {
     SupportFilter(String),
     AdminPromos,
     AdminCommerce,
+    AdminPartners,
+    PartnerNew,
+    PartnerCard(i64),
+    PartnerStatus(i64, String),
     AdminPricesRub,
     AdminPricesStars,
     AdminReferral,
@@ -296,6 +300,8 @@ fn parse_callback(data: &str) -> Action {
         "finance:export" => Action::FinanceExport,
         "admin:promos" => Action::AdminPromos,
         "admin:commerce" => Action::AdminCommerce,
+        "admin:partners" => Action::AdminPartners,
+        "admin:partner:new" => Action::PartnerNew,
         "admin:prices:rub" => Action::AdminPricesRub,
         "admin:prices:stars" => Action::AdminPricesStars,
         "admin:referral" => Action::AdminReferral,
@@ -304,7 +310,17 @@ fn parse_callback(data: &str) -> Action {
         "legacy:promo" => Action::PromoInput,
         "legacy:price" => Action::LegacyPriceAsk,
         _ => {
-            if let Some(v) = data.strip_prefix("guide:") {
+            if let Some(v) = data.strip_prefix("admin:partner:status:") {
+                let mut parts = v.splitn(2, ':');
+                match (parts.next().and_then(|id| id.parse().ok()), parts.next()) {
+                    (Some(id), Some(status)) => Action::PartnerStatus(id, status.to_string()),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("admin:partner:") {
+                v.parse()
+                    .map(Action::PartnerCard)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("guide:") {
                 Action::Guide(v.to_string())
             } else if let Some(v) = data.strip_prefix("admin:owners:page:") {
                 v.parse()
@@ -939,6 +955,51 @@ fn duration_seconds(value: &str) -> Option<i64> {
         _ => return None,
     };
     amount.checked_mul(multiplier).filter(|v| *v > 0)
+}
+
+fn save_partner_bot_token(cfg: &Config, partner_id: i64, token: &str) -> Result<String, String> {
+    use std::io::Write as _;
+
+    let parent = cfg
+        .db_path
+        .parent()
+        .ok_or_else(|| "у каталога базы нет родительского пути".to_string())?;
+    let directory = parent.join("partner-secrets");
+    std::fs::create_dir_all(&directory)
+        .map_err(|_| "не удалось создать защищённый каталог партнёров".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "не удалось ограничить права каталога партнёров".to_string())?;
+    }
+    let path = directory.join(format!("partner-{partner_id}.token"));
+    let temporary = directory.join(format!(".partner-{partner_id}-{}.tmp", now_epoch()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|_| "не удалось подготовить файл токена".to_string())?;
+        file.write_all(token.as_bytes())
+            .and_then(|()| file.write_all(b"\n"))
+            .and_then(|()| file.sync_all())
+            .map_err(|_| "не удалось записать токен партнёра".to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|_| "не удалось ограничить права файла токена".to_string())?;
+        }
+        drop(file);
+        std::fs::rename(&temporary, &path)
+            .map_err(|_| "не удалось активировать файл токена".to_string())?;
+        Ok(path.to_string_lossy().into_owned())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn customer_base_name(user: &crate::store::UserRow) -> String {
@@ -2535,6 +2596,10 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | SupportFilter(_)
         | AdminPromos
         | AdminCommerce
+        | AdminPartners
+        | PartnerNew
+        | PartnerCard(_)
+        | PartnerStatus(_, _)
         | AdminPricesRub
         | AdminPricesStars
         | AdminReferral
@@ -3567,6 +3632,110 @@ async fn message_handler(
         } else {
             bot.send_message(msg.chat.id, "Введите целое число от 0 до 100.")
                 .await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingPartnerDetails) {
+        let parts = msg
+            .text()
+            .unwrap_or_default()
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        let parsed = if parts.len() == 5 {
+            Some((
+                parts[0].parse::<i64>().ok(),
+                parts[1],
+                parts[2],
+                parts[3].parse::<i64>().ok(),
+                parts[4].parse::<i64>().ok(),
+            ))
+        } else {
+            None
+        };
+        let Some((Some(owner_id), slug, name, Some(discount), Some(markup))) = parsed else {
+            bot.send_message(msg.chat.id, "Неверный формат. Отправьте: TELEGRAM_ID | SLUG | НАЗВАНИЕ | ОПТОВАЯ_СКИДКА_% | НАЦЕНКА_%")
+                .await?;
+            return Ok(());
+        };
+        if settings.user(owner_id).is_none() {
+            bot.send_message(msg.chat.id, "Пользователь ещё не запускал основной бот. Попросите его нажать /start, затем повторите создание партнёра.")
+                .await?;
+            return Ok(());
+        }
+        match settings.create_partner(owner_id, slug, name, discount, markup, now_epoch()) {
+            Ok(partner_id) => {
+                bot.send_message(msg.chat.id, "🔐 Теперь отправьте токен нового Telegram-бота от @BotFather одним сообщением. Сообщение будет сразу удалено, а токен сохранится вне SQLite в файле с правами 0600.")
+                    .await?;
+                dialogue
+                    .update(State::AwaitingPartnerToken { partner_id })
+                    .await?;
+            }
+            Err(error) => {
+                bot.send_message(msg.chat.id, format!("Не удалось создать партнёра: {error}"))
+                    .await?;
+            }
+        }
+        return Ok(());
+    }
+    if let State::AwaitingPartnerToken { partner_id } = state.clone() {
+        let token = msg.text().unwrap_or_default().trim().to_string();
+        let deleted = bot.delete_message(msg.chat.id, msg.id).await.is_ok();
+        let plausible = (20..=256).contains(&token.len())
+            && token.contains(':')
+            && !token.chars().any(char::is_whitespace);
+        if !plausible {
+            bot.send_message(msg.chat.id, "❌ Токен имеет неверный формат. Получите токен у @BotFather и отправьте его ещё раз.")
+                .await?;
+            return Ok(());
+        }
+        let partner_bot = Bot::new(token.clone());
+        let Ok(me) = partner_bot.get_me().await else {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Telegram отклонил токен. Проверьте его у @BotFather и отправьте заново.",
+            )
+            .await?;
+            return Ok(());
+        };
+        let username = me.username.clone().unwrap_or_default();
+        if username.is_empty() {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Telegram не вернул username бота. Создайте корректного бота через @BotFather.",
+            )
+            .await?;
+            return Ok(());
+        }
+        match save_partner_bot_token(&cfg, partner_id, &token) {
+            Ok(secret_ref)
+                if settings.set_partner_bot_identity(
+                    partner_id,
+                    &username,
+                    &secret_ref,
+                    now_epoch(),
+                ) =>
+            {
+                dialogue.update(State::Idle).await?;
+                let warning = if deleted {
+                    String::new()
+                } else {
+                    "\n\n⚠️ Telegram не позволил удалить исходное сообщение — удалите его вручную."
+                        .to_string()
+                };
+                bot.send_message(msg.chat.id, format!("✅ Бот @{username} проверен и безопасно привязан к партнёру #{partner_id}.{warning}\n\nКарточка пока остаётся черновиком: запуск продаж включается отдельно после проверки тарифа."))
+                    .reply_markup(menu::admin_partner_card_menu(partner_id, "draft"))
+                    .await?;
+            }
+            Ok(secret_ref) => {
+                let _ = std::fs::remove_file(secret_ref);
+                bot.send_message(msg.chat.id, "❌ Не удалось закрепить проверенный бот за партнёром. Токен удалён, повторите настройку.")
+                    .await?;
+            }
+            Err(error) => {
+                bot.send_message(msg.chat.id, format!("❌ {error}. Токен не сохранён."))
+                    .await?;
+            }
         }
         return Ok(());
     }
@@ -6880,6 +7049,66 @@ async fn callback_handler(
             };
             bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy-продление: {:.2} ₽", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0))
                 .reply_markup(menu::admin_commerce_menu()).await?;
+        }
+        Action::AdminPartners => {
+            let partners = settings.partners();
+            let active = partners
+                .iter()
+                .filter(|partner| partner.status == "active")
+                .count();
+            let configured = partners
+                .iter()
+                .filter(|partner| partner.bot_secret_ref.is_some())
+                .count();
+            bot.send_message(chat, format!("🤝 Партнёрские боты\n\nВсего: {}\nАктивны для продаж: {active}\nТокен проверен: {configured}\n\nПартнёр использует ваши VPN-серверы по оптовой цене и задаёт собственную розничную наценку. SSH, панельные пароли и основной бот ему не передаются.", partners.len()))
+                .reply_markup(menu::admin_partners_menu(&partners))
+                .await?;
+        }
+        Action::PartnerNew => {
+            bot.send_message(chat, "➕ Новый партнёр · шаг 1 из 2\n\nПользователь сначала должен запустить основной бот. Затем отправьте одной строкой:\n\nTELEGRAM_ID | SLUG | НАЗВАНИЕ | ОПТОВАЯ_СКИДКА_% | НАЦЕНКА_%\n\nПример:\n123456789 | ivan-vpn | Ivan VPN | 20 | 35")
+                .await?;
+            dialogue.update(State::AwaitingPartnerDetails).await?;
+        }
+        Action::PartnerCard(id) => {
+            if let Some(partner) = settings.partner(id) {
+                let status = match partner.status.as_str() {
+                    "active" => "🟢 продажи разрешены",
+                    "suspended" => "🔴 приостановлен",
+                    _ => "⚪ черновик",
+                };
+                let bot_name = partner
+                    .bot_username
+                    .as_deref()
+                    .map(|username| format!("@{username}"))
+                    .unwrap_or_else(|| "не подключён".into());
+                bot.send_message(chat, format!("🤝 {}\n\nID: #{}\nВладелец: {}\nSlug: {}\nСтатус: {status}\nTelegram-бот: {bot_name}\nОптовая скидка: {}%\nРозничная наценка: {}%\nПокупателей: {}\n\nСекрет токена хранится отдельно и в карточке не отображается.", partner.display_name, partner.id, partner.owner_user_id, partner.slug, partner.wholesale_discount_percent, partner.retail_markup_percent, settings.partner_customer_count(id)))
+                    .reply_markup(menu::admin_partner_card_menu(id, &partner.status))
+                    .await?;
+            } else {
+                bot.send_message(chat, "Партнёр не найден.")
+                    .reply_markup(menu::admin_partners_menu(&settings.partners()))
+                    .await?;
+            }
+        }
+        Action::PartnerStatus(id, status) => {
+            let allowed = matches!(status.as_str(), "active" | "suspended");
+            let ready = settings
+                .partner(id)
+                .is_some_and(|partner| status != "active" || partner.bot_secret_ref.is_some());
+            if allowed && ready && settings.set_partner_status(id, &status, now_epoch()) {
+                let text = if status == "active" {
+                    "✅ Партнёр допущен к следующему этапу запуска продаж."
+                } else {
+                    "⏸ Партнёр приостановлен."
+                };
+                bot.send_message(chat, text)
+                    .reply_markup(menu::admin_partner_card_menu(id, &status))
+                    .await?;
+            } else {
+                bot.send_message(chat, "Не удалось изменить статус. Для активации сначала подключите и проверьте Telegram-бота.")
+                    .reply_markup(menu::admin_partners_menu(&settings.partners()))
+                    .await?;
+            }
         }
         Action::AdminPricesRub => {
             bot.send_message(chat, "Введите четыре цены в рублях для 1 / 3 / 6 / 12 месяцев через пробел.\nНапример: 200 600 1000 2000").await?;
@@ -10894,6 +11123,9 @@ mod tests {
             menu::admin_create_menu(),
             menu::admin_roles_menu(),
             menu::admin_promos_menu(),
+            menu::admin_partners_menu(&[]),
+            menu::admin_partner_card_menu(1, "active"),
+            menu::admin_partner_card_menu(1, "draft"),
             menu::bulk_manage_menu(),
             menu::statistics_menu(),
             menu::admin_user_menu(42, false),
@@ -11047,6 +11279,10 @@ mod tests {
             SupportFilter("open".into()),
             AdminPromos,
             AdminCommerce,
+            AdminPartners,
+            PartnerNew,
+            PartnerCard(1),
+            PartnerStatus(1, "active".into()),
             AdminPricesRub,
             AdminPricesStars,
             AdminReferral,
@@ -11263,6 +11499,10 @@ mod tests {
                 SupportFilter(_) => {}
                 AdminPromos => {}
                 AdminCommerce => {}
+                AdminPartners => {}
+                PartnerNew => {}
+                PartnerCard(_) => {}
+                PartnerStatus(_, _) => {}
                 AdminPricesRub => {}
                 AdminPricesStars => {}
                 AdminReferral => {}
@@ -11635,6 +11875,10 @@ mod tests {
             (Action::SupportFilter("open".into()), true, false),
             (Action::AdminPromos, true, false),
             (Action::AdminCommerce, true, false),
+            (Action::AdminPartners, true, false),
+            (Action::PartnerNew, true, false),
+            (Action::PartnerCard(1), true, false),
+            (Action::PartnerStatus(1, "active".into()), true, false),
             (Action::AdminPricesRub, true, false),
             (Action::AdminPricesStars, true, false),
             (Action::AdminReferral, true, false),

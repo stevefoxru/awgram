@@ -91,6 +91,10 @@ pub enum State {
     AwaitingTariffPricesRub,
     AwaitingTariffPricesStars,
     AwaitingReferralPercent,
+    AwaitingPartnerDetails,
+    AwaitingPartnerToken {
+        partner_id: i64,
+    },
     AwaitingSupportMessage {
         category: String,
         ticket_id: Option<i64>,

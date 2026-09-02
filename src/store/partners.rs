@@ -166,6 +166,17 @@ impl Store {
         })
         .is_ok_and(|changed| changed == 1)
     }
+
+    pub fn partner_customer_count(&self, partner_id: i64) -> i64 {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM partner_customers WHERE partner_id=?1",
+                [partner_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +206,7 @@ mod tests {
         assert_eq!(partner.status, "active");
         assert_eq!(partner.retail_markup_percent, 35);
         assert_eq!(partner.bot_username.as_deref(), Some("seller_one_bot"));
+        assert_eq!(store.partner_customer_count(id), 1);
         assert_eq!(store.partners(), vec![partner]);
     }
 

@@ -588,6 +588,7 @@ pub fn admin_commerce_menu() -> InlineKeyboardMarkup {
             cb("🎟 Промокоды", "admin:promos"),
             cb("🤝 Реферальный %", "admin:referral"),
         ],
+        vec![cb("🤝 Партнёрские боты", "admin:partners")],
         vec![
             cb("♻️ Legacy-тариф", "legacy:price"),
             cb("💳 Реквизиты", "set:payment"),
@@ -595,6 +596,46 @@ pub fn admin_commerce_menu() -> InlineKeyboardMarkup {
         vec![cb("🏦 Эквайринг / Т-Банк", "set:acquiring")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
+}
+
+pub fn admin_partners_menu(partners: &[crate::store::Partner]) -> InlineKeyboardMarkup {
+    let mut rows = partners
+        .iter()
+        .map(|partner| {
+            let icon = match partner.status.as_str() {
+                "active" => "🟢",
+                "suspended" => "🔴",
+                _ => "⚪",
+            };
+            vec![cb(
+                &format!(
+                    "{icon} {} · +{}%",
+                    partner.display_name, partner.retail_markup_percent
+                ),
+                &format!("admin:partner:{}", partner.id),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("➕ Создать партнёра", "admin:partner:new")]);
+    rows.push(vec![cb("⬅️ Цены и промокоды", "admin:commerce")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn admin_partner_card_menu(id: i64, status: &str) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    match status {
+        "active" => rows.push(vec![cb(
+            "⏸ Приостановить",
+            &format!("admin:partner:status:{id}:suspended"),
+        )]),
+        "suspended" | "draft" => rows.push(vec![cb(
+            "▶️ Активировать",
+            &format!("admin:partner:status:{id}:active"),
+        )]),
+        _ => {}
+    }
+    rows.push(vec![cb("⬅️ Все партнёры", "admin:partners")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn bulk_manage_menu() -> InlineKeyboardMarkup {
