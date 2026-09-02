@@ -942,6 +942,54 @@ fn is_customer_navigation(text: &str) -> bool {
         )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdminTextAction {
+    Dashboard,
+    Search,
+    Servers,
+    Keys,
+    Users,
+    Analytics,
+    Communication,
+    Operations,
+    System,
+    Commerce,
+    Partners,
+    Events,
+    Profile,
+    LegacyClients,
+    Finance,
+    Owners,
+    Broadcast,
+    Support,
+    Settings,
+}
+
+fn parse_admin_text(text: &str) -> Option<AdminTextAction> {
+    Some(match text {
+        "/start" | "🏠 Админ-панель" => AdminTextAction::Dashboard,
+        "🔎 Поиск" => AdminTextAction::Search,
+        "🖥 Серверы" => AdminTextAction::Servers,
+        "🔑 Ключи" => AdminTextAction::Keys,
+        "👥 Пользователи" => AdminTextAction::Users,
+        "📊 Аналитика" => AdminTextAction::Analytics,
+        "💬 Связь" => AdminTextAction::Communication,
+        "🔄 Операции" => AdminTextAction::Operations,
+        "⚙️ Система" => AdminTextAction::System,
+        "🏷 Цены" => AdminTextAction::Commerce,
+        "🤝 Партнёры" => AdminTextAction::Partners,
+        "🚨 События" => AdminTextAction::Events,
+        "👤 Кабинет" => AdminTextAction::Profile,
+        "👥 Клиенты" => AdminTextAction::LegacyClients,
+        "💳 Финансы" => AdminTextAction::Finance,
+        "🔗 Владельцы" => AdminTextAction::Owners,
+        "📣 Рассылка" => AdminTextAction::Broadcast,
+        "🆘 Обращения" => AdminTextAction::Support,
+        "⚙️ Настройки" => AdminTextAction::Settings,
+        _ => return None,
+    })
+}
+
 fn duration_seconds(value: &str) -> Option<i64> {
     let split = value.len().checked_sub(1)?;
     let amount = value[..split].parse::<i64>().ok()?;
@@ -1588,6 +1636,42 @@ async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -
         "🏠 Панель управления ZuevVPN\n\n🖥 Инфраструктура\nСерверы: {online_servers}/{} онлайн\nКлючи: {total_keys} активных\n\n👥 Клиенты\nПользователей: {}\nОтключено: {disabled}\nИстекают за 7 дней: {expiring}\n\n💼 Работа\nЗамен ожидает проверки: {pending_replacements}\nПлатежей ожидает: {}\nОбращений открыто: {}\nВыручка за 30 дней: {:.2} ₽\n\n⚙️ Версия бота: v{}\n\nОсновные разделы находятся на постоянной клавиатуре внизу.",
         servers.len(),settings.all_user_ids().len(),month.pending,settings.open_support_count(),month.revenue_kopecks as f64/100.0,env!("CARGO_PKG_VERSION")))
         .reply_markup(menu::admin_keyboard()).await?;
+    Ok(())
+}
+
+async fn admin_commerce_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let rub = [1, 3, 6, 12].map(|months| settings.tariff_price_kopecks(months).unwrap_or(0) / 100);
+    let stars = [1, 3, 6, 12].map(|months| settings.tariff_price_stars(months));
+    let stars_text = if stars.iter().all(Option::is_some) {
+        format!(
+            "{} / {} / {} / {} ⭐",
+            stars[0].unwrap_or(0),
+            stars[1].unwrap_or(0),
+            stars[2].unwrap_or(0),
+            stars[3].unwrap_or(0)
+        )
+    } else {
+        "не настроены — оплата выключена".to_string()
+    };
+    bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy-продление: {:.2} ₽", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0))
+        .reply_markup(menu::admin_commerce_menu())
+        .await?;
+    Ok(())
+}
+
+async fn admin_partners_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
+    let partners = settings.partners();
+    let active = partners
+        .iter()
+        .filter(|partner| partner.status == "active")
+        .count();
+    let configured = partners
+        .iter()
+        .filter(|partner| partner.bot_secret_ref.is_some())
+        .count();
+    bot.send_message(chat, format!("🤝 Партнёрские боты\n\nВсего: {}\nАктивны для продаж: {active}\nТокен проверен: {configured}\n\nПартнёр использует ваши VPN-серверы по оптовой цене и задаёт собственную розничную наценку. SSH, панельные пароли и основной бот ему не передаются.", partners.len()))
+        .reply_markup(menu::admin_partners_menu(&partners))
+        .await?;
     Ok(())
 }
 
@@ -3281,12 +3365,12 @@ async fn message_handler(
                 .await?;
             return Ok(());
         }
-        match msg.text().unwrap_or_default() {
-            "/start" | "🏠 Админ-панель" => {
+        match parse_admin_text(msg.text().unwrap_or_default()) {
+            Some(AdminTextAction::Dashboard) => {
                 admin_dashboard(&bot, msg.chat.id, &vpn, &settings).await?;
                 return Ok(());
             }
-            "🔎 Поиск" => {
+            Some(AdminTextAction::Search) => {
                 bot.send_message(
                     msg.chat.id,
                     "Введите имя ключа, устройство, Telegram ID или username владельца:",
@@ -3295,16 +3379,16 @@ async fn message_handler(
                 dialogue.update(State::AwaitingAdminSearch).await?;
                 return Ok(());
             }
-            "🖥 Серверы" => {
+            Some(AdminTextAction::Servers) => {
                 servers_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
-            "🔑 Ключи" => {
+            Some(AdminTextAction::Keys) => {
                 bot.send_message(msg.chat.id, "🔑 Ключи\n\nСоздание, состояние, владельцы, группы, восстановление и массовое управление.")
                     .reply_markup(menu::admin_keys_hub()).await?;
                 return Ok(());
             }
-            "👥 Пользователи" => {
+            Some(AdminTextAction::Users) => {
                 bot.send_message(
                     msg.chat.id,
                     "👥 Пользователи\n\nКарточки клиентов, поиск и роли сотрудников.",
@@ -3313,11 +3397,11 @@ async fn message_handler(
                 .await?;
                 return Ok(());
             }
-            "📊 Аналитика" => {
+            Some(AdminTextAction::Analytics) => {
                 analytics_screen(&bot, msg.chat.id, &vpn, &settings).await?;
                 return Ok(());
             }
-            "💬 Связь" => {
+            Some(AdminTextAction::Communication) => {
                 bot.send_message(
                     msg.chat.id,
                     "💬 Связь\n\nТехническая поддержка и рассылки пользователям.",
@@ -3326,15 +3410,23 @@ async fn message_handler(
                 .await?;
                 return Ok(());
             }
-            "🔄 Операции" => {
+            Some(AdminTextAction::Operations) => {
                 admin_operations_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
-            "⚙️ Система" => {
+            Some(AdminTextAction::System) => {
                 admin_system_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
-            "🚨 События" => {
+            Some(AdminTextAction::Commerce) => {
+                admin_commerce_screen(&bot, msg.chat.id, &settings).await?;
+                return Ok(());
+            }
+            Some(AdminTextAction::Partners) => {
+                admin_partners_screen(&bot, msg.chat.id, &settings).await?;
+                return Ok(());
+            }
+            Some(AdminTextAction::Events) => {
                 let servers = settings.vpn_servers();
                 let alerts = servers
                     .iter()
@@ -3346,35 +3438,35 @@ async fn message_handler(
                 bot.send_message(msg.chat.id,format!("🚨 События\n\nСерверы требуют внимания: {alerts}\nОжидают оплаты: {}\nОткрытые обращения: {}",settings.pending_payments().len(),settings.open_support_count())).reply_markup(menu::admin_dashboard_menu()).await?;
                 return Ok(());
             }
-            "👤 Кабинет" => {
+            Some(AdminTextAction::Profile) => {
                 bot.send_message(msg.chat.id,format!("👤 Личный кабинет администратора\nTelegram ID: {uid}\nЛичный баланс: {:.2} ₽\nЛичных ключей: {}\n\nНажмите «Открыть веб-кабинет», чтобы получить одноразовую ссылку входа.",settings.balance_kopecks(uid) as f64/100.0,settings.user_client_names(uid).len())).reply_markup(menu::profile_menu(cfg.portal_public_url.is_some())).await?;
                 return Ok(());
             }
-            "👥 Клиенты" => {
+            Some(AdminTextAction::LegacyClients) => {
                 bot.send_message(msg.chat.id, i18n::menu_title(settings.lang(uid)))
                     .reply_markup(menu::main_menu(settings.lang(uid)))
                     .await?;
                 return Ok(());
             }
-            "💳 Финансы" => {
+            Some(AdminTextAction::Finance) => {
                 finance_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
-            "🔗 Владельцы" => {
+            Some(AdminTextAction::Owners) => {
                 owners_screen(&bot, msg.chat.id, &settings, 0).await?;
                 return Ok(());
             }
-            "📣 Рассылка" => {
+            Some(AdminTextAction::Broadcast) => {
                 bot.send_message(msg.chat.id, "Выберите получателей рассылки:")
                     .reply_markup(menu::broadcast_audience_menu())
                     .await?;
                 return Ok(());
             }
-            "🆘 Обращения" => {
+            Some(AdminTextAction::Support) => {
                 support_screen(&bot, msg.chat.id, &settings).await?;
                 return Ok(());
             }
-            "⚙️ Настройки" => {
+            Some(AdminTextAction::Settings) => {
                 bot.send_message(
                     msg.chat.id,
                     i18n::settings_title(
@@ -7033,36 +7125,10 @@ async fn callback_handler(
             bot.send_message(chat,"🎟 Управление промокодами\n\nСкидочный код уменьшает цену одной следующей покупки. Legacy-код подтверждает право пользователя подавать неограниченное количество заявок на ранее купленные лично у администратора ключи до 01.12.2026.").reply_markup(menu::admin_promos_menu()).await?;
         }
         Action::AdminCommerce => {
-            let rub = [1, 3, 6, 12]
-                .map(|months| settings.tariff_price_kopecks(months).unwrap_or(0) / 100);
-            let stars = [1, 3, 6, 12].map(|months| settings.tariff_price_stars(months));
-            let stars_text = if stars.iter().all(Option::is_some) {
-                format!(
-                    "{} / {} / {} / {} ⭐",
-                    stars[0].unwrap_or(0),
-                    stars[1].unwrap_or(0),
-                    stars[2].unwrap_or(0),
-                    stars[3].unwrap_or(0)
-                )
-            } else {
-                "не настроены — оплата выключена".to_string()
-            };
-            bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy-продление: {:.2} ₽", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0))
-                .reply_markup(menu::admin_commerce_menu()).await?;
+            admin_commerce_screen(&bot, chat, &settings).await?;
         }
         Action::AdminPartners => {
-            let partners = settings.partners();
-            let active = partners
-                .iter()
-                .filter(|partner| partner.status == "active")
-                .count();
-            let configured = partners
-                .iter()
-                .filter(|partner| partner.bot_secret_ref.is_some())
-                .count();
-            bot.send_message(chat, format!("🤝 Партнёрские боты\n\nВсего: {}\nАктивны для продаж: {active}\nТокен проверен: {configured}\n\nПартнёр использует ваши VPN-серверы по оптовой цене и задаёт собственную розничную наценку. SSH, панельные пароли и основной бот ему не передаются.", partners.len()))
-                .reply_markup(menu::admin_partners_menu(&partners))
-                .await?;
+            admin_partners_screen(&bot, chat, &settings).await?;
         }
         Action::PartnerNew => {
             bot.send_message(chat, "➕ Новый партнёр · шаг 1 из 2\n\nПользователь сначала должен запустить основной бот. Затем отправьте одной строкой:\n\nTELEGRAM_ID | SLUG | НАЗВАНИЕ | ОПТОВАЯ_СКИДКА_% | НАЦЕНКА_%\n\nПример:\n123456789 | ivan-vpn | Ivan VPN | 20 | 35")
@@ -10677,6 +10743,30 @@ mod tests {
     }
 
     #[test]
+    fn every_persistent_admin_button_has_a_text_route() {
+        let keyboard = menu::admin_keyboard();
+        for button in keyboard.keyboard.iter().flatten() {
+            assert!(
+                parse_admin_text(&button.text).is_some(),
+                "admin button {:?} has no message route",
+                button.text
+            );
+        }
+    }
+
+    #[test]
+    fn every_persistent_customer_button_is_navigation() {
+        let keyboard = menu::customer_keyboard();
+        for button in keyboard.keyboard.iter().flatten() {
+            assert!(
+                is_customer_navigation(&button.text),
+                "customer button {:?} has no message route",
+                button.text
+            );
+        }
+    }
+
+    #[test]
     fn group_for_new_client_recreate_preserves_binding() {
         // Recreate не трогает привязку: владелец не отвязывает клиента от его
         // группы, групповой админ не переносит клиента в свою текущую группу.
@@ -11109,35 +11199,65 @@ mod tests {
 
         let keyboards = vec![
             menu::main_menu(Lang::Ru),
+            menu::profile_menu(true),
+            menu::notification_settings_menu(true, true),
+            menu::portal_link_menu("https://example.com/login"),
             menu::admin_dashboard_menu(),
             menu::admin_operations_menu(&[1, 2], true),
             menu::admin_keys_hub(),
             menu::admin_users_hub(),
             menu::admin_communication_hub(),
+            menu::broadcast_templates_menu(),
+            menu::broadcast_report_menu(1, true),
             menu::admin_system_hub(),
+            menu::bot_update_confirm_menu(),
+            menu::bot_update_status_menu(),
             menu::servers_menu(&[]),
+            menu::server_setup_method_menu(1),
             menu::server_card_menu(1),
+            menu::server_inventory_confirm_menu(1, "archive"),
+            menu::server_inventory_confirm_menu(1, "rebind"),
             menu::server_maintenance_confirm_menu(1),
             menu::remote_migration_menu(1),
+            menu::remote_migration_confirm_menu(1),
             menu::vpn_service_menu(),
+            menu::local_migration_menu(),
             menu::admin_create_menu(),
             menu::admin_roles_menu(),
             menu::admin_promos_menu(),
+            menu::admin_commerce_menu(),
             menu::admin_partners_menu(&[]),
             menu::admin_partner_card_menu(1, "active"),
             menu::admin_partner_card_menu(1, "draft"),
             menu::bulk_manage_menu(),
+            menu::bulk_confirm_menu(),
             menu::statistics_menu(),
             menu::admin_user_menu(42, false),
+            menu::admin_user_keys_menu(42, &["alice".into()]),
+            menu::admin_user_delete_keys_confirm_menu(42),
+            menu::buy_terms_menu([100, 200, 300, 400]),
+            menu::buy_balance_confirm_menu(1, 7),
+            menu::buy_method_menu(1, true),
+            menu::bulk_servers_menu(&[]),
+            menu::payment_paid_menu(1),
+            menu::payment_admin_menu(1),
+            menu::finance_menu(),
             menu::broadcast_audience_menu(),
             menu::support_filters_menu(&[]),
             menu::support_category_menu(),
             menu::support_ticket_menu(1),
             menu::support_rating_menu(1),
+            menu::customer_keys_menu(&[("alice".into(), "Alice".into())]),
             menu::customer_key_menu("alice"),
+            menu::expired_subscription_menu("alice"),
+            menu::instructions_menu(),
             menu::installation_platform_menu("alice"),
             menu::troubleshooting_menu("alice"),
             menu::customer_refresh_confirm_menu("alice"),
+            menu::replacement_confirm_menu(1),
+            menu::renew_terms_menu("alice", [100, 200, 300, 400]),
+            menu::auto_renew_menu("alice"),
+            menu::renew_method_menu("alice", 1),
             menu::legacy_renew_menu("old_alice", 100_000),
             menu::legacy_renew_method_menu("old_alice"),
             menu::legacy_restore_menu(false),
@@ -11165,11 +11285,15 @@ mod tests {
             menu::bulk_expiry_menu(Lang::Ru),
             menu::psk_step(Lang::Ru, false),
             menu::psk_step(Lang::Ru, true),
+            menu::add_server_menu(&[]),
+            menu::bulk_psk_step(Lang::Ru, false),
             menu::backup_menu(Lang::Ru),
             menu::backups_list(Lang::Ru, &[sample_backup]),
             menu::backup_card(Lang::Ru, 0),
             menu::confirm_restore(Lang::Ru, 0),
             menu::modify_param_menu(Lang::Ru, "alice"),
+            menu::client_history(Lang::Ru, "alice"),
+            menu::confirm_regen_all(Lang::Ru),
             menu::confirm_restart_menu(Lang::Ru),
             menu::groups_menu(Lang::Ru, &[(sample_group(), 2)]),
             menu::group_card_menu(Lang::Ru, 1, true),

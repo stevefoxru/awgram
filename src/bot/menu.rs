@@ -149,6 +149,10 @@ pub fn admin_keyboard() -> KeyboardMarkup {
             KeyboardButton::new("🔄 Операции"),
             KeyboardButton::new("⚙️ Система"),
         ],
+        vec![
+            KeyboardButton::new("🏷 Цены"),
+            KeyboardButton::new("🤝 Партнёры"),
+        ],
         vec![KeyboardButton::new("👤 Кабинет")],
     ])
     .resize_keyboard()
@@ -2610,8 +2614,10 @@ mod tests {
             "admin:keys",
             "admin:users",
             "admin:finance",
+            "admin:commerce",
             "stats",
             "admin:communication",
+            "admin:operations",
             "admin:system",
             "portal",
             "admin:search",
