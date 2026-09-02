@@ -71,6 +71,7 @@ pub fn customer_keyboard() -> KeyboardMarkup {
             KeyboardButton::new("📖 Инструкция"),
             KeyboardButton::new("🆘 Поддержка"),
         ],
+        vec![KeyboardButton::new("🌐 Веб-кабинет")],
         vec![KeyboardButton::new("🎟 Промокод")],
     ];
     let now = std::time::SystemTime::now()

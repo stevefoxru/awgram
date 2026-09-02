@@ -920,6 +920,7 @@ fn is_customer_navigation(text: &str) -> bool {
                 | "➕ Пополнить"
                 | "📖 Инструкция"
                 | "🆘 Поддержка"
+                | "🌐 Веб-кабинет"
                 | "🎟 Промокод"
                 | "♻️ Восстановить ключи"
         )
@@ -1327,6 +1328,32 @@ async fn customer_dashboard(
     )
     .reply_markup(menu::customer_keyboard())
     .await?;
+    Ok(())
+}
+
+async fn portal_login_screen(
+    bot: &Bot,
+    chat: ChatId,
+    uid: i64,
+    cfg: &Config,
+    settings: &Store,
+) -> HandlerResult {
+    let Some(base) = &cfg.portal_public_url else {
+        bot.send_message(chat, "Веб-кабинет пока не настроен администратором.")
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+        return Ok(());
+    };
+    let Some(token) = settings.issue_portal_token(uid, now_epoch()) else {
+        bot.send_message(chat, "Не удалось создать ссылку входа. Повторите позже.")
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+        return Ok(());
+    };
+    let url = format!("{base}/login?token={token}");
+    bot.send_message(chat, "🌐 Внутренний личный кабинет\n\nСсылка одноразовая и действует 15 минут. После входа сессия сохранится на этом устройстве на 30 дней. Не пересылайте ссылку другим людям.")
+        .reply_markup(menu::portal_link_menu(&url))
+        .await?;
     Ok(())
 }
 
@@ -4586,6 +4613,9 @@ async fn message_handler(
             }
             "🆘 Поддержка" => {
                 customer_support_screen(&bot, msg.chat.id, uid, &settings).await?;
+            }
+            "🌐 Веб-кабинет" => {
+                portal_login_screen(&bot, msg.chat.id, uid, &cfg, &settings).await?;
             }
             "🎟 Промокод" => {
                 bot.send_message(msg.chat.id, "Введите промокод:").await?;
@@ -8181,27 +8211,7 @@ async fn callback_handler(
                 .reply_markup(menu::profile_menu(cfg.portal_public_url.is_some())).await?;
         }
         Action::Portal => {
-            match (
-                &cfg.portal_public_url,
-                settings.issue_portal_token(uid, now_epoch()),
-            ) {
-                (Some(base), Some(token)) => {
-                    let url = format!("{base}/login?token={token}");
-                    bot.send_message(chat, "🌐 Внутренний личный кабинет\n\nСсылка одноразовая и действует 15 минут. После входа сессия сохранится на этом устройстве на 30 дней. Не пересылайте ссылку другим людям.")
-                        .reply_markup(menu::portal_link_menu(&url))
-                        .await?;
-                }
-                (None, _) => {
-                    bot.send_message(chat, "Веб-кабинет пока не настроен администратором.")
-                        .reply_markup(menu::customer_keyboard())
-                        .await?;
-                }
-                _ => {
-                    bot.send_message(chat, "Не удалось создать ссылку входа. Повторите позже.")
-                        .reply_markup(menu::customer_keyboard())
-                        .await?;
-                }
-            }
+            portal_login_screen(&bot, chat, uid, &cfg, &settings).await?;
         }
         Action::PaymentReject(id) => {
             bot.send_message(chat, format!("Укажите причину отказа по заявке #{id}:"))
@@ -10429,6 +10439,7 @@ mod tests {
             "➕ Пополнить",
             "📖 Инструкция",
             "🆘 Поддержка",
+            "🌐 Веб-кабинет",
             "🎟 Промокод",
         ] {
             assert!(is_customer_navigation(text), "{text}");

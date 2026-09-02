@@ -13,6 +13,7 @@ mod events;
 mod groups;
 mod inventory;
 mod nodes;
+mod partners;
 mod portal;
 mod server_enrollment;
 mod servers;
@@ -32,6 +33,7 @@ pub use groups::{
 };
 pub use inventory::{InventoryItem, InventoryReport, KeyRuntimeStats, ServerRuntimeSummary};
 pub use nodes::{InstallationJob, VpnInstance, VpnNode};
+pub use partners::Partner;
 pub use portal::{PortalBalanceEntry, PortalKey, PortalOverview, PortalPayment, PortalTicket};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
@@ -607,6 +609,34 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         maintenance_enabled INTEGER NOT NULL DEFAULT 1,
         updated_at INTEGER NOT NULL
     );
+    "#,
+    // v26: основа партнёрских Telegram-ботов. Секреты намеренно не хранятся
+    // в SQLite: bot_secret_ref указывает на защищённый файл окружения.
+    r#"
+    CREATE TABLE partners(
+        id INTEGER PRIMARY KEY,
+        owner_user_id INTEGER NOT NULL UNIQUE REFERENCES users(user_id),
+        slug TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft'
+            CHECK(status IN ('draft','active','suspended')),
+        wholesale_discount_percent INTEGER NOT NULL DEFAULT 0
+            CHECK(wholesale_discount_percent BETWEEN 0 AND 100),
+        retail_markup_percent INTEGER NOT NULL DEFAULT 0
+            CHECK(retail_markup_percent BETWEEN 0 AND 500),
+        bot_username TEXT,
+        bot_secret_ref TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_partners_status ON partners(status,created_at);
+    CREATE TABLE partner_customers(
+        partner_id INTEGER NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        joined_at INTEGER NOT NULL,
+        PRIMARY KEY(partner_id,user_id)
+    );
+    CREATE INDEX idx_partner_customers_user ON partner_customers(user_id);
     "#,
 ];
 
