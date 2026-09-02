@@ -3255,7 +3255,7 @@ async fn message_handler(
                 return Ok(());
             }
             "👤 Кабинет" => {
-                bot.send_message(msg.chat.id,format!("👤 Администратор\nTelegram ID: {uid}\nЛичный баланс: {:.2} ₽\nЛичных ключей: {}",settings.balance_kopecks(uid) as f64/100.0,settings.user_client_names(uid).len())).reply_markup(menu::admin_keyboard()).await?;
+                bot.send_message(msg.chat.id,format!("👤 Личный кабинет администратора\nTelegram ID: {uid}\nЛичный баланс: {:.2} ₽\nЛичных ключей: {}\n\nНажмите «Открыть веб-кабинет», чтобы получить одноразовую ссылку входа.",settings.balance_kopecks(uid) as f64/100.0,settings.user_client_names(uid).len())).reply_markup(menu::profile_menu(cfg.portal_public_url.is_some())).await?;
                 return Ok(());
             }
             "👥 Клиенты" => {

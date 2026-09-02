@@ -170,7 +170,10 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("💬 Связь", "admin:communication"),
         ],
         vec![cb("🔄 Операции", "admin:operations")],
-        vec![cb("⚙️ Система", "admin:system")],
+        vec![
+            cb("⚙️ Система", "admin:system"),
+            cb("🌐 Веб-кабинет", "portal"),
+        ],
         vec![
             cb("🔎 Поиск", "admin:search"),
             cb("🔄 Обновить", "admin:dashboard"),
@@ -2568,6 +2571,7 @@ mod tests {
             "stats",
             "admin:communication",
             "admin:system",
+            "portal",
             "admin:search",
         ] {
             assert!(
