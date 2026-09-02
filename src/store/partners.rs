@@ -112,7 +112,8 @@ impl Store {
             let mut statement = connection.prepare(&format!(
                 "SELECT {COLUMNS} FROM partners ORDER BY created_at DESC,id DESC"
             ))?;
-            statement.query_map([], row)?.collect()
+            let partners = statement.query_map([], row)?.collect();
+            partners
         })
         .unwrap_or_default()
     }
