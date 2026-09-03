@@ -12,6 +12,9 @@ use axum::{Json, Router};
 use crate::store::Store;
 use crate::vpn::Vpn;
 use hmac::{Hmac, Mac};
+use lettre::message::Mailbox;
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{Message, SmtpTransport, Transport};
 use sha2::Sha256;
 use teloxide::prelude::*;
 
@@ -23,6 +26,7 @@ struct PortalState {
     bot: Bot,
     admin_ids: Arc<Vec<i64>>,
     secure_cookie: bool,
+    smtp: Option<crate::config::SmtpConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -45,6 +49,32 @@ fn session(headers: &HeaderMap) -> Option<&str> {
         .split(';')
         .map(str::trim)
         .find_map(|part| part.strip_prefix("awgram_session="))
+}
+
+fn session_response(session: &str, secure: bool) -> Response {
+    let cookie = format!(
+        "awgram_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
+        30 * 86_400,
+        if secure { "; Secure" } else { "" }
+    );
+    let mut response = Json(serde_json::json!({"ok":true})).into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().expect("cookie is valid"));
+    response
+}
+
+async fn send_email_code(smtp: crate::config::SmtpConfig, email: String, code: String) -> bool {
+    tokio::task::spawn_blocking(move || {
+        let from: Mailbox = smtp.from.parse().ok()?;
+        let to: Mailbox = email.parse().ok()?;
+        let message = Message::builder().from(from).to(to).subject("Код входа ZuevVPN")
+            .body(format!("Код подтверждения ZuevVPN: {code}\n\nОн действует 10 минут. Если вы не запрашивали код, просто проигнорируйте письмо.")).ok()?;
+        let transport = SmtpTransport::relay(&smtp.host).ok()?.port(smtp.port)
+            .credentials(Credentials::new(smtp.username, smtp.password)).build();
+        transport.send(&message).ok()?;
+        Some(())
+    }).await.ok().flatten().is_some()
 }
 
 async fn index() -> Html<&'static str> {
@@ -150,8 +180,142 @@ async fn portal_session(State(state): State<PortalState>, headers: HeaderMap) ->
         "user_id": user_id,
         "role": if state.admin_ids.contains(&user_id) { "owner" } else { "customer" },
         "is_admin": state.admin_ids.contains(&user_id),
+        "email": state.store.portal_email(user_id),
+        "email_login_enabled": state.smtp.is_some(),
     }))
     .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct EmailRequest {
+    email: String,
+}
+
+#[derive(serde::Deserialize)]
+struct EmailConfirm {
+    email: String,
+    code: String,
+}
+
+fn valid_email(value: &str) -> bool {
+    let value = value.trim();
+    value.len() <= 254
+        && value
+            .split_once('@')
+            .is_some_and(|(a, b)| !a.is_empty() && b.contains('.') && !b.ends_with('.'))
+}
+
+async fn request_email_bind(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<EmailRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(smtp) = state.smtp.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Почтовый шлюз не настроен").into_response();
+    };
+    if !valid_email(&input.email)
+        || state
+            .store
+            .verified_user_by_email(&input.email)
+            .is_some_and(|id| id != user_id)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let code = format!("{:06}", rand::random_range(0..1_000_000));
+    if !state
+        .store
+        .request_email_code(user_id, &input.email, "bind", &code, now_epoch())
+    {
+        return (StatusCode::TOO_MANY_REQUESTS, "Повторите через минуту").into_response();
+    }
+    if !send_email_code(smtp, input.email, code).await {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    Json(serde_json::json!({"ok":true,"expires_in":600})).into_response()
+}
+
+async fn confirm_email_bind(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<EmailConfirm>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if state.store.confirm_email_code(
+        user_id,
+        &input.email,
+        "bind",
+        input.code.trim(),
+        now_epoch(),
+    ) {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        (StatusCode::BAD_REQUEST, "Неверный или просроченный код").into_response()
+    }
+}
+
+async fn request_email_login(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<EmailRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(smtp) = state.smtp.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Почтовый вход не настроен").into_response();
+    };
+    if valid_email(&input.email) {
+        if let Some(user_id) = state.store.verified_user_by_email(&input.email) {
+            let code = format!("{:06}", rand::random_range(0..1_000_000));
+            if state
+                .store
+                .request_email_code(user_id, &input.email, "login", &code, now_epoch())
+            {
+                let _ = send_email_code(smtp, input.email, code).await;
+            }
+        }
+    }
+    Json(serde_json::json!({"ok":true,"message":"Если адрес подтверждён, письмо уже отправлено"}))
+        .into_response()
+}
+
+async fn confirm_email_login(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<EmailConfirm>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = state.store.verified_user_by_email(&input.email) else {
+        return (StatusCode::BAD_REQUEST, "Неверный или просроченный код").into_response();
+    };
+    if !state.store.confirm_email_code(
+        user_id,
+        &input.email,
+        "login",
+        input.code.trim(),
+        now_epoch(),
+    ) {
+        return (StatusCode::BAD_REQUEST, "Неверный или просроченный код").into_response();
+    }
+    match state.store.create_portal_session(user_id, now_epoch()) {
+        Some(value) => session_response(&value, state.secure_cookie),
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) -> Response {
@@ -573,7 +737,16 @@ pub async fn run(
     bot: Bot,
     admin_ids: Vec<i64>,
     secure_cookie: bool,
+    smtp: Option<crate::config::SmtpConfig>,
 ) -> std::io::Result<()> {
+    let smtp = if secure_cookie {
+        smtp
+    } else {
+        if smtp.is_some() {
+            tracing::warn!("вход по почте отключён: portal_public_url должен использовать HTTPS");
+        }
+        None
+    };
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let app = Router::new()
         .route("/", get(index))
@@ -581,6 +754,10 @@ pub async fn run(
         .route("/assets/app.js", get(frontend_js))
         .route("/login", get(login))
         .route("/api/session", get(portal_session))
+        .route("/api/email/bind/request", post(request_email_bind))
+        .route("/api/email/bind/confirm", post(confirm_email_bind))
+        .route("/api/email/login/request", post(request_email_login))
+        .route("/api/email/login/confirm", post(confirm_email_login))
         .route("/api/me", get(me))
         .route("/api/admin/overview", get(admin_overview))
         .route("/api/logout", post(logout))
@@ -599,6 +776,7 @@ pub async fn run(
             bot,
             admin_ids: Arc::new(admin_ids),
             secure_cookie,
+            smtp,
         });
     tracing::info!(bind, "внутренний личный кабинет запущен");
     axum::serve(listener, app).await
@@ -637,7 +815,7 @@ fetch('/api/me').then(async r=>{if(!r.ok)throw 0;return r.json()}).then(d=>{
 
 #[cfg(test)]
 mod tests {
-    use super::same_site_request;
+    use super::{same_site_request, valid_email};
     use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -648,5 +826,13 @@ mod tests {
         assert!(same_site_request(&headers));
         headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
         assert!(!same_site_request(&headers));
+    }
+
+    #[test]
+    fn email_validation_rejects_incomplete_addresses() {
+        assert!(valid_email("user@example.ru"));
+        assert!(!valid_email("user"));
+        assert!(!valid_email("@example.ru"));
+        assert!(!valid_email("user@example."));
     }
 }

@@ -17,3 +17,10 @@ db_path = "/var/lib/awgram/awgram.db"
 # portal_bind = "127.0.0.1:8787"
 # portal_public_url = "https://cabinet.example.ru"
 # acquiring_webhook_secret = "случайный секрет не короче 32 символов"
+
+# Резервный вход по подтверждённой электронной почте. Пароль SMTP храните только
+# в /etc/awgram/env как AWGRAM_SMTP_PASSWORD=...
+# smtp_host = "smtp.example.ru"
+# smtp_port = 587
+# smtp_username = "cabinet@example.ru"
+# smtp_from = "ZuevVPN <cabinet@example.ru>"

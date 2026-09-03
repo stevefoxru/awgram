@@ -709,6 +709,25 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX idx_key_transfers_pending_client ON key_transfers(client_name) WHERE status='pending';
     CREATE INDEX idx_key_transfers_recipient ON key_transfers(to_user_id,status,created_at);
     "#,
+    // v31: подтверждённая почта и одноразовые коды резервного веб-входа.
+    r#"
+    ALTER TABLE users ADD COLUMN email TEXT;
+    ALTER TABLE users ADD COLUMN email_verified_at INTEGER;
+    CREATE UNIQUE INDEX idx_users_verified_email ON users(lower(email)) WHERE email_verified_at IS NOT NULL;
+    CREATE TABLE email_codes(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        email TEXT NOT NULL,
+        purpose TEXT NOT NULL CHECK(purpose IN ('bind','login')),
+        salt TEXT NOT NULL,
+        code_hash TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER
+    );
+    CREATE INDEX idx_email_codes_lookup ON email_codes(lower(email),purpose,created_at);
+    "#,
 ];
 
 pub struct Store {

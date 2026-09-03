@@ -14,6 +14,16 @@ pub struct Config {
     pub portal_bind: Option<String>,
     pub portal_public_url: Option<String>,
     pub acquiring_webhook_secret: Option<String>,
+    pub smtp: Option<SmtpConfig>,
+}
+
+#[derive(Clone)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub from: String,
 }
 
 impl std::fmt::Debug for Config {
@@ -34,6 +44,7 @@ impl std::fmt::Debug for Config {
                 "acquiring_webhook_secret",
                 &self.acquiring_webhook_secret.as_ref().map(|_| "<redacted>"),
             )
+            .field("smtp", &self.smtp.as_ref().map(|_| "<configured>"))
             .finish()
     }
 }
@@ -74,6 +85,18 @@ struct Raw {
     portal_public_url: Option<String>,
     #[serde(default)]
     acquiring_webhook_secret: Option<String>,
+    #[serde(default)]
+    smtp_host: Option<String>,
+    #[serde(default = "default_smtp_port")]
+    smtp_port: u16,
+    #[serde(default)]
+    smtp_username: Option<String>,
+    #[serde(default)]
+    smtp_from: Option<String>,
+}
+
+fn default_smtp_port() -> u16 {
+    587
 }
 
 fn default_timeout() -> u64 {
@@ -106,6 +129,28 @@ impl Config {
             return Err(ConfigError::ScriptNotFound(raw.manage_script));
         }
 
+        let smtp_password = std::env::var("AWGRAM_SMTP_PASSWORD")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let smtp = match (
+            raw.smtp_host,
+            raw.smtp_username,
+            raw.smtp_from,
+            smtp_password,
+        ) {
+            (Some(host), Some(username), Some(from), Some(password))
+                if !host.trim().is_empty() && from.contains('@') =>
+            {
+                Some(SmtpConfig {
+                    host,
+                    port: raw.smtp_port,
+                    username,
+                    password,
+                    from,
+                })
+            }
+            _ => None,
+        };
         Ok(Config {
             bot_token,
             admin_ids: raw.admin_ids,
@@ -124,6 +169,7 @@ impl Config {
             acquiring_webhook_secret: raw
                 .acquiring_webhook_secret
                 .filter(|value| value.len() >= 32),
+            smtp,
         })
     }
 }

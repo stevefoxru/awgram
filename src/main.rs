@@ -46,6 +46,7 @@ async fn main() {
         let webhook_secret = cfg.acquiring_webhook_secret.clone();
         let portal_bot = bot.clone();
         let portal_admins = cfg.admin_ids.clone();
+        let portal_smtp = cfg.smtp.clone();
         let secure_cookie = cfg
             .portal_public_url
             .as_deref()
@@ -59,6 +60,7 @@ async fn main() {
                 portal_bot,
                 portal_admins,
                 secure_cookie,
+                portal_smtp,
             )
             .await
             {
