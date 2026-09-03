@@ -1582,6 +1582,31 @@ impl Store {
         }).ok()
     }
 
+    pub fn create_web_purchase_request(
+        &self,
+        user_id: i64,
+        months: i64,
+        amount_kopecks: i64,
+        server_id: i64,
+        now: i64,
+    ) -> Option<i64> {
+        if !matches!(months, 1 | 3 | 6 | 12) || amount_kopecks <= 0 {
+            return None;
+        }
+        self.with_conn(|connection| {
+            let changed = connection.execute(
+                "INSERT INTO payment_requests(user_id,months,amount_kopecks,method,server_id,created_at)
+                 SELECT ?1,?2,?3,'manual',?4,?5
+                 WHERE EXISTS(SELECT 1 FROM vpn_servers WHERE id=?4 AND status='online' AND enabled_for_provisioning=1)
+                   AND NOT EXISTS(SELECT 1 FROM payment_requests WHERE user_id=?1 AND months>0 AND status='pending')",
+                rusqlite::params![user_id, months, amount_kopecks, server_id, now],
+            )?;
+            Ok((changed == 1).then(|| connection.last_insert_rowid()))
+        })
+        .ok()
+        .flatten()
+    }
+
     pub fn create_renewal_request(
         &self,
         user_id: i64,

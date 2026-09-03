@@ -728,6 +728,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_email_codes_lookup ON email_codes(lower(email),purpose,created_at);
     "#,
+    // v32: одна почта соответствует одной учётной записи, включая ещё не
+    // подтверждённую регистрацию непосредственно на сайте.
+    r#"
+    CREATE UNIQUE INDEX idx_users_email ON users(lower(email)) WHERE email IS NOT NULL;
+    "#,
 ];
 
 pub struct Store {

@@ -64,6 +64,47 @@ fn token_hash(token: &str) -> String {
 }
 
 impl Store {
+    pub fn email_user(&self, email: &str) -> Option<i64> {
+        self.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT user_id FROM users WHERE lower(email)=lower(?1)",
+                    [email.trim()],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
+    pub fn ensure_email_user(&self, email: &str, now: i64) -> Option<i64> {
+        let email = email.trim().to_lowercase();
+        if let Some(user_id) = self.email_user(&email) {
+            return Some(user_id);
+        }
+        let display = email.split('@').next().unwrap_or("Клиент сайта");
+        for _ in 0..8 {
+            let user_id = -rand::random_range(1_000_000_000_i64..9_000_000_000_i64);
+            let inserted = self
+                .with_conn(|connection| {
+                    connection.execute(
+                        "INSERT OR IGNORE INTO users(user_id,display_name,email,created_at,last_seen)
+                         VALUES(?1,?2,?3,?4,?4)",
+                        rusqlite::params![user_id, display, email, now],
+                    )
+                })
+                .unwrap_or_default();
+            if inserted == 1 {
+                return Some(user_id);
+            }
+            if let Some(existing) = self.email_user(&email) {
+                return Some(existing);
+            }
+        }
+        None
+    }
+
     pub fn portal_email(&self, user_id: i64) -> Option<String> {
         self.with_conn(|connection| {
             connection
@@ -389,5 +430,19 @@ mod tests {
             assert!(!store.confirm_email_code(7, "a@example.ru", "bind", "000000", 130));
         }
         assert!(!store.confirm_email_code(7, "a@example.ru", "bind", "123456", 131));
+    }
+
+    #[test]
+    fn new_customer_can_register_with_email_without_telegram() {
+        let store = Store::open_in_memory();
+        let user_id = store.ensure_email_user("new@example.ru", 100).unwrap();
+        assert!(user_id < 0);
+        assert_eq!(store.email_user("NEW@example.ru"), Some(user_id));
+        assert!(store.request_email_code(user_id, "new@example.ru", "bind", "123456", 101));
+        assert!(store.confirm_email_code(user_id, "new@example.ru", "bind", "123456", 102));
+        assert_eq!(
+            store.portal_email(user_id).as_deref(),
+            Some("new@example.ru")
+        );
     }
 }

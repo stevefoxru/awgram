@@ -88,6 +88,72 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn catalog(State(state): State<PortalState>) -> Response {
+    let tariffs = [1_i64, 3, 6, 12]
+        .into_iter()
+        .filter_map(|months| {
+            state
+                .store
+                .tariff_price_kopecks(months)
+                .map(|price| serde_json::json!({"months":months,"price_kopecks":price}))
+        })
+        .collect::<Vec<_>>();
+    let servers = state.store.available_vpn_servers().into_iter().map(|server| serde_json::json!({
+        "id":server.id,"name":server.name,"location":server.location,"protocol":"AWG 1.0",
+        "available":server.capacity.saturating_sub(state.store.server_client_count(server.id)).max(0)
+    })).collect::<Vec<_>>();
+    Json(serde_json::json!({"brand":"ZuevVPN","tariffs":tariffs,"servers":servers})).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct PurchaseRequest {
+    months: i64,
+    server_id: i64,
+}
+
+async fn create_purchase(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<PurchaseRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let available = state
+        .store
+        .available_vpn_servers()
+        .into_iter()
+        .any(|server| server.id == input.server_id);
+    let Some(base) = state
+        .store
+        .tariff_price_kopecks(input.months)
+        .filter(|price| *price > 0)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !available {
+        return (
+            StatusCode::CONFLICT,
+            "Выбранный сервер сейчас недоступен для новых ключей",
+        )
+            .into_response();
+    }
+    let discount = state
+        .store
+        .peek_purchase_discount(user_id, now_epoch())
+        .clamp(0, 100);
+    let amount = base.saturating_mul(100 - discount) / 100;
+    match state.store.create_web_purchase_request(user_id,input.months,amount,input.server_id,now_epoch()) {
+        Some(id)=>Json(serde_json::json!({"ok":true,"payment_id":id,"amount_kopecks":amount,"discount_percent":discount,"instructions":state.store.payment_instructions()})).into_response(),
+        None=>(StatusCode::CONFLICT,"У вас уже есть незавершённая заявка или выбранный сервер недоступен").into_response(),
+    }
+}
+
 async fn frontend_css() -> ([(&'static str, &'static str); 1], &'static str) {
     (
         [(header::CONTENT_TYPE.as_str(), "text/css; charset=utf-8")],
@@ -285,11 +351,16 @@ async fn request_email_login(
         return (StatusCode::SERVICE_UNAVAILABLE, "Почтовый вход не настроен").into_response();
     };
     if valid_email(&input.email) {
-        if let Some(user_id) = state.store.verified_user_by_email(&input.email) {
+        if let Some(user_id) = state.store.ensure_email_user(&input.email, now_epoch()) {
+            let purpose = if state.store.portal_email(user_id).is_some() {
+                "login"
+            } else {
+                "bind"
+            };
             let code = format!("{:06}", rand::random_range(0..1_000_000));
             if state
                 .store
-                .request_email_code(user_id, &input.email, "login", &code, now_epoch())
+                .request_email_code(user_id, &input.email, purpose, &code, now_epoch())
             {
                 let _ = send_email_code(smtp, input.email, code).await;
             }
@@ -307,13 +378,18 @@ async fn confirm_email_login(
     if !same_site_request(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some(user_id) = state.store.verified_user_by_email(&input.email) else {
+    let Some(user_id) = state.store.email_user(&input.email) else {
         return (StatusCode::BAD_REQUEST, "Неверный или просроченный код").into_response();
+    };
+    let purpose = if state.store.portal_email(user_id).is_some() {
+        "login"
+    } else {
+        "bind"
     };
     if !state.store.confirm_email_code(
         user_id,
         &input.email,
-        "login",
+        purpose,
         input.code.trim(),
         now_epoch(),
     ) {
@@ -363,6 +439,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "keys": {"total": clients.len(), "online": online},
         "servers": servers,
         "payments_pending": state.store.pending_payments().len(),
+        "revenue_kopecks": state.store.approved_revenue_kopecks(),
         "support_open": state.store.open_support_count(),
     }))
     .into_response()
@@ -757,6 +834,7 @@ pub async fn run(
         .route("/assets/app.css", get(frontend_css))
         .route("/assets/app.js", get(frontend_js))
         .route("/login", get(login))
+        .route("/api/catalog", get(catalog))
         .route("/api/session", get(portal_session))
         .route("/api/email/bind/request", post(request_email_bind))
         .route("/api/email/bind/confirm", post(confirm_email_bind))
@@ -770,6 +848,7 @@ pub async fn run(
         .route("/api/support", post(support))
         .route("/api/notifications", post(update_notifications))
         .route("/api/payments/topup", post(create_topup))
+        .route("/api/purchases", post(create_purchase))
         .route("/api/payments/{id}/proof", post(submit_payment_proof))
         .route("/api/payments/webhook", post(acquiring_webhook))
         .layer(middleware::from_fn(security_headers))
