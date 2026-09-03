@@ -725,6 +725,10 @@ fn parse_callback(data: &str) -> Action {
                 }
             } else if let Some(v) = data.strip_prefix("page:") {
                 v.parse().map(Action::Page).unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("show:") {
+                // Старые и текущие списки клиентов используют show:NAME;
+                // client:NAME остаётся совместимым псевдонимом.
+                Action::ShowClient(v.to_string())
             } else if let Some(v) = data.strip_prefix("client:") {
                 Action::ShowClient(v.to_string())
             } else if let Some(v) = data.strip_prefix("conf:") {
