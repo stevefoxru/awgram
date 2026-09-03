@@ -9,12 +9,14 @@ set -euo pipefail
 SCRIPT_VERSION="1.0.0"
 REPO="stevefoxru/awgram"
 BIN_PATH="/usr/local/bin/awgram"
+PARTNER_BIN_PATH="/usr/local/bin/awgram-partners"
 SETUP_PATH="/usr/local/bin/awgram-setup"
 CFG_DIR="/etc/awgram"
 CFG_FILE="$CFG_DIR/config.toml"
 ENV_FILE="$CFG_DIR/env"
 SETUP_CONF="$CFG_DIR/setup.conf"
 UNIT_FILE="/etc/systemd/system/awgram.service"
+PARTNER_UNIT_FILE="/etc/systemd/system/awgram-partners.service"
 SUDOERS_FILE="/etc/sudoers.d/awgram"
 CLIENTCTL_PATH="/usr/local/libexec/awgram-clientctl"
 UPDATECTL_PATH="/usr/local/libexec/awgram-updatectl"
@@ -397,10 +399,26 @@ fetch_binary() { # $1=tag; вызывающий обязан выставить 
   printf '%s\n' "$TMPD/awgram-linux-$ARCH"
 }
 
+fetch_partner_binary() { # $1=tag; stdout=путь, для локальной сборки — пусто
+  local tag="$1" url
+  [ "$tag" != "local" ] || return 0
+  url="https://github.com/$REPO/releases/download/$tag/awgram-partners-linux-$ARCH"
+  curl -fSL "${CURL_BASE[@]}" --max-time 600 --progress-bar -o "$TMPD/awgram-partners-linux-$ARCH" "$url" >&2 || die err_download "$url"
+  curl -fsSL "${CURL_BASE[@]}" --max-time 30 -o "$TMPD/awgram-partners-linux-$ARCH.sha256" "$url.sha256" || die err_download "$url.sha256"
+  (cd "$TMPD" && sha256sum -c "awgram-partners-linux-$ARCH.sha256" >/dev/null 2>&1) || die err_sha
+  printf '%s\n' "$TMPD/awgram-partners-linux-$ARCH"
+}
+
 install_binary() { # $1=staged
   [ -f "$BIN_PATH" ] && cp -f "$BIN_PATH" "$BIN_PATH.bak"
   install -m 755 "$1" "$BIN_PATH.new"
   mv -f "$BIN_PATH.new" "$BIN_PATH"
+}
+
+install_partner_binary() { # $1=staged
+  [ -n "${1:-}" ] || return 0
+  install -m 755 "$1" "$PARTNER_BIN_PATH.new"
+  mv -f "$PARTNER_BIN_PATH.new" "$PARTNER_BIN_PATH"
 }
 
 # ---------- конфигурация ----------
@@ -741,6 +759,26 @@ NoNewPrivileges=false
 [Install]
 WantedBy=multi-user.target
 EOF
+  cat > "$PARTNER_UNIT_FILE" <<EOF
+[Unit]
+Description=awgram — isolated partner Telegram bots
+After=network-online.target awgram.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+${user_line}
+ExecStart=$PARTNER_BIN_PATH
+Environment=AWGRAM_CONFIG=$CFG_FILE
+EnvironmentFile=-$ENV_FILE
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 wait_active() {
@@ -766,6 +804,7 @@ start_service() {
   if ! is_systemd; then warn warn_no_systemd; return 0; fi
   systemctl daemon-reload
   systemctl enable --now awgram >/dev/null 2>&1 || true
+  [ ! -x "$PARTNER_BIN_PATH" ] || systemctl enable --now awgram-partners >/dev/null 2>&1 || true
   if wait_active; then info svc_ok; return 0; fi
   warn svc_failed
   journalctl -u awgram -n 20 --no-pager >&2 || true
@@ -869,13 +908,15 @@ CONTROLLER
   validate_path "$CLIENTS_DIR" || die err_bad_path "$CLIENTS_DIR"
   validate_abs "$CLIENTS_DIR" || die err_path_not_abs "$CLIENTS_DIR"
   # бинарник
-  local tag staged
+  local tag staged partner_staged
   if [ -n "$PIN_VERSION" ]; then tag="$PIN_VERSION"
   elif [ -n "$BINARY_FILE" ]; then tag="local"
   else tag="$(fetch_latest_tag "${CHANNEL:-stable}")"; fi
   TMPD="$(mktemp -d)"
   staged="$(fetch_binary "$tag")"
+  partner_staged="$(fetch_partner_binary "$tag")"
   install_binary "$staged"
+  install_partner_binary "$partner_staged"
   install_clientctl
   install_updatectl
   install_deployctl
@@ -1045,7 +1086,7 @@ setup_hardened() {
 cmd_update() {
   ensure_root; acquire_lock; init_tty; load_setup_conf; choose_language; detect_os; detect_arch
   [ -x "$BIN_PATH" ] || die err_not_installed
-  local tag staged
+  local tag staged partner_staged
   if [ -n "$PIN_VERSION" ]; then tag="$PIN_VERSION"
   elif [ -n "$BINARY_FILE" ]; then tag="local"
   else tag="$(fetch_latest_tag "${CHANNEL:-stable}")"; fi
@@ -1065,14 +1106,19 @@ cmd_update() {
   fi
   TMPD="$(mktemp -d)"
   staged="$(fetch_binary "$tag")"
+  partner_staged="$(fetch_partner_binary "$tag")"
   install_binary "$staged"
+  install_partner_binary "$partner_staged"
   install_clientctl
   install_updatectl
   install_deployctl
   install_migratectl
   if [ "$MODE" = "hardened" ]; then write_sudoers; fi
   if is_systemd; then
+    install_unit
+    systemctl daemon-reload
     systemctl restart awgram 2>/dev/null || true
+    [ ! -x "$PARTNER_BIN_PATH" ] || systemctl enable --now awgram-partners >/dev/null 2>&1 || true
     if ! wait_active; then
       warn svc_failed
       journalctl -u awgram -n 20 --no-pager >&2 || true
@@ -1207,8 +1253,9 @@ cmd_uninstall() {
   confirm q_uninstall || return 0
   if is_systemd; then
     systemctl disable --now awgram >/dev/null 2>&1 || true
+    systemctl disable --now awgram-partners >/dev/null 2>&1 || true
   fi
-  rm -f "$UNIT_FILE" "$SUDOERS_FILE" "$BIN_PATH" "$BIN_PATH.bak"
+  rm -f "$UNIT_FILE" "$PARTNER_UNIT_FILE" "$SUDOERS_FILE" "$BIN_PATH" "$BIN_PATH.bak" "$PARTNER_BIN_PATH" "$PARTNER_BIN_PATH.new"
   if is_systemd; then
     systemctl daemon-reload || true
   fi

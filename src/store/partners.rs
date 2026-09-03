@@ -17,6 +17,18 @@ pub struct Partner {
     pub updated_at: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartnerOrder {
+    pub id: i64,
+    pub partner_id: i64,
+    pub user_id: i64,
+    pub months: i64,
+    pub retail_price_kopecks: i64,
+    pub wholesale_price_kopecks: i64,
+    pub status: String,
+    pub created_at: i64,
+}
+
 const COLUMNS: &str = "id,owner_user_id,slug,display_name,status,wholesale_discount_percent,retail_markup_percent,bot_username,bot_secret_ref,created_at,updated_at";
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Partner> {
@@ -45,6 +57,69 @@ fn valid_slug(value: &str) -> bool {
 }
 
 impl Store {
+    pub fn create_partner_order(
+        &self,
+        partner_id: i64,
+        user_id: i64,
+        months: i64,
+        now: i64,
+    ) -> Result<PartnerOrder, String> {
+        if !matches!(months, 1 | 3 | 6 | 12) {
+            return Err("доступны сроки 1, 3, 6 или 12 месяцев".into());
+        }
+        let partner = self.partner(partner_id).ok_or("партнёр не найден")?;
+        if partner.status != "active" {
+            return Err("партнёрский бот временно приостановлен".into());
+        }
+        let already_pending = self
+            .with_conn(|connection| {
+                connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM partner_orders WHERE partner_id=?1 AND user_id=?2 AND status='pending')",
+                    rusqlite::params![partner_id, user_id],
+                    |row| row.get::<_, bool>(0),
+                )
+            })
+            .unwrap_or(false);
+        if already_pending {
+            return Err("у вас уже есть заявка, ожидающая обработки".into());
+        }
+        let base = self
+            .tariff_price_kopecks(months)
+            .ok_or("тариф для выбранного срока не настроен")?;
+        let percentage = |value: i64, percent: i64| -> Result<i64, String> {
+            let result = i128::from(value) * i128::from(percent) / 100;
+            i64::try_from(result).map_err(|_| "цена выходит за допустимый диапазон".into())
+        };
+        let retail = base
+            .checked_add(percentage(base, partner.retail_markup_percent)?)
+            .ok_or("цена выходит за допустимый диапазон")?;
+        let wholesale = base
+            .checked_sub(percentage(base, partner.wholesale_discount_percent)?)
+            .ok_or("цена выходит за допустимый диапазон")?;
+        self.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO partner_orders(partner_id,user_id,months,retail_price_kopecks,wholesale_price_kopecks,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)",
+                rusqlite::params![partner_id, user_id, months, retail, wholesale, now],
+            )?;
+            Ok(PartnerOrder {
+                id: connection.last_insert_rowid(), partner_id, user_id, months,
+                retail_price_kopecks: retail, wholesale_price_kopecks: wholesale,
+                status: "pending".into(), created_at: now,
+            })
+        }).map_err(|error| format!("не удалось оформить заказ: {error}"))
+    }
+
+    pub fn partner_pending_order_count(&self, partner_id: i64) -> i64 {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM partner_orders WHERE partner_id=?1 AND status='pending'",
+                [partner_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap_or(0)
+    }
+
     pub fn create_partner(
         &self,
         owner_user_id: i64,
@@ -221,5 +296,23 @@ mod tests {
         assert!(store
             .create_partner(7, "seller", "Seller", 101, 0, 2)
             .is_err());
+    }
+
+    #[test]
+    fn partner_order_freezes_retail_and_wholesale_prices() {
+        let store = Store::open_in_memory();
+        store.upsert_user(7, None, "Seller", None, 1);
+        store.upsert_user(8, None, "Buyer", None, 1);
+        let id = store
+            .create_partner(7, "seller", "Seller", 20, 25, 2)
+            .unwrap();
+        assert!(store.set_partner_status(id, "active", 3));
+        let base = store.tariff_price_kopecks(1).unwrap();
+        let order = store.create_partner_order(id, 8, 1, 4).unwrap();
+        assert_eq!(order.retail_price_kopecks, base * 125 / 100);
+        assert_eq!(order.wholesale_price_kopecks, base * 80 / 100);
+        assert_eq!(store.partner_pending_order_count(id), 1);
+        assert!(store.set_partner_status(id, "suspended", 5));
+        assert!(store.create_partner_order(id, 8, 1, 6).is_err());
     }
 }

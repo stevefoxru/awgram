@@ -33,7 +33,7 @@ pub use groups::{
 };
 pub use inventory::{InventoryItem, InventoryReport, KeyRuntimeStats, ServerRuntimeSummary};
 pub use nodes::{InstallationJob, VpnInstance, VpnNode};
-pub use partners::Partner;
+pub use partners::{Partner, PartnerOrder};
 pub use portal::{PortalBalanceEntry, PortalKey, PortalOverview, PortalPayment, PortalTicket};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
@@ -637,6 +637,26 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(partner_id,user_id)
     );
     CREATE INDEX idx_partner_customers_user ON partner_customers(user_id);
+    "#,
+    // v27: заказы дочерних партнёрских ботов. Обе цены фиксируются в момент
+    // оформления, поэтому изменение тарифов и условий партнёра не переписывает
+    // историю и будущие взаиморасчёты.
+    r#"
+    CREATE TABLE partner_orders(
+        id INTEGER PRIMARY KEY,
+        partner_id INTEGER NOT NULL REFERENCES partners(id),
+        user_id INTEGER NOT NULL REFERENCES users(user_id),
+        months INTEGER NOT NULL CHECK(months IN (1,3,6,12)),
+        retail_price_kopecks INTEGER NOT NULL CHECK(retail_price_kopecks >= 0),
+        wholesale_price_kopecks INTEGER NOT NULL CHECK(wholesale_price_kopecks >= 0),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','fulfilled','cancelled')),
+        fulfilled_client_name TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_partner_orders_partner ON partner_orders(partner_id,status,created_at);
+    CREATE INDEX idx_partner_orders_user ON partner_orders(user_id,created_at);
+    CREATE UNIQUE INDEX idx_partner_orders_one_pending ON partner_orders(partner_id,user_id) WHERE status='pending';
     "#,
 ];
 

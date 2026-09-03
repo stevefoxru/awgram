@@ -7147,7 +7147,7 @@ async fn callback_handler(
                     .as_deref()
                     .map(|username| format!("@{username}"))
                     .unwrap_or_else(|| "не подключён".into());
-                bot.send_message(chat, format!("🤝 {}\n\nID: #{}\nВладелец: {}\nSlug: {}\nСтатус: {status}\nTelegram-бот: {bot_name}\nОптовая скидка: {}%\nРозничная наценка: {}%\nПокупателей: {}\n\nСекрет токена хранится отдельно и в карточке не отображается.", partner.display_name, partner.id, partner.owner_user_id, partner.slug, partner.wholesale_discount_percent, partner.retail_markup_percent, settings.partner_customer_count(id)))
+                bot.send_message(chat, format!("🤝 {}\n\nID: #{}\nВладелец: {}\nSlug: {}\nСтатус: {status}\nTelegram-бот: {bot_name}\nОптовая скидка: {}%\nРозничная наценка: {}%\nПокупателей: {}\nОжидают обработки: {}\n\nСекрет токена хранится отдельно и в карточке не отображается.", partner.display_name, partner.id, partner.owner_user_id, partner.slug, partner.wholesale_discount_percent, partner.retail_markup_percent, settings.partner_customer_count(id), settings.partner_pending_order_count(id)))
                     .reply_markup(menu::admin_partner_card_menu(id, &partner.status))
                     .await?;
             } else {
@@ -7163,7 +7163,7 @@ async fn callback_handler(
                 .is_some_and(|partner| status != "active" || partner.bot_secret_ref.is_some());
             if allowed && ready && settings.set_partner_status(id, &status, now_epoch()) {
                 let text = if status == "active" {
-                    "✅ Партнёр допущен к следующему этапу запуска продаж."
+                    "✅ Партнёрский бот активирован. Запуск произойдёт автоматически в течение 10 секунд."
                 } else {
                     "⏸ Партнёр приостановлен."
                 };
