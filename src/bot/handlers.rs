@@ -972,7 +972,9 @@ enum AdminTextAction {
 
 fn parse_admin_text(text: &str) -> Option<AdminTextAction> {
     Some(match text {
-        "/start" | "🏠 Админ-панель" => AdminTextAction::Dashboard,
+        "/start" | "🏠 Админ-панель" | "🏠 Кабинет" => {
+            AdminTextAction::Dashboard
+        }
         "🔎 Поиск" => AdminTextAction::Search,
         "🖥 Серверы" => AdminTextAction::Servers,
         "🔑 Ключи" => AdminTextAction::Keys,
@@ -3927,12 +3929,16 @@ async fn message_handler(
     }
     if let State::AwaitingDeviceLabel { name } = state.clone() {
         if settings.set_device_label(&name, uid, msg.text().unwrap_or_default()) {
-            bot.send_message(
-                msg.chat.id,
-                format!("✅ Название устройства для ключа {name} сохранено."),
-            )
-            .reply_markup(menu::customer_keyboard())
-            .await?;
+            let text = format!("✅ Название устройства для ключа {name} сохранено.");
+            if role.is_owner() {
+                bot.send_message(msg.chat.id, text)
+                    .reply_markup(menu::admin_keyboard())
+                    .await?;
+            } else {
+                bot.send_message(msg.chat.id, text)
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+            }
         } else {
             bot.send_message(
                 msg.chat.id,
@@ -11027,6 +11033,14 @@ mod tests {
                 button.text
             );
         }
+    }
+
+    #[test]
+    fn stale_customer_dashboard_button_restores_admin_dashboard() {
+        assert_eq!(
+            parse_admin_text("🏠 Кабинет"),
+            Some(AdminTextAction::Dashboard)
+        );
     }
 
     #[test]
