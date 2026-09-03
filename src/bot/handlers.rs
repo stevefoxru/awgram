@@ -5074,13 +5074,18 @@ async fn message_handler(
                             if let Some(m) = waiting {
                                 let _ = bot.delete_message(msg.chat.id, m.id).await;
                             }
-                            bot.send_message(
-                                msg.chat.id,
-                                i18n::modify_done(lang, param, &out.value),
-                            )
-                            .reply_markup(menu::main_menu(lang))
-                            .parse_mode(ParseMode::Html)
-                            .await?;
+                            let text = i18n::modify_done(lang, param, &out.value);
+                            if role.is_owner() {
+                                bot.send_message(msg.chat.id, text)
+                                    .reply_markup(menu::admin_keyboard())
+                                    .parse_mode(ParseMode::Html)
+                                    .await?;
+                            } else {
+                                bot.send_message(msg.chat.id, text)
+                                    .reply_markup(home_menu(&role, lang))
+                                    .parse_mode(ParseMode::Html)
+                                    .await?;
+                            }
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "modify провалился");
