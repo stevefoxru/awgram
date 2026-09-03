@@ -1347,7 +1347,10 @@ impl Store {
         subject: &str,
         now: i64,
     ) -> Option<i64> {
-        let category = if matches!(category, "connection" | "payment" | "bug" | "general") {
+        let category = if matches!(
+            category,
+            "connection" | "payment" | "bug" | "general" | "partner" | "router"
+        ) {
             category
         } else {
             "general"
@@ -1721,6 +1724,35 @@ impl Store {
         })
         .map(|n| n == 1)
         .unwrap_or(false)
+    }
+
+    pub fn create_key_transfer(
+        &self,
+        name: &str,
+        from: i64,
+        to: i64,
+        now: i64,
+    ) -> Result<i64, String> {
+        if from == to {
+            return Err("ключ уже принадлежит этому пользователю".into());
+        }
+        if self.user(to).is_none() {
+            return Err("получатель сначала должен запустить бота".into());
+        }
+        self.with_conn(|connection| {
+            let busy:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM key_replacements WHERE old_client=?1 AND status='pending')",[name],|row|row.get(0))?;
+            if busy{return Err(rusqlite::Error::InvalidQuery)}
+            let changed=connection.execute("INSERT INTO key_transfers(client_name,from_user_id,to_user_id,created_at) SELECT name,?2,?3,?4 FROM clients WHERE name=?1 AND owner_user_id=?2 AND removed_at IS NULL",rusqlite::params![name,from,to,now])?;
+            if changed!=1{return Err(rusqlite::Error::QueryReturnedNoRows)} Ok(connection.last_insert_rowid())
+        }).map_err(|error|match error{rusqlite::Error::InvalidQuery=>"сначала завершите замену этого ключа".into(),rusqlite::Error::QueryReturnedNoRows=>"ключ не найден или уже передаётся".into(),_=>format!("не удалось создать передачу: {error}")})
+    }
+
+    pub fn accept_key_transfer(&self, id: i64, recipient: i64, now: i64) -> Option<String> {
+        self.with_conn(|connection|{let transaction=connection.unchecked_transaction()?;let (name,from):(String,i64)=transaction.query_row("SELECT client_name,from_user_id FROM key_transfers WHERE id=?1 AND to_user_id=?2 AND status='pending' AND created_at>?3",rusqlite::params![id,recipient,now-86_400],|row|Ok((row.get(0)?,row.get(1)?)))?;let changed=transaction.execute("UPDATE clients SET owner_user_id=?3 WHERE name=?1 AND owner_user_id=?2 AND removed_at IS NULL",rusqlite::params![name,from,recipient])?;if changed!=1{return Ok(None)}transaction.execute("UPDATE key_transfers SET status='accepted',decided_at=?2 WHERE id=?1",rusqlite::params![id,now])?;transaction.commit()?;Ok(Some(name))}).ok().flatten()
+    }
+
+    pub fn cancel_key_transfer(&self, id: i64, user: i64, now: i64) -> bool {
+        self.with_conn(|connection|connection.execute("UPDATE key_transfers SET status='cancelled',decided_at=?3 WHERE id=?1 AND (from_user_id=?2 OR to_user_id=?2) AND status='pending'",rusqlite::params![id,user,now])).is_ok_and(|changed|changed==1)
     }
 
     pub fn client_owner(&self, name: &str) -> Option<i64> {

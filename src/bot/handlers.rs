@@ -1604,13 +1604,17 @@ fn customer_key_list(
     uid: i64,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let names = settings.user_client_names(uid);
-    let mut lines = Vec::with_capacity(names.len());
-    let mut buttons = Vec::with_capacity(names.len());
+    let mut views = Vec::with_capacity(names.len());
     for name in names {
         let view = customer_key_view(settings, vpn, uid, &name, now_epoch());
-        lines.push(view.text);
-        buttons.push((name.clone(), view.title));
+        views.push((name, view));
     }
+    views.sort_by_key(|(_, view)| (!view.ready, !view.connected, view.title.clone()));
+    let lines = views.iter().map(|(_, view)| view.text.clone()).collect();
+    let buttons = views
+        .into_iter()
+        .map(|(name, view)| (name, view.title))
+        .collect();
     (lines, buttons)
 }
 
@@ -3174,6 +3178,43 @@ async fn message_handler(
         bot.send_message(msg.chat.id, "✅ Ответ отправлен пользователю.")
             .reply_markup(menu::admin_keyboard())
             .await?;
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if let State::AwaitingKeyTransfer { name } = state.clone() {
+        let input = msg
+            .text()
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('@');
+        let recipient = input
+            .parse::<i64>()
+            .ok()
+            .and_then(|id| settings.user(id))
+            .or_else(|| settings.find_user_by_username(input));
+        match recipient.and_then(|user| {
+            settings
+                .create_key_transfer(&name, uid, user.user_id, now_epoch())
+                .ok()
+                .map(|id| (id, user))
+        }) {
+            Some((id, user)) => {
+                let sent=bot.send_message(ChatId(user.user_id),format!("🎁 Вам предлагают принять VPN-ключ «{name}». После подтверждения прежний владелец потеряет доступ к нему.")).reply_markup(menu::key_transfer_recipient_menu(id)).await.is_ok();
+                if sent {
+                    bot.send_message(
+                        msg.chat.id,
+                        "✅ Предложение отправлено. До подтверждения ключ остаётся у вас.",
+                    )
+                    .await?;
+                } else {
+                    settings.cancel_key_transfer(id, uid, now_epoch());
+                    bot.send_message(msg.chat.id,"Получателю нельзя отправить сообщение. Он должен сначала запустить этого бота.").await?;
+                }
+            }
+            None => {
+                bot.send_message(msg.chat.id,"Не удалось создать передачу. Проверьте Telegram ID/@username; получатель должен сначала запустить бота.").await?;
+            }
+        }
         dialogue.update(State::Idle).await?;
         return Ok(());
     }
@@ -4885,6 +4926,9 @@ async fn message_handler(
             "🎟 Промокод" => {
                 bot.send_message(msg.chat.id, "Введите промокод:").await?;
                 dialogue.update(State::AwaitingCustomerPromo).await?;
+            }
+            "🤝 Стать партнёром" => {
+                bot.send_message(msg.chat.id,"🤝 Партнёрская программа\n\nВы привлекаете покупателей, а платежи и VPN-инфраструктуру обслуживает ZuevVPN. Комиссия: 20%; после 10 оплаченных продаж за 30 дней — 25%, после 30 — 30%. Начисление после выдачи ключа, холд 7 дней, вывод от 1000 ₽. Стоимость эквайринга оплачивает сервис.\n\nЕсли условия подходят, оставьте заявку и расскажите, где планируете привлекать клиентов.").reply_markup(menu::partner_application_menu()).await?;
             }
             "♻️ Восстановить ключи" if crate::calendar::legacy_requests_open(now_epoch()) =>
             {
@@ -7385,6 +7429,40 @@ async fn callback_handler(
             dialogue.update(State::AwaitingReferralPercent).await?;
         }
         Action::Guide(kind) => {
+            if let Some(name) = kind.strip_prefix("transfer:") {
+                if settings.client_owner(name) == Some(uid) {
+                    bot.send_message(chat,format!("🎁 Передача ключа «{name}»\n\nВведите Telegram ID или @username получателя. Он должен заранее запустить этого бота. Ключ останется у вас, пока получатель явно не подтвердит передачу.")).await?;
+                    dialogue
+                        .update(State::AwaitingKeyTransfer {
+                            name: name.to_string(),
+                        })
+                        .await?;
+                }
+                return Ok(());
+            }
+            if let Some(value) = kind.strip_prefix("transfer-accept:") {
+                if let Ok(id) = value.parse() {
+                    if let Some(name) = settings.accept_key_transfer(id, uid, now_epoch()) {
+                        bot.send_message(
+                            chat,
+                            format!("✅ Ключ «{name}» теперь находится в вашем кабинете."),
+                        )
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    } else {
+                        bot.send_message(chat, "Предложение недоступно или истекло.")
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
+            if let Some(value) = kind.strip_prefix("transfer-decline:") {
+                if let Ok(id) = value.parse() {
+                    settings.cancel_key_transfer(id, uid, now_epoch());
+                }
+                bot.send_message(chat, "Предложение отклонено.").await?;
+                return Ok(());
+            }
             if kind == "notifications" || kind.starts_with("notify-") {
                 if let Some(value) = kind.strip_prefix("notify-") {
                     let mut parts = value.rsplitn(2, '-');
@@ -7471,6 +7549,7 @@ async fn callback_handler(
             let text = match guide {
                 "amnezia" => "📱 AmneziaVPN\n\n1. Установите и откройте AmneziaVPN.\n2. Нажмите «+» и выберите импорт подключения.\n3. Импортируйте присланный ботом файл .conf или VPN-ссылку.\n4. Сохраните подключение и включите VPN.\n\nНе добавляйте один ключ одновременно на несколько устройств.",
                 "awg" => "🛡 AmneziaWG\n\n1. Откройте AmneziaWG и нажмите «+».\n2. Выберите импорт туннеля из файла.\n3. Укажите присланный ботом файл .conf.\n4. Разрешите создание VPN-подключения и включите туннель.\n\nДля второго устройства приобретите отдельный ключ.",
+                "keenetic" => "📡 VPN на роутере Keenetic\n\nОдин AWG-ключ на роутере защищает все подключённые домашние устройства: телевизоры, приставки, компьютеры и телефоны. Не нужно устанавливать приложение на каждое устройство; можно назначить VPN только выбранным клиентам или сегменту сети.\n\nИмпортируйте конфигурацию AmneziaWG/WireGuard в веб-интерфейсе Keenetic и настройте политику доступа. Названия пунктов зависят от версии KeeneticOS. Один и тот же ключ не следует одновременно включать на роутере и другом устройстве.\n\nЕсли нужна помощь, создайте обращение — администратор уточнит модель роутера и версию KeeneticOS.",
                 "android" => "🤖 Android · AmneziaWG\n\n1. Скачайте файл .conf из карточки ключа.\n2. Откройте AmneziaWG и нажмите «+».\n3. Выберите «Импорт из файла или архива».\n4. Укажите скачанный .conf и разрешите VPN-подключение.\n5. Включите созданный туннель.\n\nЕсли Android ограничивает приложение, разрешите ему работу в фоне.",
                 "ios" => "🍎 iPhone/iPad · AmneziaWG\n\n1. Сохраните .conf в приложение «Файлы».\n2. Откройте AmneziaWG и нажмите «Добавить туннель».\n3. Выберите импорт из файла и укажите .conf.\n4. Разрешите добавление VPN-конфигурации через Face ID/код.\n5. Включите туннель.\n\nОдин ключ используйте только на одном устройстве.",
                 "windows" => "🪟 Windows · AmneziaWG\n\n1. Установите AmneziaWG.\n2. Скачайте .conf из карточки ключа.\n3. Выберите «Импорт туннелей из файла».\n4. Укажите .conf и нажмите «Активировать».\n\nЕсли туннель не запускается, откройте приложение от имени администратора один раз.",
@@ -8982,7 +9061,7 @@ async fn callback_handler(
         Action::SupportNewCategory(category) => {
             if matches!(
                 category.as_str(),
-                "connection" | "payment" | "bug" | "general"
+                "connection" | "payment" | "bug" | "general" | "partner" | "router"
             ) {
                 let existing = settings.active_support_ticket_for_user_category(uid, &category);
                 let prompt = existing.as_ref().map_or_else(

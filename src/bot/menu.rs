@@ -73,6 +73,7 @@ pub fn customer_keyboard() -> KeyboardMarkup {
         ],
         vec![KeyboardButton::new("🌐 Веб-кабинет")],
         vec![KeyboardButton::new("🎟 Промокод")],
+        vec![KeyboardButton::new("🤝 Стать партнёром")],
     ];
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1110,6 +1111,7 @@ pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
         )],
         vec![cb("📖 Как установить", &format!("guide:install:{name}"))],
         vec![cb("🩺 Не подключается", &format!("guide:trouble:{name}"))],
+        vec![cb("🎁 Передать ключ", &format!("guide:transfer:{name}"))],
         vec![
             cb("📅 Продлить", &format!("renew:{name}")),
             cb("✏️ Устройство", &format!("device:label:{name}")),
@@ -1134,8 +1136,30 @@ pub fn instructions_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb("📱 AmneziaVPN", "guide:amnezia")],
         vec![cb("🛡 AmneziaWG", "guide:awg")],
+        vec![cb("📡 Роутер Keenetic", "guide:keenetic")],
+        vec![cb("🆘 Помощь с Keenetic", "support:new:router")],
         vec![cb("🩺 Не подключается", "guide:trouble")],
         vec![cb("🆘 Поддержка", "support:new:connection")],
+    ])
+}
+
+pub fn partner_application_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "✅ Условия подходят — оставить заявку",
+            "support:new:partner",
+        )],
+        vec![cb("⬅️ Кабинет", "profile")],
+    ])
+}
+
+pub fn key_transfer_recipient_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "✅ Принять ключ",
+            &format!("guide:transfer-accept:{id}"),
+        )],
+        vec![cb("❌ Отказаться", &format!("guide:transfer-decline:{id}"))],
     ])
 }
 

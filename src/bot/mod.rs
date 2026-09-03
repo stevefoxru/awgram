@@ -85,6 +85,9 @@ pub enum State {
     AwaitingDeviceLabel {
         name: String,
     },
+    AwaitingKeyTransfer {
+        name: String,
+    },
     AwaitingTopupAmount,
     AwaitingPaymentInstructions,
     AwaitingAcquiringUrl,

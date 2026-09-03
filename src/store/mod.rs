@@ -695,6 +695,20 @@ pub(crate) const MIGRATIONS: &[&str] = &[
       SELECT partner_id,retail_price_kopecks-wholesale_price_kopecks,'sale','partner-order:'||id,created_at+604800,'Заказ #'||id,created_at
       FROM partner_orders WHERE status='fulfilled';
     "#,
+    // v30: двухфазная передача ключа между пользователями.
+    r#"
+    CREATE TABLE key_transfers(
+        id INTEGER PRIMARY KEY,
+        client_name TEXT NOT NULL,
+        from_user_id INTEGER NOT NULL REFERENCES users(user_id),
+        to_user_id INTEGER NOT NULL REFERENCES users(user_id),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','cancelled','expired')),
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER
+    );
+    CREATE UNIQUE INDEX idx_key_transfers_pending_client ON key_transfers(client_name) WHERE status='pending';
+    CREATE INDEX idx_key_transfers_recipient ON key_transfers(to_user_id,status,created_at);
+    "#,
 ];
 
 pub struct Store {
