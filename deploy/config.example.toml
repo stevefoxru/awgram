@@ -15,7 +15,7 @@ db_path = "/var/lib/awgram/awgram.db"
 # Внутренний веб-кабинет. Оставьте закомментированным для отключения.
 # Публикуйте через HTTPS reverse proxy (например, Caddy или nginx).
 # portal_bind = "127.0.0.1:8787"
-# portal_public_url = "https://cabinet.example.ru"
+# portal_public_url = "https://zpnet.pro"
 # acquiring_webhook_secret = "случайный секрет не короче 32 символов"
 
 # Резервный вход по подтверждённой электронной почте. Пароль SMTP храните только

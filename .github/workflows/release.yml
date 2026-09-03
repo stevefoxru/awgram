@@ -100,3 +100,4 @@ jobs:
             install.sh
             node-bootstrap.sh
             transfer.sh
+            portal-domain.sh
