@@ -56,11 +56,13 @@ async fn main() {
                 &bind,
                 portal_store,
                 portal_vpn,
-                webhook_secret,
                 portal_bot,
-                portal_admins,
-                secure_cookie,
-                portal_smtp,
+                awgram::portal::PortalOptions {
+                    acquiring_webhook_secret: webhook_secret,
+                    admin_ids: portal_admins,
+                    secure_cookie,
+                    smtp: portal_smtp,
+                },
             )
             .await
             {

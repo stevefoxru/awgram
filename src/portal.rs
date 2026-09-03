@@ -29,6 +29,13 @@ struct PortalState {
     smtp: Option<crate::config::SmtpConfig>,
 }
 
+pub struct PortalOptions {
+    pub acquiring_webhook_secret: Option<String>,
+    pub admin_ids: Vec<i64>,
+    pub secure_cookie: bool,
+    pub smtp: Option<crate::config::SmtpConfig>,
+}
+
 #[derive(serde::Deserialize)]
 struct LoginQuery {
     token: String,
@@ -733,16 +740,13 @@ pub async fn run(
     bind: &str,
     store: Arc<Store>,
     vpn: Arc<Vpn>,
-    acquiring_webhook_secret: Option<String>,
     bot: Bot,
-    admin_ids: Vec<i64>,
-    secure_cookie: bool,
-    smtp: Option<crate::config::SmtpConfig>,
+    options: PortalOptions,
 ) -> std::io::Result<()> {
-    let smtp = if secure_cookie {
-        smtp
+    let smtp = if options.secure_cookie {
+        options.smtp
     } else {
-        if smtp.is_some() {
+        if options.smtp.is_some() {
             tracing::warn!("вход по почте отключён: portal_public_url должен использовать HTTPS");
         }
         None
@@ -772,10 +776,10 @@ pub async fn run(
         .with_state(PortalState {
             store,
             vpn,
-            acquiring_webhook_secret,
+            acquiring_webhook_secret: options.acquiring_webhook_secret,
             bot,
-            admin_ids: Arc::new(admin_ids),
-            secure_cookie,
+            admin_ids: Arc::new(options.admin_ids),
+            secure_cookie: options.secure_cookie,
             smtp,
         });
     tracing::info!(bind, "внутренний личный кабинет запущен");
