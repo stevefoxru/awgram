@@ -658,6 +658,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_partner_orders_user ON partner_orders(user_id,created_at);
     CREATE UNIQUE INDEX idx_partner_orders_one_pending ON partner_orders(partner_id,user_id) WHERE status='pending';
     "#,
+    // v28: очередь безопасной доставки созданного ключа именно дочерним ботом.
+    r#"
+    ALTER TABLE partner_orders ADD COLUMN conf_path TEXT;
+    ALTER TABLE partner_orders ADD COLUMN qr_path TEXT;
+    ALTER TABLE partner_orders ADD COLUMN import_uri TEXT;
+    ALTER TABLE partner_orders ADD COLUMN delivered_at INTEGER;
+    "#,
 ];
 
 pub struct Store {

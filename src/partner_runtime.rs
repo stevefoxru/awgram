@@ -7,7 +7,7 @@ use std::{
 
 use teloxide::{
     prelude::*,
-    types::{KeyboardButton, KeyboardMarkup},
+    types::{InputFile, KeyboardButton, KeyboardMarkup},
 };
 use tokio::task::JoinHandle;
 
@@ -48,20 +48,80 @@ fn term(text: &str) -> Option<i64> {
     }
 }
 
+fn epoch_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 async fn run_bot(partner: Partner, token: String, db_path: PathBuf) {
     let bot = Bot::new(token);
     let partner_id = partner.id;
     let partner = Arc::new(partner);
+    let delivery_bot = bot.clone();
+    let delivery_db = db_path.clone();
+    let delivery = tokio::spawn(async move {
+        loop {
+            if let Ok(store) = Store::open(&delivery_db) {
+                for order in store.undelivered_partner_orders(partner_id) {
+                    let Some(conf) = order.conf_path.as_deref() else {
+                        continue;
+                    };
+                    let chat = ChatId(order.user_id);
+                    let mut sent = delivery_bot
+                        .send_message(
+                            chat,
+                            format!(
+                                "✅ Заказ #{} готов\nКлюч: {}",
+                                order.id,
+                                order.fulfilled_client_name.as_deref().unwrap_or("VPN")
+                            ),
+                        )
+                        .await
+                        .is_ok();
+                    if sent {
+                        sent = delivery_bot
+                            .send_document(chat, InputFile::file(conf))
+                            .await
+                            .is_ok();
+                    }
+                    if sent {
+                        if let Some(qr) = order
+                            .qr_path
+                            .as_deref()
+                            .filter(|path| std::path::Path::new(path).exists())
+                        {
+                            sent = delivery_bot
+                                .send_photo(chat, InputFile::file(qr))
+                                .await
+                                .is_ok();
+                        }
+                    }
+                    if sent {
+                        if let Some(uri) = order.import_uri.as_deref().filter(|uri| !uri.is_empty())
+                        {
+                            sent = delivery_bot
+                                .send_message(chat, format!("Ссылка импорта:\n{uri}"))
+                                .await
+                                .is_ok();
+                        }
+                    }
+                    if sent {
+                        store.mark_partner_order_delivered(order.id, epoch_now());
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let partner = Arc::clone(&partner);
         let db_path = db_path.clone();
         async move {
             let Some(from) = msg.from.as_ref() else { return Ok(()); };
             let Ok(user_id) = i64::try_from(from.id.0) else { return Ok(()); };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+            let now = epoch_now();
             let store = match Store::open(&db_path) {
                 Ok(store) => store,
                 Err(error) => { tracing::error!(partner_id=partner.id, %error, "partner database unavailable"); return Ok(()); }
@@ -106,6 +166,7 @@ async fn run_bot(partner: Partner, token: String, db_path: PathBuf) {
             Ok(())
         }
     }).await;
+    delivery.abort();
     tracing::warn!(partner_id, "partner bot stopped");
 }
 

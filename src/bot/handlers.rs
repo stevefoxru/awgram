@@ -7161,6 +7161,121 @@ async fn callback_handler(
             }
         }
         Action::PartnerStatus(id, status) => {
+            if status == "orders" {
+                let orders = settings.partner_orders(id, 50);
+                let body = if orders.is_empty() {
+                    "Заявок пока нет.".into()
+                } else {
+                    format!(
+                        "Всего показано: {}\n🟠 ожидает · ✅ выдан · ❌ отклонён",
+                        orders.len()
+                    )
+                };
+                bot.send_message(chat, format!("🛒 Партнёрские заказы\n\n{body}"))
+                    .reply_markup(menu::admin_partner_orders_menu(id, &orders))
+                    .await?;
+                return Ok(());
+            }
+            if let Some(value) = status.strip_prefix("order-") {
+                let Some(order) = value
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(|order_id| settings.partner_order(order_id))
+                    .filter(|order| order.partner_id == id)
+                else {
+                    bot.send_message(chat, "Заказ не найден.").await?;
+                    return Ok(());
+                };
+                let state = match order.status.as_str() {
+                    "pending" => "🟠 ожидает оплаты",
+                    "fulfilled" => "✅ ключ выдан",
+                    "rejected" => "❌ отклонён",
+                    other => other,
+                };
+                bot.send_message(chat, format!("🛒 Заказ #{}\n\nПокупатель: {}\nСрок: {} мес.\nСтатус: {}\nРозница: {:.2} ₽\nОпт: {:.2} ₽\nМаржа: {:.2} ₽{}", order.id, order.user_id, order.months, state, order.retail_price_kopecks as f64/100.0, order.wholesale_price_kopecks as f64/100.0, (order.retail_price_kopecks-order.wholesale_price_kopecks) as f64/100.0, order.fulfilled_client_name.as_deref().map(|name| format!("\nКлюч: {name}")).unwrap_or_default()))
+                    .reply_markup(menu::admin_partner_order_menu(id, order.id, order.status == "pending", &settings.available_vpn_servers())).await?;
+                return Ok(());
+            }
+            if let Some(value) = status.strip_prefix("reject-") {
+                let ok = value
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(|order_id| {
+                        settings
+                            .partner_order(order_id)
+                            .map(|order| (order_id, order))
+                    })
+                    .filter(|(_, order)| order.partner_id == id && order.status == "pending")
+                    .is_some_and(|(order_id, _)| {
+                        settings.reject_partner_order(order_id, now_epoch())
+                    });
+                bot.send_message(
+                    chat,
+                    if ok {
+                        "❌ Заказ отклонён."
+                    } else {
+                        "Заказ уже обработан или не найден."
+                    },
+                )
+                .reply_markup(menu::admin_partner_orders_menu(
+                    id,
+                    &settings.partner_orders(id, 50),
+                ))
+                .await?;
+                return Ok(());
+            }
+            if let Some(value) = status.strip_prefix("fulfill-") {
+                let mut parts = value.splitn(2, '-');
+                let order_id = parts.next().and_then(|v| v.parse::<i64>().ok());
+                let server_id = parts.next().and_then(|v| v.parse::<i64>().ok());
+                let Some((order, server_id)) = order_id
+                    .and_then(|order_id| settings.partner_order(order_id))
+                    .zip(server_id)
+                    .filter(|(order, _)| order.partner_id == id && order.status == "pending")
+                else {
+                    bot.send_message(chat, "Заказ уже обработан или не найден.")
+                        .await?;
+                    return Ok(());
+                };
+                match provision_customer_key(
+                    &vpn,
+                    &settings,
+                    order.user_id,
+                    order.months,
+                    server_id,
+                )
+                .await
+                {
+                    Ok(result)
+                        if settings.fulfill_partner_order(
+                            order.id,
+                            &result.name,
+                            &result.conf_path,
+                            &result.qr_path,
+                            &result.uri,
+                            now_epoch(),
+                        ) =>
+                    {
+                        settings.log_event(
+                            now_epoch(),
+                            EventKind::ClientAdd,
+                            Some(&result.name),
+                            Some(order.user_id),
+                            Some("partner_purchase"),
+                        );
+                        bot.send_message(chat, format!("✅ Заказ #{} исполнен. Ключ «{}» будет отправлен покупателю дочерним ботом в течение 10 секунд.", order.id, result.name))
+                            .reply_markup(menu::admin_partner_orders_menu(id, &settings.partner_orders(id, 50))).await?;
+                    }
+                    Ok(_) => {
+                        bot.send_message(chat, "Ключ создан, но заказ не удалось зафиксировать. Не повторяйте операцию и проверьте журнал.").await?;
+                    }
+                    Err(error) => {
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
             let allowed = matches!(status.as_str(), "active" | "suspended");
             let ready = settings
                 .partner(id)

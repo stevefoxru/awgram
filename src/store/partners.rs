@@ -26,7 +26,32 @@ pub struct PartnerOrder {
     pub retail_price_kopecks: i64,
     pub wholesale_price_kopecks: i64,
     pub status: String,
+    pub fulfilled_client_name: Option<String>,
+    pub conf_path: Option<String>,
+    pub qr_path: Option<String>,
+    pub import_uri: Option<String>,
+    pub delivered_at: Option<i64>,
     pub created_at: i64,
+}
+
+const ORDER_COLUMNS: &str = "id,partner_id,user_id,months,retail_price_kopecks,wholesale_price_kopecks,status,fulfilled_client_name,conf_path,qr_path,import_uri,delivered_at,created_at";
+
+fn order_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PartnerOrder> {
+    Ok(PartnerOrder {
+        id: row.get(0)?,
+        partner_id: row.get(1)?,
+        user_id: row.get(2)?,
+        months: row.get(3)?,
+        retail_price_kopecks: row.get(4)?,
+        wholesale_price_kopecks: row.get(5)?,
+        status: row.get(6)?,
+        fulfilled_client_name: row.get(7)?,
+        conf_path: row.get(8)?,
+        qr_path: row.get(9)?,
+        import_uri: row.get(10)?,
+        delivered_at: row.get(11)?,
+        created_at: row.get(12)?,
+    })
 }
 
 const COLUMNS: &str = "id,owner_user_id,slug,display_name,status,wholesale_discount_percent,retail_markup_percent,bot_username,bot_secret_ref,created_at,updated_at";
@@ -104,9 +129,67 @@ impl Store {
             Ok(PartnerOrder {
                 id: connection.last_insert_rowid(), partner_id, user_id, months,
                 retail_price_kopecks: retail, wholesale_price_kopecks: wholesale,
-                status: "pending".into(), created_at: now,
+                status: "pending".into(), fulfilled_client_name: None, conf_path: None,
+                qr_path: None, import_uri: None, delivered_at: None, created_at: now,
             })
         }).map_err(|error| format!("не удалось оформить заказ: {error}"))
+    }
+
+    pub fn partner_order(&self, id: i64) -> Option<PartnerOrder> {
+        self.with_conn(|connection| {
+            connection
+                .query_row(
+                    &format!("SELECT {ORDER_COLUMNS} FROM partner_orders WHERE id=?1"),
+                    [id],
+                    order_row,
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
+    pub fn partner_orders(&self, partner_id: i64, limit: usize) -> Vec<PartnerOrder> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(&format!("SELECT {ORDER_COLUMNS} FROM partner_orders WHERE partner_id=?1 ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,created_at DESC LIMIT ?2"))?;
+            let orders = statement.query_map(rusqlite::params![partner_id, limit as i64], order_row)?.collect();
+            orders
+        }).unwrap_or_default()
+    }
+
+    pub fn reject_partner_order(&self, id: i64, now: i64) -> bool {
+        self.with_conn(|connection| connection.execute(
+            "UPDATE partner_orders SET status='rejected',updated_at=?2 WHERE id=?1 AND status='pending'", rusqlite::params![id, now]))
+            .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn fulfill_partner_order(
+        &self,
+        id: i64,
+        client: &str,
+        conf: &str,
+        qr: &str,
+        uri: &str,
+        now: i64,
+    ) -> bool {
+        self.with_conn(|connection| connection.execute(
+            "UPDATE partner_orders SET status='fulfilled',fulfilled_client_name=?2,conf_path=?3,qr_path=?4,import_uri=?5,updated_at=?6 WHERE id=?1 AND status='pending'",
+            rusqlite::params![id, client, conf, qr, uri, now]))
+            .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn undelivered_partner_orders(&self, partner_id: i64) -> Vec<PartnerOrder> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(&format!("SELECT {ORDER_COLUMNS} FROM partner_orders WHERE partner_id=?1 AND status='fulfilled' AND delivered_at IS NULL ORDER BY id"))?;
+            let orders = statement.query_map([partner_id], order_row)?.collect();
+            orders
+        }).unwrap_or_default()
+    }
+
+    pub fn mark_partner_order_delivered(&self, id: i64, now: i64) -> bool {
+        self.with_conn(|connection| connection.execute(
+            "UPDATE partner_orders SET delivered_at=?2,updated_at=?2 WHERE id=?1 AND status='fulfilled' AND delivered_at IS NULL", rusqlite::params![id, now]))
+            .is_ok_and(|changed| changed == 1)
     }
 
     pub fn partner_pending_order_count(&self, partner_id: i64) -> i64 {
@@ -312,6 +395,12 @@ mod tests {
         assert_eq!(order.retail_price_kopecks, base * 125 / 100);
         assert_eq!(order.wholesale_price_kopecks, base * 80 / 100);
         assert_eq!(store.partner_pending_order_count(id), 1);
+        assert!(store.create_partner_order(id, 8, 3, 5).is_err());
+        assert!(store.fulfill_partner_order(order.id, "buyer-01", "/tmp/a.conf", "", "awg://x", 6));
+        assert_eq!(store.partner_pending_order_count(id), 0);
+        assert_eq!(store.undelivered_partner_orders(id).len(), 1);
+        assert!(store.mark_partner_order_delivered(order.id, 7));
+        assert!(store.undelivered_partner_orders(id).is_empty());
         assert!(store.set_partner_status(id, "suspended", 5));
         assert!(store.create_partner_order(id, 8, 1, 6).is_err());
     }

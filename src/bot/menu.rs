@@ -627,6 +627,10 @@ pub fn admin_partners_menu(partners: &[crate::store::Partner]) -> InlineKeyboard
 
 pub fn admin_partner_card_menu(id: i64, status: &str) -> InlineKeyboardMarkup {
     let mut rows = Vec::new();
+    rows.push(vec![cb(
+        "🛒 Заказы",
+        &format!("admin:partner:status:{id}:orders"),
+    )]);
     match status {
         "active" => rows.push(vec![cb(
             "⏸ Приостановить",
@@ -639,6 +643,64 @@ pub fn admin_partner_card_menu(id: i64, status: &str) -> InlineKeyboardMarkup {
         _ => {}
     }
     rows.push(vec![cb("⬅️ Все партнёры", "admin:partners")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn admin_partner_orders_menu(
+    id: i64,
+    orders: &[crate::store::PartnerOrder],
+) -> InlineKeyboardMarkup {
+    let mut rows = orders
+        .iter()
+        .map(|order| {
+            vec![cb(
+                &format!(
+                    "{} #{} · {} мес. · {:.2} ₽",
+                    if order.status == "pending" {
+                        "🟠"
+                    } else if order.status == "fulfilled" {
+                        "✅"
+                    } else {
+                        "❌"
+                    },
+                    order.id,
+                    order.months,
+                    order.retail_price_kopecks as f64 / 100.0
+                ),
+                &format!("admin:partner:status:{id}:order-{}", order.id),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("⬅️ Партнёр", &format!("admin:partner:{id}"))]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn admin_partner_order_menu(
+    partner_id: i64,
+    order_id: i64,
+    pending: bool,
+    servers: &[crate::store::VpnServer],
+) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if pending {
+        rows.extend(servers.iter().map(|server| {
+            vec![cb(
+                &format!("✅ Оплата получена · {}", server.location),
+                &format!(
+                    "admin:partner:status:{partner_id}:fulfill-{order_id}-{}",
+                    server.id
+                ),
+            )]
+        }));
+        rows.push(vec![cb(
+            "❌ Отклонить",
+            &format!("admin:partner:status:{partner_id}:reject-{order_id}"),
+        )]);
+    }
+    rows.push(vec![cb(
+        "⬅️ Заказы",
+        &format!("admin:partner:status:{partner_id}:orders"),
+    )]);
     InlineKeyboardMarkup::new(rows)
 }
 
