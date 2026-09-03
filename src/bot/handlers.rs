@@ -7161,6 +7161,74 @@ async fn callback_handler(
             }
         }
         Action::PartnerStatus(id, status) => {
+            if status == "withdrawals" {
+                let items = settings.partner_withdrawals(id, 30);
+                let body = if items.is_empty() {
+                    "Заявок нет.".into()
+                } else {
+                    items
+                        .iter()
+                        .map(|item| {
+                            format!(
+                                "#{} · {:.2} ₽ · {}\nРеквизиты: {}",
+                                item.id,
+                                item.amount_kopecks as f64 / 100.0,
+                                item.status,
+                                item.requisites
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                };
+                bot.send_message(chat, format!("💸 Партнёрские выплаты\n\n{body}"))
+                    .reply_markup(menu::admin_partner_withdrawals_menu(id, &items))
+                    .await?;
+                return Ok(());
+            }
+            if let Some(value) = status
+                .strip_prefix("withdraw-paid-")
+                .or_else(|| status.strip_prefix("withdraw-reject-"))
+            {
+                let paid = status.starts_with("withdraw-paid-");
+                let pending = settings.partner_withdrawals(id, 100);
+                let ok = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|withdrawal_id| {
+                        pending
+                            .iter()
+                            .any(|item| item.id == *withdrawal_id && item.status == "pending")
+                    })
+                    .is_some_and(|withdrawal_id| {
+                        settings.decide_partner_withdrawal(
+                            withdrawal_id,
+                            paid,
+                            uid,
+                            if paid {
+                                None
+                            } else {
+                                Some("отклонено администратором")
+                            },
+                            now_epoch(),
+                        )
+                    });
+                let items = settings.partner_withdrawals(id, 30);
+                bot.send_message(
+                    chat,
+                    if ok {
+                        if paid {
+                            "✅ Выплата отмечена выполненной."
+                        } else {
+                            "✅ Заявка отклонена, резерв возвращён."
+                        }
+                    } else {
+                        "Заявка уже обработана или не найдена."
+                    },
+                )
+                .reply_markup(menu::admin_partner_withdrawals_menu(id, &items))
+                .await?;
+                return Ok(());
+            }
             if status == "orders" {
                 let orders = settings.partner_orders(id, 50);
                 let body = if orders.is_empty() {

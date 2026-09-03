@@ -44,6 +44,27 @@ pub struct PartnerSalesSummary {
     pub wholesale_kopecks: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartnerWithdrawal {
+    pub id: i64,
+    pub partner_id: i64,
+    pub amount_kopecks: i64,
+    pub requisites: String,
+    pub status: String,
+    pub created_at: i64,
+}
+
+fn withdrawal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PartnerWithdrawal> {
+    Ok(PartnerWithdrawal {
+        id: row.get(0)?,
+        partner_id: row.get(1)?,
+        amount_kopecks: row.get(2)?,
+        requisites: row.get(3)?,
+        status: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
 const ORDER_COLUMNS: &str = "id,partner_id,user_id,months,retail_price_kopecks,wholesale_price_kopecks,status,fulfilled_client_name,conf_path,qr_path,import_uri,delivered_at,created_at";
 
 fn order_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PartnerOrder> {
@@ -125,11 +146,10 @@ impl Store {
             let result = i128::from(value) * i128::from(percent) / 100;
             i64::try_from(result).map_err(|_| "цена выходит за допустимый диапазон".into())
         };
-        let retail = base
-            .checked_add(percentage(base, partner.retail_markup_percent)?)
-            .ok_or("цена выходит за допустимый диапазон")?;
-        let wholesale = base
-            .checked_sub(percentage(base, partner.wholesale_discount_percent)?)
+        let retail = base;
+        let commission = self.partner_commission_percent(partner_id, now);
+        let wholesale = retail
+            .checked_sub(percentage(retail, commission)?)
             .ok_or("цена выходит за допустимый диапазон")?;
         self.with_conn(|connection| {
             connection.execute(
@@ -143,6 +163,19 @@ impl Store {
                 qr_path: None, import_uri: None, delivered_at: None, created_at: now,
             })
         }).map_err(|error| format!("не удалось оформить заказ: {error}"))
+    }
+
+    pub fn partner_commission_percent(&self, partner_id: i64, now: i64) -> i64 {
+        let sales = self.with_conn(|connection| connection.query_row(
+            "SELECT COUNT(*) FROM partner_orders WHERE partner_id=?1 AND status='fulfilled' AND created_at>=?2",
+            rusqlite::params![partner_id, now.saturating_sub(30 * 86_400)], |row| row.get::<_, i64>(0))).unwrap_or(0);
+        if sales >= 30 {
+            30
+        } else if sales >= 10 {
+            25
+        } else {
+            20
+        }
     }
 
     pub fn partner_order(&self, id: i64) -> Option<PartnerOrder> {
@@ -209,10 +242,77 @@ impl Store {
         uri: &str,
         now: i64,
     ) -> bool {
-        self.with_conn(|connection| connection.execute(
-            "UPDATE partner_orders SET status='fulfilled',fulfilled_client_name=?2,conf_path=?3,qr_path=?4,import_uri=?5,updated_at=?6 WHERE id=?1 AND status='pending'",
-            rusqlite::params![id, client, conf, qr, uri, now]))
-            .is_ok_and(|changed| changed == 1)
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE partner_orders SET status='fulfilled',fulfilled_client_name=?2,conf_path=?3,qr_path=?4,import_uri=?5,updated_at=?6 WHERE id=?1 AND status='pending'",
+                rusqlite::params![id, client, conf, qr, uri, now])?;
+            if changed != 1 { return Ok(false); }
+            transaction.execute(
+                "INSERT INTO partner_ledger(partner_id,amount_kopecks,kind,reference,available_at,details,created_at) SELECT partner_id,retail_price_kopecks-wholesale_price_kopecks,'sale','partner-order:'||id,?2+604800,'Заказ #'||id,?2 FROM partner_orders WHERE id=?1",
+                rusqlite::params![id, now])?;
+            transaction.commit()?;
+            Ok(true)
+        }).unwrap_or(false)
+    }
+
+    pub fn partner_balance_kopecks(&self, partner_id: i64, now: i64) -> i64 {
+        self.with_conn(|connection| connection.query_row(
+            "SELECT COALESCE(SUM(amount_kopecks),0) FROM partner_ledger WHERE partner_id=?1 AND available_at<=?2",
+            rusqlite::params![partner_id, now], |row| row.get(0))).unwrap_or(0)
+    }
+
+    pub fn partner_hold_kopecks(&self, partner_id: i64, now: i64) -> i64 {
+        self.with_conn(|connection| connection.query_row(
+            "SELECT COALESCE(SUM(amount_kopecks),0) FROM partner_ledger WHERE partner_id=?1 AND kind='sale' AND available_at>?2",
+            rusqlite::params![partner_id, now], |row| row.get(0))).unwrap_or(0)
+    }
+
+    pub fn create_partner_withdrawal(
+        &self,
+        partner_id: i64,
+        amount: i64,
+        requisites: &str,
+        now: i64,
+    ) -> Result<i64, String> {
+        if amount < 100_000 {
+            return Err("минимальная сумма вывода — 1000 ₽".into());
+        }
+        let requisites = requisites.trim();
+        if requisites.len() < 5 || requisites.len() > 300 {
+            return Err("укажите корректные реквизиты".into());
+        }
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let balance: i64 = transaction.query_row("SELECT COALESCE(SUM(amount_kopecks),0) FROM partner_ledger WHERE partner_id=?1 AND available_at<=?2", rusqlite::params![partner_id, now], |row| row.get(0))?;
+            if balance < amount { return Err(rusqlite::Error::InvalidQuery); }
+            transaction.execute("INSERT INTO partner_withdrawals(partner_id,amount_kopecks,requisites,created_at) VALUES(?1,?2,?3,?4)", rusqlite::params![partner_id, amount, requisites, now])?;
+            let id = transaction.last_insert_rowid();
+            transaction.execute("INSERT INTO partner_ledger(partner_id,amount_kopecks,kind,reference,available_at,details,created_at) VALUES(?1,?2,'withdrawal_reserve',?3,?4,?5,?4)", rusqlite::params![partner_id, -amount, format!("withdrawal:{id}"), now, format!("Вывод #{id}")])?;
+            transaction.commit()?; Ok(id)
+        }).map_err(|error| if matches!(error, rusqlite::Error::InvalidQuery) { "недостаточно доступных средств".into() } else { format!("не удалось создать заявку: {error}") })
+    }
+
+    pub fn partner_withdrawals(&self, partner_id: i64, limit: usize) -> Vec<PartnerWithdrawal> {
+        self.with_conn(|connection| { let mut statement=connection.prepare("SELECT id,partner_id,amount_kopecks,requisites,status,created_at FROM partner_withdrawals WHERE partner_id=?1 ORDER BY created_at DESC LIMIT ?2")?; let rows=statement.query_map(rusqlite::params![partner_id,limit as i64],withdrawal_row)?.collect(); rows }).unwrap_or_default()
+    }
+
+    pub fn decide_partner_withdrawal(
+        &self,
+        id: i64,
+        paid: bool,
+        actor: i64,
+        reason: Option<&str>,
+        now: i64,
+    ) -> bool {
+        self.with_conn(|connection| {
+            let transaction=connection.unchecked_transaction()?;
+            let partner_id: i64=transaction.query_row("SELECT partner_id FROM partner_withdrawals WHERE id=?1 AND status='pending'",[id],|row|row.get(0))?;
+            let changed=transaction.execute("UPDATE partner_withdrawals SET status=?2,decided_at=?3,decided_by=?4,reject_reason=?5 WHERE id=?1 AND status='pending'",rusqlite::params![id,if paid{"paid"}else{"rejected"},now,actor,reason])?;
+            if changed!=1{return Ok(false)}
+            if !paid { let amount:i64=transaction.query_row("SELECT amount_kopecks FROM partner_withdrawals WHERE id=?1",[id],|row|row.get(0))?; transaction.execute("INSERT INTO partner_ledger(partner_id,amount_kopecks,kind,reference,available_at,details,created_at) VALUES(?1,?2,'withdrawal_refund',?3,?4,?5,?4)",rusqlite::params![partner_id,amount,format!("withdrawal-refund:{id}"),now,format!("Возврат вывода #{id}")])?; }
+            transaction.commit()?; Ok(true)
+        }).unwrap_or(false)
     }
 
     pub fn undelivered_partner_orders(&self, partner_id: i64) -> Vec<PartnerOrder> {
@@ -429,7 +529,7 @@ mod tests {
         assert!(store.set_partner_status(id, "active", 3));
         let base = store.tariff_price_kopecks(1).unwrap();
         let order = store.create_partner_order(id, 8, 1, 4).unwrap();
-        assert_eq!(order.retail_price_kopecks, base * 125 / 100);
+        assert_eq!(order.retail_price_kopecks, base);
         assert_eq!(order.wholesale_price_kopecks, base * 80 / 100);
         assert_eq!(store.partner_pending_order_count(id), 1);
         assert!(store.create_partner_order(id, 8, 3, 5).is_err());
@@ -442,6 +542,15 @@ mod tests {
         assert_eq!(summary.fulfilled, 1);
         assert_eq!(summary.delivered, 1);
         assert_eq!(summary.retail_kopecks, order.retail_price_kopecks);
+        assert_eq!(
+            store.partner_hold_kopecks(id, 6),
+            order.retail_price_kopecks - order.wholesale_price_kopecks
+        );
+        assert_eq!(store.partner_balance_kopecks(id, 6), 0);
+        assert_eq!(
+            store.partner_balance_kopecks(id, 6 + 604_800),
+            order.retail_price_kopecks - order.wholesale_price_kopecks
+        );
         store.upsert_user(9, None, "Other buyer", None, 8);
         let cancellable = store.create_partner_order(id, 9, 3, 9).unwrap();
         assert_eq!(

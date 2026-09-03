@@ -33,7 +33,7 @@ pub use groups::{
 };
 pub use inventory::{InventoryItem, InventoryReport, KeyRuntimeStats, ServerRuntimeSummary};
 pub use nodes::{InstallationJob, VpnInstance, VpnNode};
-pub use partners::{Partner, PartnerOrder, PartnerSalesSummary};
+pub use partners::{Partner, PartnerOrder, PartnerSalesSummary, PartnerWithdrawal};
 pub use portal::{PortalBalanceEntry, PortalKey, PortalOverview, PortalPayment, PortalTicket};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
@@ -664,6 +664,36 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE partner_orders ADD COLUMN qr_path TEXT;
     ALTER TABLE partner_orders ADD COLUMN import_uri TEXT;
     ALTER TABLE partner_orders ADD COLUMN delivered_at INTEGER;
+    "#,
+    // v29: партнёрский кошелёк. Ledger неизменяемый; вывод сначала резервирует
+    // деньги отрицательной проводкой, отказ создаёт отдельный возврат.
+    r#"
+    CREATE TABLE partner_ledger(
+        id INTEGER PRIMARY KEY,
+        partner_id INTEGER NOT NULL REFERENCES partners(id),
+        amount_kopecks INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('sale','withdrawal_reserve','withdrawal_refund','adjustment')),
+        reference TEXT NOT NULL UNIQUE,
+        available_at INTEGER NOT NULL,
+        details TEXT,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_partner_ledger_balance ON partner_ledger(partner_id,available_at,created_at);
+    CREATE TABLE partner_withdrawals(
+        id INTEGER PRIMARY KEY,
+        partner_id INTEGER NOT NULL REFERENCES partners(id),
+        amount_kopecks INTEGER NOT NULL CHECK(amount_kopecks >= 100000),
+        requisites TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid','rejected')),
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER,
+        decided_by INTEGER,
+        reject_reason TEXT
+    );
+    CREATE INDEX idx_partner_withdrawals_status ON partner_withdrawals(status,created_at);
+    INSERT OR IGNORE INTO partner_ledger(partner_id,amount_kopecks,kind,reference,available_at,details,created_at)
+      SELECT partner_id,retail_price_kopecks-wholesale_price_kopecks,'sale','partner-order:'||id,created_at+604800,'Заказ #'||id,created_at
+      FROM partner_orders WHERE status='fulfilled';
     "#,
 ];
 

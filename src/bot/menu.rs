@@ -631,6 +631,10 @@ pub fn admin_partner_card_menu(id: i64, status: &str) -> InlineKeyboardMarkup {
         "🛒 Заказы",
         &format!("admin:partner:status:{id}:orders"),
     )]);
+    rows.push(vec![cb(
+        "💸 Выплаты",
+        &format!("admin:partner:status:{id}:withdrawals"),
+    )]);
     match status {
         "active" => rows.push(vec![cb(
             "⏸ Приостановить",
@@ -643,6 +647,31 @@ pub fn admin_partner_card_menu(id: i64, status: &str) -> InlineKeyboardMarkup {
         _ => {}
     }
     rows.push(vec![cb("⬅️ Все партнёры", "admin:partners")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn admin_partner_withdrawals_menu(
+    id: i64,
+    items: &[crate::store::PartnerWithdrawal],
+) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    for item in items.iter().filter(|item| item.status == "pending") {
+        rows.push(vec![
+            cb(
+                &format!(
+                    "✅ Выплачено #{} · {:.2} ₽",
+                    item.id,
+                    item.amount_kopecks as f64 / 100.0
+                ),
+                &format!("admin:partner:status:{id}:withdraw-paid-{}", item.id),
+            ),
+            cb(
+                "❌",
+                &format!("admin:partner:status:{id}:withdraw-reject-{}", item.id),
+            ),
+        ]);
+    }
+    rows.push(vec![cb("⬅️ Партнёр", &format!("admin:partner:{id}"))]);
     InlineKeyboardMarkup::new(rows)
 }
 

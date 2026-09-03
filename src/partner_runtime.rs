@@ -40,7 +40,13 @@ fn menu(owner: bool) -> KeyboardMarkup {
         ],
     ];
     if owner {
-        rows.insert(0, vec![KeyboardButton::new("📊 Продажи")]);
+        rows.insert(
+            0,
+            vec![
+                KeyboardButton::new("📊 Продажи"),
+                KeyboardButton::new("💸 Вывод"),
+            ],
+        );
     }
     KeyboardMarkup::new(rows).resize_keyboard()
 }
@@ -151,7 +157,16 @@ async fn run_bot(partner: Partner, token: String, db_path: PathBuf) {
             let is_owner = user_id == partner.owner_user_id;
             let answer = if text == "📊 Продажи" && is_owner {
                 let summary = store.partner_sales_summary(partner.id);
-                format!("📊 Продажи «{}»\n\nВсего заявок: {}\nОжидают: {}\nКлючей создано: {}\nДоставлено: {}\n\nРозничный оборот: {:.2} ₽\nОптовая сумма: {:.2} ₽\nМаржа: {:.2} ₽\n\nЭто управленческая сводка, а не банковский баланс.", partner.display_name, summary.total, summary.pending, summary.fulfilled, summary.delivered, summary.retail_kopecks as f64/100.0, summary.wholesale_kopecks as f64/100.0, (summary.retail_kopecks-summary.wholesale_kopecks) as f64/100.0)
+                format!("📊 Продажи «{}»\n\nКомиссия: {}%\nВсего заявок: {}\nОжидают: {}\nКлючей создано: {}\nДоставлено: {}\n\nРозничный оборот: {:.2} ₽\nОптовая сумма: {:.2} ₽\nМаржа: {:.2} ₽\nДоступно: {:.2} ₽\nНа холде 7 дней: {:.2} ₽\n\nМинимальный вывод: 1000 ₽.", partner.display_name, store.partner_commission_percent(partner.id, now), summary.total, summary.pending, summary.fulfilled, summary.delivered, summary.retail_kopecks as f64/100.0, summary.wholesale_kopecks as f64/100.0, (summary.retail_kopecks-summary.wholesale_kopecks) as f64/100.0, store.partner_balance_kopecks(partner.id, now) as f64/100.0, store.partner_hold_kopecks(partner.id, now) as f64/100.0)
+            } else if text == "💸 Вывод" && is_owner {
+                let history = store.partner_withdrawals(partner.id, 5);
+                let list = history.iter().map(|item| format!("#{} · {:.2} ₽ · {}", item.id, item.amount_kopecks as f64 / 100.0, item.status)).collect::<Vec<_>>().join("\n");
+                format!("💸 Вывод средств\n\nДоступно: {:.2} ₽\nМинимум: 1000 ₽\n\nОтправьте одной строкой:\nВывод 1000 НОМЕР_ТЕЛЕФОНА_ИЛИ_РЕКВИЗИТЫ{}", store.partner_balance_kopecks(partner.id, now) as f64 / 100.0, if list.is_empty() { String::new() } else { format!("\n\nПоследние заявки:\n{list}") })
+            } else if is_owner && text.to_lowercase().starts_with("вывод ") {
+                let mut parts = text.splitn(3, ' '); let _ = parts.next();
+                let amount = parts.next().and_then(|value| value.replace(',', ".").parse::<f64>().ok()).map(|value| (value * 100.0).round() as i64);
+                let requisites = parts.next().unwrap_or("");
+                match amount { Some(amount) => match store.create_partner_withdrawal(partner.id, amount, requisites, now) { Ok(id) => format!("✅ Заявка на вывод #{id} создана. Сумма зарезервирована до решения администратора."), Err(error) => format!("❌ {error}") }, None => "❌ Не удалось разобрать сумму.".into() }
             } else if text == "🧾 Мои заказы" {
                 let orders = store.partner_customer_orders(partner.id, user_id, 10);
                 if orders.is_empty() { "🧾 У вас пока нет заказов.".into() } else {
@@ -187,8 +202,7 @@ async fn run_bot(partner: Partner, token: String, db_path: PathBuf) {
                 }
             } else if text == "💳 Тарифы" || text == "🛒 Купить" {
                 let lines = [1,3,6,12].into_iter().filter_map(|months| store.tariff_price_kopecks(months).map(|base| {
-                    let price = i128::from(base) * i128::from(100 + partner.retail_markup_percent) / 100;
-                    format!("• {months} мес. — {:.2} ₽", price as f64 / 100.0)
+                    format!("• {months} мес. — {:.2} ₽", base as f64 / 100.0)
                 })).collect::<Vec<_>>().join("\n");
                 format!("💳 Тарифы «{}»\n\n{}\n\nВыберите срок кнопкой ниже.", partner.display_name, lines)
             } else if text == "🆘 Поддержка" {
