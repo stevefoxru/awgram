@@ -30,6 +30,9 @@ pub enum Action {
     AdminOperationsRefresh,
     AdminOperationsAck,
     AdminSystem,
+    PortalDomain,
+    PortalDomainAsk,
+    PortalDomainStatus,
     DatabaseBackupNow,
     DatabaseBackupAudit,
     AdminUpdate,
@@ -251,6 +254,9 @@ fn parse_callback(data: &str) -> Action {
         "admin:operations:refresh" => Action::AdminOperationsRefresh,
         "admin:operations:ack" => Action::AdminOperationsAck,
         "admin:system" => Action::AdminSystem,
+        "admin:portal-domain" => Action::PortalDomain,
+        "admin:portal-domain:ask" => Action::PortalDomainAsk,
+        "admin:portal-domain:status" => Action::PortalDomainStatus,
         "admin:db-backup" => Action::DatabaseBackupNow,
         "admin:db-backup-audit" => Action::DatabaseBackupAudit,
         "admin:update" => Action::AdminUpdate,
@@ -2638,6 +2644,9 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminOperationsRefresh
         | AdminOperationsAck
         | AdminSystem
+        | PortalDomain
+        | PortalDomainAsk
+        | PortalDomainStatus
         | DatabaseBackupNow
         | DatabaseBackupAudit
         | AdminUpdate
@@ -3722,6 +3731,54 @@ async fn message_handler(
                 "Нужен полный HTTPS/HTTP URL с {order_id}. Для отключения отправьте off.",
             )
             .await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingPortalDomain) {
+        let raw = msg.text().unwrap_or_default().trim();
+        let domain = raw
+            .strip_prefix("https://")
+            .or_else(|| raw.strip_prefix("http://"))
+            .unwrap_or(raw)
+            .trim_end_matches('/');
+        let valid = domain.len() <= 253
+            && domain.contains('.')
+            && !domain.chars().any(|c| matches!(c, '/' | ':' | ' '))
+            && domain.split('.').all(|part| {
+                !part.is_empty()
+                    && part.len() <= 63
+                    && !part.starts_with('-')
+                    && !part.ends_with('-')
+                    && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            });
+        if !valid {
+            bot.send_message(msg.chat.id, "Введите только домен, например zpnet.pro. Допускается полный адрес https://zpnet.pro.")
+                .await?;
+            return Ok(());
+        }
+        bot.send_message(
+            msg.chat.id,
+            format!("⏳ Запускаю проверку DNS и настройку HTTPS для {domain}. Процесс продолжится в фоне, даже когда бот перезапустится."),
+        )
+        .await?;
+        match vpn.portal_domain_control("start", Some(domain)).await {
+            Ok(_) => {
+                bot.send_message(
+                    msg.chat.id,
+                    "✅ Настройка запущена. Обычно выпуск сертификата занимает до двух минут. Нажмите «Проверить статус» после возвращения бота.",
+                )
+                .reply_markup(menu::portal_domain_menu(true))
+                .await?;
+                dialogue.update(State::Idle).await?;
+            }
+            Err(error) => {
+                bot.send_message(
+                    msg.chat.id,
+                    format!("❌ Не удалось запустить настройку: {error}"),
+                )
+                .reply_markup(menu::portal_domain_menu(cfg.portal_public_url.is_some()))
+                .await?;
+            }
         }
         return Ok(());
     }
@@ -6213,6 +6270,35 @@ async fn callback_handler(
         }
         Action::AdminSystem => {
             admin_system_screen(&bot, chat, &settings).await?;
+        }
+        Action::PortalDomain => {
+            let current = cfg.portal_public_url.as_deref().unwrap_or("не настроен");
+            bot.send_message(
+                chat,
+                format!("🌐 Домен и HTTPS\n\nТекущий публичный адрес: {current}\nЛокальный портал: {}\n\nМастер проверит A-запись домена, установит Caddy, выпустит TLS-сертификат и обновит адрес кабинета. Порты 80 и 443 должны быть открыты на сервере.", cfg.portal_bind.as_deref().unwrap_or("отключён")),
+            )
+            .reply_markup(menu::portal_domain_menu(cfg.portal_public_url.is_some()))
+            .await?;
+        }
+        Action::PortalDomainAsk => {
+            bot.send_message(
+                chat,
+                "Введите домен без пути, например zpnet.pro.\n\nПеред запуском создайте у регистратора A-запись, ведущую на публичный IP сервера с ботом. Для отмены используйте /cancel.",
+            )
+            .await?;
+            dialogue.update(State::AwaitingPortalDomain).await?;
+        }
+        Action::PortalDomainStatus => {
+            let text = match vpn.portal_domain_control("status", None).await {
+                Ok(output) => format!(
+                    "🌐 Статус настройки домена\n\n{}",
+                    truncate_for_message(output)
+                ),
+                Err(error) => format!("❌ Не удалось получить статус: {error}"),
+            };
+            bot.send_message(chat, text)
+                .reply_markup(menu::portal_domain_menu(cfg.portal_public_url.is_some()))
+                .await?;
         }
         Action::DatabaseBackupNow => {
             bot.send_message(chat, "⏳ Создаю независимую копию SQLite и проверяю её…")
@@ -11584,6 +11670,8 @@ mod tests {
             menu::broadcast_templates_menu(),
             menu::broadcast_report_menu(1, true),
             menu::admin_system_hub(),
+            menu::portal_domain_menu(false),
+            menu::portal_domain_menu(true),
             menu::bot_update_confirm_menu(),
             menu::bot_update_status_menu(),
             menu::servers_menu(&[]),
@@ -11712,6 +11800,9 @@ mod tests {
             AdminOperationsRefresh,
             AdminOperationsAck,
             AdminSystem,
+            PortalDomain,
+            PortalDomainAsk,
+            PortalDomainStatus,
             DatabaseBackupNow,
             DatabaseBackupAudit,
             AdminUpdate,
@@ -11927,6 +12018,9 @@ mod tests {
                 AdminOperationsRefresh => {}
                 AdminOperationsAck => {}
                 AdminSystem => {}
+                PortalDomain => {}
+                PortalDomainAsk => {}
+                PortalDomainStatus => {}
                 DatabaseBackupNow => {}
                 DatabaseBackupAudit => {}
                 AdminUpdate => {}
@@ -12303,6 +12397,9 @@ mod tests {
             (Action::AdminOperationsRefresh, true, false),
             (Action::AdminOperationsAck, true, false),
             (Action::AdminSystem, true, false),
+            (Action::PortalDomain, true, false),
+            (Action::PortalDomainAsk, true, false),
+            (Action::PortalDomainStatus, true, false),
             (Action::DatabaseBackupNow, true, false),
             (Action::DatabaseBackupAudit, true, false),
             (Action::AdminUpdate, true, false),

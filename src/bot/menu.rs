@@ -291,6 +291,7 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
             cb("ℹ️ Справка", "admin:help"),
         ],
         vec![cb("⬆️ Обновить бота", "admin:update")],
+        vec![cb("🌐 Домен и HTTPS", "admin:portal-domain")],
         vec![cb(
             "🧪 Проверить систему сейчас",
             "admin:operations:refresh",
@@ -298,6 +299,23 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
         vec![cb("📋 Журнал обновления", "admin:update:status")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
+}
+
+pub fn portal_domain_menu(configured: bool) -> InlineKeyboardMarkup {
+    let mut rows = vec![vec![cb(
+        if configured {
+            "✏️ Изменить домен"
+        } else {
+            "➕ Подключить домен"
+        },
+        "admin:portal-domain:ask",
+    )]];
+    rows.push(vec![cb(
+        "🔄 Проверить статус",
+        "admin:portal-domain:status",
+    )]);
+    rows.push(vec![cb("⬅️ Система", "admin:system")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn bot_update_confirm_menu() -> InlineKeyboardMarkup {

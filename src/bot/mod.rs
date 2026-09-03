@@ -91,6 +91,7 @@ pub enum State {
     AwaitingTopupAmount,
     AwaitingPaymentInstructions,
     AwaitingAcquiringUrl,
+    AwaitingPortalDomain,
     AwaitingTariffPricesRub,
     AwaitingTariffPricesStars,
     AwaitingReferralPercent,

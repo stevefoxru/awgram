@@ -22,6 +22,7 @@ CLIENTCTL_PATH="/usr/local/libexec/awgram-clientctl"
 UPDATECTL_PATH="/usr/local/libexec/awgram-updatectl"
 DEPLOYCTL_PATH="/usr/local/libexec/awgram-deployctl"
 MIGRATECTL_PATH="/usr/local/libexec/awgram-migratectl"
+PORTAL_DOMAINCTL_PATH="/usr/local/libexec/awgram-portal-domainctl"
 SVC_USER="awgram"
 
 UI_LANG=""; MODE=""; TOKEN=""; ADMINS=""; MANAGE_SCRIPT=""; CLIENTS_DIR=""
@@ -619,6 +620,52 @@ AWGRAM_DEPLOYCTL
   chown root:root "$DEPLOYCTL_PATH"
 }
 
+install_portal_domainctl() {
+  install -d -m 755 /usr/local/libexec
+  cat > "$PORTAL_DOMAINCTL_PATH" <<'AWGRAM_PORTAL_DOMAINCTL'
+#!/usr/bin/env bash
+set -euo pipefail
+state=/var/lib/awgram/portal-domain-status
+log=/var/lib/awgram/portal-domain.log
+cmd="${1:-status}"
+valid_domain() {
+  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$1" == *.* && ${#1} -le 253 ]]
+}
+case "$cmd" in
+  start)
+    domain="${2:-}"
+    valid_domain "$domain" || { echo 'invalid domain' >&2; exit 2; }
+    command -v systemd-run >/dev/null 2>&1 || { echo 'systemd-run is required' >&2; exit 3; }
+    install -d -m 750 /var/lib/awgram
+    printf 'running:%s\n' "$domain" > "$state"; : > "$log"; chmod 640 "$state" "$log"
+    systemctl reset-failed awgram-portal-domain.service >/dev/null 2>&1 || true
+    systemd-run --quiet --collect --unit=awgram-portal-domain \
+      /usr/local/libexec/awgram-portal-domainctl run "$domain"
+    printf 'Настройка запущена для %s\n' "$domain"
+    ;;
+  run)
+    domain="${2:-}"
+    valid_domain "$domain" || exit 2
+    set +e
+    curl -fsSL --max-time 30 https://github.com/stevefoxru/awgram/releases/latest/download/portal-domain.sh \
+      | bash -s -- "$domain" > "$log" 2>&1
+    code=$?
+    set -e
+    if (( code == 0 )); then printf 'succeeded:%s\n' "$domain" > "$state"; else printf 'failed:%s:%s\n' "$code" "$domain" > "$state"; fi
+    exit "$code"
+    ;;
+  status)
+    printf 'Состояние: %s\n' "$(cat "$state" 2>/dev/null || printf 'ещё не запускалась')"
+    printf '%s\n' '--- последние события ---'
+    tail -n 30 "$log" 2>/dev/null || true
+    ;;
+  *) echo 'usage: awgram-portal-domainctl start DOMAIN|status' >&2; exit 2 ;;
+esac
+AWGRAM_PORTAL_DOMAINCTL
+  chmod 755 "$PORTAL_DOMAINCTL_PATH"
+  chown root:root "$PORTAL_DOMAINCTL_PATH"
+}
+
 install_migratectl() {
   install -d -m 755 /usr/local/libexec
   cat > "$MIGRATECTL_PATH" <<'AWGRAM_MIGRATECTL'
@@ -921,6 +968,7 @@ CONTROLLER
   install_updatectl
   install_deployctl
   install_migratectl
+  install_portal_domainctl
   # конфигурация и запуск
   write_config
   [ -z "$TOKEN" ] || write_env_token
@@ -1032,7 +1080,7 @@ cmd_help() {
 # ---------- hardened mode setup ----------
 write_sudoers() {
   local tmp; tmp="$(mktemp)"
-  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start, %s *, %s *\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" "$UPDATECTL_PATH" "$DEPLOYCTL_PATH" "$MIGRATECTL_PATH" > "$tmp"
+  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start, %s *, %s *, %s start *, %s status\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" "$UPDATECTL_PATH" "$DEPLOYCTL_PATH" "$MIGRATECTL_PATH" "$PORTAL_DOMAINCTL_PATH" "$PORTAL_DOMAINCTL_PATH" > "$tmp"
   chmod 440 "$tmp"
   visudo -c -f "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die err_sudoers; }
   mv -f "$tmp" "$SUDOERS_FILE"
@@ -1099,6 +1147,7 @@ cmd_update() {
     install_updatectl
     install_deployctl
     install_migratectl
+    install_portal_domainctl
     if [ "$MODE" = "hardened" ]; then write_sudoers; fi
     update_setup_script "$tag"
     [ ! -f "$SETUP_CONF" ] || save_setup_conf
@@ -1113,6 +1162,7 @@ cmd_update() {
   install_updatectl
   install_deployctl
   install_migratectl
+  install_portal_domainctl
   if [ "$MODE" = "hardened" ]; then write_sudoers; fi
   if is_systemd; then
     install_unit

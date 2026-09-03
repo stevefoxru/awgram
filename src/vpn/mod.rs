@@ -1256,6 +1256,35 @@ impl Vpn {
         }
     }
 
+    pub async fn portal_domain_control(
+        &self,
+        command: &str,
+        domain: Option<&str>,
+    ) -> Result<String> {
+        if !matches!(command, "start" | "status") {
+            return Err(crate::error::Error::Parse(
+                "неизвестная команда настройки домена".into(),
+            ));
+        }
+        let helper = std::path::Path::new("/usr/local/libexec/awgram-portal-domainctl");
+        let spec = RunSpec {
+            script: helper,
+            sudo_prefix: &self.sudo_prefix,
+            timeout_secs: self.timeout_secs,
+            extra_env: &[],
+        };
+        let args = domain.map_or_else(|| vec![command], |value| vec![command, value]);
+        let (out, code) = run(&spec, &args).await?;
+        if code == 0 {
+            Ok(out)
+        } else {
+            Err(crate::error::Error::ScriptFailed {
+                code: Some(code),
+                stderr: out,
+            })
+        }
+    }
+
     pub async fn local_legacy_migration(&self, command: &str) -> Result<String> {
         if !matches!(command, "preflight" | "start" | "status" | "rollback") {
             return Err(crate::error::Error::Parse(
