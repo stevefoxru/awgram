@@ -239,6 +239,21 @@ impl Store {
         .ok()
         .flatten()
     }
+
+    pub fn latest_installation_job(&self, server_id: i64) -> Option<InstallationJob> {
+        self.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT id,server_id,protocol,operation,status,stage,progress,error_code,backup_ref
+                     FROM installation_jobs WHERE server_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1",
+                    [server_id],
+                    job_from_row,
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+    }
 }
 
 #[cfg(test)]

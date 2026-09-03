@@ -968,6 +968,7 @@ enum AdminTextAction {
     Broadcast,
     Support,
     Settings,
+    AddServer,
 }
 
 fn parse_admin_text(text: &str) -> Option<AdminTextAction> {
@@ -993,6 +994,7 @@ fn parse_admin_text(text: &str) -> Option<AdminTextAction> {
         "📣 Рассылка" => AdminTextAction::Broadcast,
         "🆘 Обращения" => AdminTextAction::Support,
         "⚙️ Настройки" => AdminTextAction::Settings,
+        "/server_add" => AdminTextAction::AddServer,
         _ => return None,
     })
 }
@@ -2190,7 +2192,22 @@ fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64
     } else {
         String::new()
     };
-    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
+    let installation = settings.latest_installation_job(server.id).map_or_else(
+        || "не запускалась".to_string(),
+        |job| {
+            format!(
+                "#{} · {} · {}% · {}{}",
+                job.id,
+                job.status,
+                job.progress,
+                job.stage,
+                job.error_code
+                    .map(|value| format!(" · {value}"))
+                    .unwrap_or_default()
+            )
+        },
+    );
+    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🚀 Развёртывание\nПоследняя задача: {installation}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
         server.name,server.status,panel_health,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,if server.protocol=="amneziawg-2"{"AWG 2.0"}else{"AWG 1.0"},server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
@@ -3429,6 +3446,11 @@ async fn message_handler(
             }
             Some(AdminTextAction::Servers) => {
                 servers_screen(&bot, msg.chat.id, &settings).await?;
+                return Ok(());
+            }
+            Some(AdminTextAction::AddServer) => {
+                bot.send_message(msg.chat.id,"🧭 Мастер подключения нового сервера\n\nШаг 1 из 3. Отправьте понятное название сервера, например: Netherlands 3.0\n\nПосле создания мастер предложит автоматическую установку AWG 1.0, подключение панели или безопасную bootstrap-команду.").await?;
+                dialogue.update(State::AwaitingServerWizardName).await?;
                 return Ok(());
             }
             Some(AdminTextAction::Keys) => {
@@ -4778,6 +4800,20 @@ async fn message_handler(
         };
         let (node_secret, encrypted_secret) = vpn.create_node_secret()?;
         let controller_key = vpn.controller_public_key_b64()?;
+        let job_id =
+            settings.create_installation_job(server.id, "amneziawg-1", "install", uid, now_epoch());
+        if let Some(job_id) = job_id {
+            settings.update_installation_job(
+                job_id,
+                "running",
+                "ssh-bootstrap",
+                10,
+                None,
+                Some("Подключение к VPS и запуск bootstrap-сценария"),
+                None,
+                now_epoch(),
+            );
+        }
         let result = vpn
             .deploy_node(crate::vpn::DeployRequest {
                 host: &server.public_ip,
@@ -4795,6 +4831,18 @@ async fn message_handler(
         dialogue.update(State::Idle).await?;
         match result {
             Ok(_) => {
+                if let Some(job_id) = job_id {
+                    settings.update_installation_job(
+                        job_id,
+                        "running",
+                        "awaiting-health-check",
+                        70,
+                        None,
+                        Some("Bootstrap принят; ожидается перезагрузка узла и проверка AWG"),
+                        None,
+                        now_epoch(),
+                    );
+                }
                 settings.set_node_secret(server.id, &encrypted_secret, now_epoch());
                 settings.set_server_status(server.id, "maintenance", now_epoch());
                 settings.set_server_provisioning(server.id, false, now_epoch());
@@ -4802,6 +4850,18 @@ async fn message_handler(
                     .reply_markup(menu::server_card_menu(server.id)).await?;
             }
             Err(error) => {
+                if let Some(job_id) = job_id {
+                    settings.update_installation_job(
+                        job_id,
+                        "failed",
+                        "ssh-bootstrap",
+                        10,
+                        Some("deploy_failed"),
+                        Some(&error.to_string()),
+                        None,
+                        now_epoch(),
+                    );
+                }
                 tracing::warn!(server_id = server.id, %error, "server deployment failed");
                 bot.send_message(
                     msg.chat.id,
@@ -6696,6 +6756,23 @@ async fn callback_handler(
                     settings.set_server_status(id, new_status, now_epoch());
                     if new_status == "offline" {
                         settings.set_server_provisioning(id, false, now_epoch());
+                    }
+                }
+                if new_status == "online" {
+                    if let Some(job) = settings
+                        .latest_installation_job(id)
+                        .filter(|job| job.status == "running")
+                    {
+                        settings.update_installation_job(
+                            job.id,
+                            "complete",
+                            "health-check",
+                            100,
+                            None,
+                            Some("AWG 1.0 и канал управления доступны"),
+                            None,
+                            now_epoch(),
+                        );
                     }
                 }
                 let affected = settings.server_client_count(id);
@@ -11040,6 +11117,14 @@ mod tests {
         assert_eq!(
             parse_admin_text("🏠 Кабинет"),
             Some(AdminTextAction::Dashboard)
+        );
+    }
+
+    #[test]
+    fn server_add_command_opens_owner_wizard() {
+        assert_eq!(
+            parse_admin_text("/server_add"),
+            Some(AdminTextAction::AddServer)
         );
     }
 
