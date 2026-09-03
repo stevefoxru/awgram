@@ -51,6 +51,23 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn frontend_css() -> ([(&'static str, &'static str); 1], &'static str) {
+    (
+        [(header::CONTENT_TYPE.as_str(), "text/css; charset=utf-8")],
+        APP_CSS,
+    )
+}
+
+async fn frontend_js() -> ([(&'static str, &'static str); 1], &'static str) {
+    (
+        [(
+            header::CONTENT_TYPE.as_str(),
+            "text/javascript; charset=utf-8",
+        )],
+        APP_JS,
+    )
+}
+
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -121,6 +138,63 @@ async fn me(State(state): State<PortalState>, headers: HeaderMap) -> Response {
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn portal_session(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    Json(serde_json::json!({
+        "user_id": user_id,
+        "role": if state.admin_ids.contains(&user_id) { "owner" } else { "customer" },
+        "is_admin": state.admin_ids.contains(&user_id),
+    }))
+    .into_response()
+}
+
+async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&user_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let now = now_epoch();
+    let users = state.store.admin_user_stats(now);
+    let clients = state.store.registered_clients();
+    let online = clients
+        .iter()
+        .filter(|client| client.last_handshake.is_some_and(|value| now - value < 300))
+        .count();
+    let servers = state
+        .store
+        .vpn_servers()
+        .into_iter()
+        .map(|server| {
+            serde_json::json!({
+                "id": server.id,
+                "name": server.name,
+                "location": server.location,
+                "protocol": server.protocol,
+                "status": server.status,
+                "provisioning": server.enabled_for_provisioning,
+                "clients": state.store.server_client_count(server.id),
+                "capacity": server.capacity,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({
+        "users": {"total": users.total, "new_today": users.new_today, "new_30d": users.new_30d, "paying": users.paying, "blocked": users.blocked},
+        "keys": {"total": clients.len(), "online": online},
+        "servers": servers,
+        "payments_pending": state.store.pending_payments().len(),
+        "support_open": state.store.open_support_count(),
+    }))
+    .into_response()
 }
 
 async fn logout(State(state): State<PortalState>, headers: HeaderMap) -> Response {
@@ -503,8 +577,12 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let app = Router::new()
         .route("/", get(index))
+        .route("/assets/app.css", get(frontend_css))
+        .route("/assets/app.js", get(frontend_js))
         .route("/login", get(login))
+        .route("/api/session", get(portal_session))
         .route("/api/me", get(me))
+        .route("/api/admin/overview", get(admin_overview))
         .route("/api/logout", post(logout))
         .route("/api/keys/{name}/config", get(download_config))
         .route("/api/keys/{name}/qr", get(download_qr))
@@ -526,7 +604,13 @@ pub async fn run(
     axum::serve(listener, app).await
 }
 
-const INDEX_HTML: &str = r##"<!doctype html>
+const INDEX_HTML: &str = include_str!("../frontend/index.html");
+const APP_CSS: &str = include_str!("../frontend/app.css");
+const APP_JS: &str = include_str!("../frontend/app.js");
+
+/* Previous embedded frontend kept out of the binary by cfg for an easy audit trail. */
+#[cfg(any())]
+const LEGACY_INDEX_HTML: &str = r##"<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#101828"><title>ZuevVPN — личный кабинет</title>
 <style>
