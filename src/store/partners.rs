@@ -34,6 +34,16 @@ pub struct PartnerOrder {
     pub created_at: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PartnerSalesSummary {
+    pub total: i64,
+    pub pending: i64,
+    pub fulfilled: i64,
+    pub delivered: i64,
+    pub retail_kopecks: i64,
+    pub wholesale_kopecks: i64,
+}
+
 const ORDER_COLUMNS: &str = "id,partner_id,user_id,months,retail_price_kopecks,wholesale_price_kopecks,status,fulfilled_client_name,conf_path,qr_path,import_uri,delivered_at,created_at";
 
 fn order_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PartnerOrder> {
@@ -155,6 +165,33 @@ impl Store {
             let orders = statement.query_map(rusqlite::params![partner_id, limit as i64], order_row)?.collect();
             orders
         }).unwrap_or_default()
+    }
+
+    pub fn partner_customer_orders(
+        &self,
+        partner_id: i64,
+        user_id: i64,
+        limit: usize,
+    ) -> Vec<PartnerOrder> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(&format!("SELECT {ORDER_COLUMNS} FROM partner_orders WHERE partner_id=?1 AND user_id=?2 ORDER BY created_at DESC,id DESC LIMIT ?3"))?;
+            let orders = statement.query_map(rusqlite::params![partner_id, user_id, limit as i64], order_row)?.collect();
+            orders
+        }).unwrap_or_default()
+    }
+
+    pub fn partner_sales_summary(&self, partner_id: i64) -> PartnerSalesSummary {
+        self.with_conn(|connection| connection.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(status='pending'),0),COALESCE(SUM(status='fulfilled'),0),COALESCE(SUM(status='fulfilled' AND delivered_at IS NOT NULL),0),COALESCE(SUM(CASE WHEN status='fulfilled' THEN retail_price_kopecks ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='fulfilled' THEN wholesale_price_kopecks ELSE 0 END),0) FROM partner_orders WHERE partner_id=?1",
+            [partner_id], |row| Ok(PartnerSalesSummary { total: row.get(0)?, pending: row.get(1)?, fulfilled: row.get(2)?, delivered: row.get(3)?, retail_kopecks: row.get(4)?, wholesale_kopecks: row.get(5)? })))
+            .unwrap_or_default()
+    }
+
+    pub fn cancel_partner_order(&self, partner_id: i64, user_id: i64, id: i64, now: i64) -> bool {
+        self.with_conn(|connection| connection.execute(
+            "UPDATE partner_orders SET status='cancelled',updated_at=?4 WHERE id=?1 AND partner_id=?2 AND user_id=?3 AND status='pending'",
+            rusqlite::params![id, partner_id, user_id, now]))
+            .is_ok_and(|changed| changed == 1)
     }
 
     pub fn reject_partner_order(&self, id: i64, now: i64) -> bool {
@@ -401,6 +438,18 @@ mod tests {
         assert_eq!(store.undelivered_partner_orders(id).len(), 1);
         assert!(store.mark_partner_order_delivered(order.id, 7));
         assert!(store.undelivered_partner_orders(id).is_empty());
+        let summary = store.partner_sales_summary(id);
+        assert_eq!(summary.fulfilled, 1);
+        assert_eq!(summary.delivered, 1);
+        assert_eq!(summary.retail_kopecks, order.retail_price_kopecks);
+        store.upsert_user(9, None, "Other buyer", None, 8);
+        let cancellable = store.create_partner_order(id, 9, 3, 9).unwrap();
+        assert_eq!(
+            store.partner_customer_orders(id, 9, 10),
+            vec![cancellable.clone()]
+        );
+        assert!(store.cancel_partner_order(id, 9, cancellable.id, 10));
+        assert!(!store.cancel_partner_order(id, 9, cancellable.id, 11));
         assert!(store.set_partner_status(id, "suspended", 5));
         assert!(store.create_partner_order(id, 8, 1, 6).is_err());
     }

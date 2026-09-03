@@ -33,7 +33,7 @@ pub use groups::{
 };
 pub use inventory::{InventoryItem, InventoryReport, KeyRuntimeStats, ServerRuntimeSummary};
 pub use nodes::{InstallationJob, VpnInstance, VpnNode};
-pub use partners::{Partner, PartnerOrder};
+pub use partners::{Partner, PartnerOrder, PartnerSalesSummary};
 pub use portal::{PortalBalanceEntry, PortalKey, PortalOverview, PortalPayment, PortalTicket};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};

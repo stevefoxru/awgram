@@ -16,15 +16,15 @@ use crate::{
     store::{Partner, Store},
 };
 
-fn menu() -> KeyboardMarkup {
-    KeyboardMarkup::new(vec![
+fn menu(owner: bool) -> KeyboardMarkup {
+    let mut rows = vec![
         vec![
             KeyboardButton::new("🏠 Кабинет"),
             KeyboardButton::new("💳 Тарифы"),
         ],
         vec![
             KeyboardButton::new("🛒 Купить"),
-            KeyboardButton::new("🆘 Поддержка"),
+            KeyboardButton::new("🧾 Мои заказы"),
         ],
         vec![
             KeyboardButton::new("1 месяц"),
@@ -34,8 +34,26 @@ fn menu() -> KeyboardMarkup {
             KeyboardButton::new("6 месяцев"),
             KeyboardButton::new("12 месяцев"),
         ],
-    ])
-    .resize_keyboard()
+        vec![
+            KeyboardButton::new("❌ Отменить заявку"),
+            KeyboardButton::new("🆘 Поддержка"),
+        ],
+    ];
+    if owner {
+        rows.insert(0, vec![KeyboardButton::new("📊 Продажи")]);
+    }
+    KeyboardMarkup::new(rows).resize_keyboard()
+}
+
+fn order_status(order: &crate::store::PartnerOrder) -> &'static str {
+    match order.status.as_str() {
+        "pending" => "🟠 ожидает обработки",
+        "fulfilled" if order.delivered_at.is_some() => "✅ ключ доставлен",
+        "fulfilled" => "📤 ключ готовится к отправке",
+        "rejected" => "❌ отклонён",
+        "cancelled" => "⚪ отменён",
+        _ => "⏳ обрабатывается",
+    }
 }
 
 fn term(text: &str) -> Option<i64> {
@@ -130,7 +148,23 @@ async fn run_bot(partner: Partner, token: String, db_path: PathBuf) {
             store.upsert_user(user_id, from.username.as_deref(), &display_name, None, now);
             store.assign_partner_customer(partner.id, user_id, now);
             let text = msg.text().unwrap_or("");
-            let answer = if let Some(months) = term(text) {
+            let is_owner = user_id == partner.owner_user_id;
+            let answer = if text == "📊 Продажи" && is_owner {
+                let summary = store.partner_sales_summary(partner.id);
+                format!("📊 Продажи «{}»\n\nВсего заявок: {}\nОжидают: {}\nКлючей создано: {}\nДоставлено: {}\n\nРозничный оборот: {:.2} ₽\nОптовая сумма: {:.2} ₽\nМаржа: {:.2} ₽\n\nЭто управленческая сводка, а не банковский баланс.", partner.display_name, summary.total, summary.pending, summary.fulfilled, summary.delivered, summary.retail_kopecks as f64/100.0, summary.wholesale_kopecks as f64/100.0, (summary.retail_kopecks-summary.wholesale_kopecks) as f64/100.0)
+            } else if text == "🧾 Мои заказы" {
+                let orders = store.partner_customer_orders(partner.id, user_id, 10);
+                if orders.is_empty() { "🧾 У вас пока нет заказов.".into() } else {
+                    format!("🧾 Ваши заказы\n\n{}", orders.iter().map(|order| format!("#{} · {} мес. · {:.2} ₽\n{}", order.id, order.months, order.retail_price_kopecks as f64/100.0, order_status(order))).collect::<Vec<_>>().join("\n\n"))
+                }
+            } else if text == "❌ Отменить заявку" {
+                let pending = store.partner_customer_orders(partner.id, user_id, 20).into_iter().find(|order| order.status == "pending");
+                match pending {
+                    Some(order) if store.cancel_partner_order(partner.id, user_id, order.id, now) => format!("✅ Заявка #{} отменена. Новый заказ снова доступен.", order.id),
+                    Some(_) => "Заявка уже начала обрабатываться и не может быть отменена.".into(),
+                    None => "У вас нет заявки, которую можно отменить.".into(),
+                }
+            } else if let Some(months) = term(text) {
                 match store.create_partner_order(partner.id, user_id, months, now) {
                     Ok(order) => {
                         let owner_notice = format!(
@@ -162,7 +196,7 @@ async fn run_bot(partner: Partner, token: String, db_path: PathBuf) {
             } else {
                 format!("🏠 {}\n\nЗдесь можно выбрать тариф и оформить заявку на VPN. После оформления менеджер подтвердит оплату и выдаст ключ.", partner.display_name)
             };
-            bot.send_message(msg.chat.id, answer).reply_markup(menu()).await?;
+            bot.send_message(msg.chat.id, answer).reply_markup(menu(is_owner)).await?;
             Ok(())
         }
     }).await;

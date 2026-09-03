@@ -7188,8 +7188,10 @@ async fn callback_handler(
                 };
                 let state = match order.status.as_str() {
                     "pending" => "🟠 ожидает оплаты",
-                    "fulfilled" => "✅ ключ выдан",
+                    "fulfilled" if order.delivered_at.is_some() => "✅ ключ доставлен",
+                    "fulfilled" => "📤 ключ создан, доставка ожидается",
                     "rejected" => "❌ отклонён",
+                    "cancelled" => "⚪ отменён покупателем",
                     other => other,
                 };
                 bot.send_message(chat, format!("🛒 Заказ #{}\n\nПокупатель: {}\nСрок: {} мес.\nСтатус: {}\nРозница: {:.2} ₽\nОпт: {:.2} ₽\nМаржа: {:.2} ₽{}", order.id, order.user_id, order.months, state, order.retail_price_kopecks as f64/100.0, order.wholesale_price_kopecks as f64/100.0, (order.retail_price_kopecks-order.wholesale_price_kopecks) as f64/100.0, order.fulfilled_client_name.as_deref().map(|name| format!("\nКлюч: {name}")).unwrap_or_default()))
