@@ -5309,7 +5309,7 @@ async fn message_handler(
                         );
                         bot.send_message(msg.chat.id, i18n::group_created(lang, &raw))
                             .parse_mode(ParseMode::Html)
-                            .reply_markup(menu::main_menu(lang))
+                            .reply_markup(home_menu(&role, lang))
                             .await?;
                         dialogue.update(State::Idle).await?;
                     }
@@ -5349,7 +5349,7 @@ async fn message_handler(
                         );
                         bot.send_message(msg.chat.id, i18n::group_renamed(lang, &raw))
                             .parse_mode(ParseMode::Html)
-                            .reply_markup(menu::main_menu(lang))
+                            .reply_markup(home_menu(&role, lang))
                             .await?;
                         dialogue.update(State::Idle).await?;
                     }
@@ -5361,7 +5361,7 @@ async fn message_handler(
                     Err(crate::store::GroupError::NotFound) => {
                         // Группу удалили, пока владелец вводил новое имя.
                         bot.send_message(msg.chat.id, i18n::not_found(lang))
-                            .reply_markup(menu::main_menu(lang))
+                            .reply_markup(home_menu(&role, lang))
                             .await?;
                         dialogue.update(State::Idle).await?;
                     }
@@ -5395,13 +5395,13 @@ async fn message_handler(
                             )),
                         );
                         bot.send_message(msg.chat.id, i18n::group_quota_set(lang, quota))
-                            .reply_markup(menu::main_menu(lang))
+                            .reply_markup(home_menu(&role, lang))
                             .parse_mode(ParseMode::Html)
                             .await?;
                     } else {
                         // Группу удалили, пока владелец вводил лимит.
                         bot.send_message(msg.chat.id, i18n::not_found(lang))
-                            .reply_markup(menu::main_menu(lang))
+                            .reply_markup(home_menu(&role, lang))
                             .await?;
                     }
                     dialogue.update(State::Idle).await?;
@@ -5432,7 +5432,7 @@ async fn message_handler(
                         );
                         bot.send_message(msg.chat.id, i18n::admin_added(lang, new_admin, &gname))
                             .parse_mode(ParseMode::Html)
-                            .reply_markup(menu::main_menu(lang))
+                            .reply_markup(home_menu(&role, lang))
                             .await?;
                         let _ = first_admin_ever;
                     } else {
@@ -5460,7 +5460,7 @@ async fn message_handler(
                         msg.chat.id,
                         format!("✅ Ключ {name} привязан к пользователю {}.", user.user_id),
                     )
-                    .reply_markup(menu::main_menu(lang))
+                    .reply_markup(home_menu(&role, lang))
                     .await?;
                 }
                 dialogue.update(State::Idle).await?;
@@ -5496,7 +5496,7 @@ async fn message_handler(
                     },
                     _ => {
                         bot.send_message(msg.chat.id, i18n::menu_title(lang))
-                            .reply_markup(menu::main_menu(lang))
+                            .reply_markup(home_menu(&role, lang))
                             .parse_mode(ParseMode::Html)
                             .await?;
                     }
@@ -5752,6 +5752,7 @@ async fn finish_bulk(
     chat: ChatId,
     vpn: &Vpn,
     settings: &Store,
+    role: &Role,
     lang: Lang,
     prefix: &str,
     count: usize,
@@ -5854,7 +5855,7 @@ async fn finish_bulk(
                     names.len()
                 ),
             )
-            .reply_markup(menu::main_menu(lang))
+            .reply_markup(home_menu(role, lang))
             .await;
         return;
     }
@@ -5927,7 +5928,7 @@ async fn finish_bulk(
             let _ = bot
                 .send_message(chat, i18n::bulk_result_summary(lang, &res))
                 .parse_mode(ParseMode::Html)
-                .reply_markup(menu::main_menu(lang))
+                .reply_markup(home_menu(role, lang))
                 .await;
         }
         Err(e) => {
@@ -9749,7 +9750,7 @@ async fn callback_handler(
                         chat,
                         msg_id,
                         i18n::menu_title(lang),
-                        menu::main_menu(lang),
+                        home_menu(&role, lang),
                     )
                     .await;
                 }
@@ -10080,19 +10081,19 @@ async fn callback_handler(
             match regen_all_result {
                 Ok(crate::vpn::RegenAllOutcome::NoClients) => {
                     bot.send_message(chat, i18n::clients_empty(lang))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .parse_mode(ParseMode::Html)
                         .await?;
                 }
                 Ok(crate::vpn::RegenAllOutcome::Done(_n)) => {
                     bot.send_message(chat, i18n::regen_all_done(lang))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .parse_mode(ParseMode::Html)
                         .await?;
                 }
                 Ok(crate::vpn::RegenAllOutcome::Partial { .. }) => {
                     bot.send_message(chat, i18n::regen_all_partial(lang))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .parse_mode(ParseMode::Html)
                         .await?;
                 }
@@ -10303,7 +10304,7 @@ async fn callback_handler(
             // только 1/3/5/10, но защищаемся от crafted bulk:N извне.
             if count == 0 || count > crate::vpn::validate::MAX_BULK as usize {
                 bot.send_message(chat, session_expired_text(lang))
-                    .reply_markup(menu::main_menu(lang))
+                    .reply_markup(home_menu(&role, lang))
                     .parse_mode(ParseMode::Html)
                     .await?;
                 return Ok(());
@@ -10315,7 +10316,7 @@ async fn callback_handler(
                 State::AwaitingBulkCount { prefix } => prefix,
                 _ => {
                     bot.send_message(chat, session_expired_text(lang))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .parse_mode(ParseMode::Html)
                         .await?;
                     return Ok(());
@@ -10335,7 +10336,7 @@ async fn callback_handler(
                 State::AwaitingBulkExpiry { prefix, count } => (prefix, count),
                 _ => {
                     bot.send_message(chat, session_expired_text(lang))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .parse_mode(ParseMode::Html)
                         .await?;
                     return Ok(());
@@ -10377,7 +10378,7 @@ async fn callback_handler(
                 } => (prefix, count, expires),
                 _ => {
                     bot.send_message(chat, session_expired_text(lang))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .parse_mode(ParseMode::Html)
                         .await?;
                     return Ok(());
@@ -10435,6 +10436,7 @@ async fn callback_handler(
                 chat,
                 &vpn,
                 &settings,
+                &role,
                 lang,
                 &prefix,
                 count,
@@ -10507,7 +10509,7 @@ async fn callback_handler(
                     .reply_markup(if role.is_owner() {
                         menu::vpn_service_menu()
                     } else {
-                        menu::main_menu(lang)
+                        home_menu(&role, lang)
                     })
                     .parse_mode(ParseMode::Html)
                     .await?;
@@ -10530,7 +10532,7 @@ async fn callback_handler(
                         let _ = bot.delete_message(chat, m.id).await;
                     }
                     bot.send_message(chat, i18n::repair_result(lang, out.rc))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .parse_mode(ParseMode::Html)
                         .await?;
                 }
@@ -10553,7 +10555,7 @@ async fn callback_handler(
                 chat,
                 msg_id,
                 i18n::menu_title(lang),
-                menu::main_menu(lang),
+                home_menu(&role, lang),
             )
             .await;
         }
@@ -10657,7 +10659,7 @@ async fn callback_handler(
                     chat,
                     msg_id,
                     i18n::backups_empty(lang),
-                    menu::main_menu(lang),
+                    home_menu(&role, lang),
                 )
                 .await;
             }
@@ -10687,7 +10689,7 @@ async fn callback_handler(
                         chat,
                         msg_id,
                         i18n::backup_not_found(lang),
-                        menu::main_menu(lang),
+                        home_menu(&role, lang),
                     )
                     .await;
                 }
@@ -10707,7 +10709,7 @@ async fn callback_handler(
                 }
                 None => {
                     bot.send_message(chat, i18n::backup_not_found(lang))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .await?;
                 }
             },
@@ -10733,7 +10735,7 @@ async fn callback_handler(
                         chat,
                         msg_id,
                         i18n::backup_not_found(lang),
-                        menu::main_menu(lang),
+                        home_menu(&role, lang),
                     )
                     .await;
                 }
@@ -10748,7 +10750,7 @@ async fn callback_handler(
                 Ok(()) => {
                     settings.log_event(now_epoch(), EventKind::Restore, None, Some(uid), None);
                     bot.send_message(chat, i18n::restore_done(lang))
-                        .reply_markup(menu::main_menu(lang))
+                        .reply_markup(home_menu(&role, lang))
                         .parse_mode(ParseMode::Html)
                         .await?;
                 }
@@ -10771,7 +10773,7 @@ async fn callback_handler(
                         .reply_markup(if role.is_owner() {
                             menu::vpn_service_menu()
                         } else {
-                            menu::main_menu(lang)
+                            home_menu(&role, lang)
                         })
                         .await?;
                 }
@@ -10796,7 +10798,7 @@ async fn callback_handler(
                         .reply_markup(if role.is_owner() {
                             menu::vpn_service_menu()
                         } else {
-                            menu::main_menu(lang)
+                            home_menu(&role, lang)
                         })
                         .parse_mode(ParseMode::Html)
                         .await?;
@@ -10895,7 +10897,7 @@ async fn callback_handler(
             );
             bot.send_message(chat, i18n::group_deleted(lang, &name))
                 .parse_mode(ParseMode::Html)
-                .reply_markup(menu::main_menu(lang))
+                .reply_markup(home_menu(&role, lang))
                 .await?;
         }
         Action::GroupDeleteAllAsk(id) => {
@@ -10949,7 +10951,7 @@ async fn callback_handler(
                 );
                 bot.send_message(chat, i18n::group_deleted(lang, &name))
                     .parse_mode(ParseMode::Html)
-                    .reply_markup(menu::main_menu(lang))
+                    .reply_markup(home_menu(&role, lang))
                     .await?;
             } else {
                 // Часть клиентов не удалилась — группу не трогаем, чтобы не
@@ -11046,7 +11048,7 @@ async fn callback_handler(
             };
             bot.send_message(chat, i18n::client_moved(lang, &name, gname.as_deref()))
                 .parse_mode(ParseMode::Html)
-                .reply_markup(menu::main_menu(lang))
+                .reply_markup(home_menu(&role, lang))
                 .await?;
         }
         Action::GroupRegenAsk(id) => {
@@ -11090,7 +11092,7 @@ async fn callback_handler(
                 let _ = bot.delete_message(chat, m.id).await;
             }
             bot.send_message(chat, i18n::group_regen_done(lang, ok, failed))
-                .reply_markup(menu::main_menu(lang))
+                .reply_markup(home_menu(&role, lang))
                 .parse_mode(ParseMode::Html)
                 .await?;
         }

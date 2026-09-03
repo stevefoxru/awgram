@@ -22,6 +22,7 @@ pub fn profile_menu(portal_enabled: bool) -> InlineKeyboardMarkup {
         cb("🎟 Промокод", "legacy:promo"),
     ]);
     rows.push(vec![cb("🔔 Уведомления", "guide:notifications")]);
+    rows.push(vec![cb("🆘 Поддержка", "support:new:general")]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -383,71 +384,51 @@ pub fn server_setup_method_menu(id: i64) -> InlineKeyboardMarkup {
 
 pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("— КЛЮЧИ —", &format!("server:{id}"))],
-        vec![cb(
-            "🎯 Новые ключи и замена",
-            &format!("server:default:{id}"),
-        )],
-        vec![cb(
-            "🔄 Синхронизировать панель",
-            &format!("server:panel:sync:{id}"),
-        )],
-        vec![cb(
-            "🧾 Сверить ключи с базой",
-            &format!("server:panel:audit:{id}"),
-        )],
-        vec![cb(
-            "📣 Владельцам ключей",
-            &format!("broadcast:audience:server:{id}"),
-        )],
-        vec![cb("— СОСТОЯНИЕ —", &format!("server:{id}"))],
+        vec![
+            cb(
+                "🎯 Использовать для выдачи",
+                &format!("server:default:{id}"),
+            ),
+            cb("🔄 Синхронизация", &format!("server:panel:sync:{id}")),
+        ],
+        vec![
+            cb("🧾 Сверка с базой", &format!("server:panel:audit:{id}")),
+            cb(
+                "📣 Рассылка владельцам",
+                &format!("broadcast:audience:server:{id}"),
+            ),
+        ],
         vec![
             cb("🩺 Проверить ключи", &format!("server:check:{id}")),
-            cb("🔬 Диагностика", &format!("server:diagnose:{id}")),
+            cb("🔬 Панель и API", &format!("server:diagnose:{id}")),
         ],
-        vec![cb(
-            "🧬 Проверить API панели",
-            &format!("server:diagnose:{id}"),
-        )],
         vec![
+            cb("🚧 Обслуживание", &format!("server:maintenance:{id}")),
             cb(
-                "🚧 Начать обслуживание",
-                &format!("server:maintenance:{id}"),
-            ),
-            cb(
-                "✅ Завершить обслуживание",
+                "✅ Вернуть online",
                 &format!("server:maintenance:finish:{id}"),
             ),
         ],
-        vec![cb(
-            "🧪 Тестовая выдача ключа",
-            &format!("server:probe:{id}"),
-        )],
-        vec![cb("— НАСТРОЙКА VPS —", &format!("server:{id}"))],
+        vec![cb("🧪 Тестовая выдача", &format!("server:probe:{id}"))],
         vec![
-            cb("✏️ Паспорт", &format!("server:edit:{id}")),
-            cb("💳 Оплата", &format!("server:bill:{id}")),
+            cb("✏️ Данные VPS", &format!("server:edit:{id}")),
+            cb("💳 Оплата VPS", &format!("server:bill:{id}")),
         ],
         vec![
-            cb("🔗 Подключить VPS", &format!("server:enroll:{id}")),
+            cb("🔗 SSH-мост", &format!("server:enroll:{id}")),
+            cb("🔐 VPN-панель", &format!("server:panel:{id}")),
+        ],
+        vec![
+            cb("🚀 Установить AWG", &format!("server:deploy:{id}")),
+            cb("🔀 Миграция AWG", &format!("server:migrate:{id}")),
+        ],
+        vec![
             cb(
-                "🚫 Отозвать подключение",
+                "🚫 Отозвать SSH-мост",
                 &format!("server:enroll:revoke:{id}"),
             ),
+            cb("🛡 VPN-служба", "admin:vpn"),
         ],
-        vec![cb(
-            "🚀 Установить VPN на VPS",
-            &format!("server:deploy:{id}"),
-        )],
-        vec![cb(
-            "🔐 Подключить / сменить панель",
-            &format!("server:panel:{id}"),
-        )],
-        vec![cb(
-            "🔀 Перевести AWG 2.0 → 1.0",
-            &format!("server:migrate:{id}"),
-        )],
-        vec![cb("🛡 Управление VPN", "admin:vpn")],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),
             cb("🏠 Админ-панель", "admin:dashboard"),
@@ -556,7 +537,7 @@ pub fn vpn_service_menu() -> InlineKeyboardMarkup {
             "🔀 Переход локального сервера на AWG 1.0",
             "migration:local",
         )],
-        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+        vec![cb("⬅️ Система", "admin:system")],
     ])
 }
 
@@ -580,7 +561,7 @@ pub fn admin_create_menu() -> InlineKeyboardMarkup {
             cb("👤 Пользователи", "admin:owners"),
             cb("🗂 Группы", "groups"),
         ],
-        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+        vec![cb("⬅️ Ключи", "admin:keys")],
     ])
 }
 
@@ -588,7 +569,7 @@ pub fn admin_roles_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb("➕ Добавить сотрудника", "admin:role:add")],
         vec![cb("➖ Убрать сотрудника", "admin:role:remove")],
-        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+        vec![cb("⬅️ Пользователи", "admin:users")],
     ])
 }
 
@@ -757,7 +738,7 @@ pub fn bulk_manage_menu() -> InlineKeyboardMarkup {
         vec![cb("⏸ Отключить по префиксу", "admin:bulk:disable")],
         vec![cb("▶️ Включить по префиксу", "admin:bulk:enable")],
         vec![cb("📅 Продлить по префиксу", "admin:bulk:extend")],
-        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+        vec![cb("⬅️ Ключи", "admin:keys")],
     ])
 }
 
@@ -784,6 +765,7 @@ pub fn statistics_menu() -> InlineKeyboardMarkup {
             cb("💰 Доходы", "stats:finance"),
         ],
         vec![cb("🔑 Открыть ключи", "list"), cb("🗂 Группы", "groups")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
 
@@ -897,6 +879,7 @@ pub fn buy_terms_menu(prices: [i64; 4]) -> InlineKeyboardMarkup {
                 "buy:term:12",
             ),
         ],
+        vec![cb("⬅️ Выбор сервера", "buy")],
     ])
 }
 
@@ -969,6 +952,8 @@ pub fn buy_method_menu(months: i64, acquiring: bool) -> InlineKeyboardMarkup {
             )],
         );
     }
+    rows.push(vec![cb("⬅️ Выбрать другой срок", "buy")]);
+    rows.push(vec![cb("🏠 Кабинет", "profile")]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -995,7 +980,10 @@ pub fn bulk_servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardM
 }
 
 pub fn payment_paid_menu(id: i64) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![cb("✅ Я оплатил", &format!("buy:paid:{id}"))]])
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("✅ Я оплатил", &format!("buy:paid:{id}"))],
+        vec![cb("🏠 Кабинет", "profile")],
+    ])
 }
 
 pub fn payment_admin_menu(id: i64) -> InlineKeyboardMarkup {
@@ -1024,6 +1012,7 @@ pub fn support_category_menu() -> InlineKeyboardMarkup {
             cb("🐞 Ошибка", "support:new:bug"),
             cb("💬 Другой вопрос", "support:new:general"),
         ],
+        vec![cb("⬅️ Кабинет", "profile")],
     ])
 }
 
@@ -1044,9 +1033,12 @@ pub fn support_ticket_menu(id: i64) -> InlineKeyboardMarkup {
 }
 
 pub fn support_rating_menu(id: i64) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![(1..=5)
-        .map(|v| cb(&format!("{v}⭐"), &format!("support:rate:{id}:{v}")))
-        .collect::<Vec<_>>()])
+    InlineKeyboardMarkup::new(vec![
+        (1..=5)
+            .map(|v| cb(&format!("{v}⭐"), &format!("support:rate:{id}:{v}")))
+            .collect::<Vec<_>>(),
+        vec![cb("🏠 Кабинет", "profile")],
+    ])
 }
 
 pub fn support_filters_menu(tickets: &[crate::store::SupportTicket]) -> InlineKeyboardMarkup {
@@ -1061,7 +1053,7 @@ pub fn support_filters_menu(tickets: &[crate::store::SupportTicket]) -> InlineKe
             &format!("support:ticket:{}", t.id),
         )]
     }));
-    rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
+    rows.push(vec![cb("⬅️ Связь", "admin:communication")]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -1109,16 +1101,18 @@ pub fn broadcast_audience_menu() -> InlineKeyboardMarkup {
             cb("⏳ Истекают за 7 дней", "broadcast:audience:expiring"),
             cb("🆕 Без ключей", "broadcast:audience:nokeys"),
         ],
-        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+        vec![cb("⬅️ Связь", "admin:communication")],
     ])
 }
 
 pub fn customer_keys_menu(items: &[(String, String)]) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(
-        items
-            .iter()
-            .map(|(name, title)| vec![cb(title, &format!("mykey:{name}"))]),
-    )
+    let mut rows = items
+        .iter()
+        .map(|(name, title)| vec![cb(title, &format!("mykey:{name}"))])
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("➕ Купить новый ключ", "buy")]);
+    rows.push(vec![cb("⬅️ Кабинет", "profile")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
@@ -1158,6 +1152,7 @@ pub fn instructions_menu() -> InlineKeyboardMarkup {
         vec![cb("🆘 Помощь с Keenetic", "support:new:router")],
         vec![cb("🩺 Не подключается", "guide:trouble")],
         vec![cb("🆘 Поддержка", "support:new:connection")],
+        vec![cb("⬅️ Кабинет", "profile")],
     ])
 }
 
@@ -1253,6 +1248,7 @@ pub fn replacement_confirm_menu(id: i64) -> InlineKeyboardMarkup {
         vec![cb("✅ Новый ключ работает", &format!("move:confirm:{id}"))],
         vec![cb("❌ Не подключается", &format!("move:cancel:{id}"))],
         vec![cb("📖 Как установить", "guide:awg")],
+        vec![cb("🏠 Мои ключи", "mykeys")],
     ])
 }
 
@@ -1278,6 +1274,7 @@ pub fn renew_terms_menu(name: &str, prices: [i64; 4]) -> InlineKeyboardMarkup {
                 &format!("renew:term:{name}:12"),
             ),
         ],
+        vec![cb("⬅️ К ключу", &format!("mykey:{name}"))],
     ])
 }
 
@@ -1295,6 +1292,7 @@ pub fn auto_renew_menu(name: &str) -> InlineKeyboardMarkup {
             "❌ Выключить автопродление",
             &format!("autorenew:{name}:1:off"),
         )],
+        vec![cb("⬅️ К ключу", &format!("mykey:{name}"))],
     ])
 }
 
@@ -1312,6 +1310,8 @@ pub fn renew_method_menu(name: &str, months: i64) -> InlineKeyboardMarkup {
             "⭐ Telegram Stars",
             &format!("renew:method:{name}:{months}:stars"),
         )],
+        vec![cb("⬅️ Выбрать другой срок", &format!("renew:{name}"))],
+        vec![cb("🏠 Мои ключи", "mykeys")],
     ])
 }
 
@@ -1356,6 +1356,7 @@ pub fn main_menu(lang: Lang) -> InlineKeyboardMarkup {
         ],
         vec![cb(&i18n::btn_groups(lang), "groups")],
         vec![cb(&i18n::btn_settings(lang), "settings")],
+        vec![cb("🏠 Главное меню", "menu")],
     ])
 }
 
@@ -1558,7 +1559,7 @@ pub fn settings_menu(
             },
         )],
         vec![cb("💳 Реквизиты оплаты", "set:payment")],
-        vec![cb(&i18n::btn_back(lang), "admin:dashboard")],
+        vec![cb(&i18n::btn_back(lang), "admin:system")],
     ])
 }
 
@@ -1967,7 +1968,7 @@ pub fn modify_param_menu(lang: Lang, name: &str) -> InlineKeyboardMarkup {
 pub fn confirm_restart_menu(lang: Lang) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb(&i18n::btn_restart_go(lang), "restart_go")],
-        vec![cb(&i18n::btn_back(lang), "menu")],
+        vec![cb(&i18n::btn_back(lang), "admin:vpn")],
     ])
 }
 
@@ -1975,7 +1976,7 @@ pub fn backup_menu(lang: Lang) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb(&i18n::btn_backup_new(lang), "bk:new")],
         vec![cb(&i18n::btn_backup_list(lang), "bk:list")],
-        vec![cb(&i18n::btn_back(lang), "menu")],
+        vec![cb(&i18n::btn_back(lang), "admin:system")],
     ])
 }
 
@@ -1988,7 +1989,7 @@ pub fn backups_list(lang: Lang, backups: &[BackupFile]) -> InlineKeyboardMarkup 
         .enumerate()
         .map(|(idx, bf)| vec![cb(&bf.name, &format!("bk:card:{idx}"))])
         .collect();
-    rows.push(vec![cb(&i18n::btn_back(lang), "menu")]);
+    rows.push(vec![cb(&i18n::btn_back(lang), "backup")]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -1998,15 +1999,18 @@ pub fn backup_card(lang: Lang, idx: usize) -> InlineKeyboardMarkup {
             cb(&i18n::btn_download(lang), &format!("bk:dl:{idx}")),
             cb(&i18n::btn_restore(lang), &format!("bk:restore:{idx}")),
         ],
-        vec![cb(&i18n::btn_back(lang), "menu")],
+        vec![cb(&i18n::btn_back(lang), "bk:list")],
     ])
 }
 
 pub fn confirm_restore(lang: Lang, idx: usize) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![
-        cb(&i18n::btn_confirm(lang), &format!("bk:restore_yes:{idx}")),
-        cb(&i18n::btn_back(lang), "menu"),
-    ]])
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            &i18n::btn_confirm(lang),
+            &format!("bk:restore_yes:{idx}"),
+        )],
+        vec![cb(&i18n::btn_back(lang), &format!("bk:card:{idx}"))],
+    ])
 }
 
 #[cfg(test)]
@@ -2100,7 +2104,7 @@ mod tests {
     fn confirm_restart_menu_has_go_and_back() {
         let data = all_callback_data(&confirm_restart_menu(Lang::Ru));
         assert!(data.contains(&"restart_go".to_string()));
-        assert!(data.contains(&"menu".to_string()));
+        assert!(data.contains(&"admin:vpn".to_string()));
     }
 
     #[test]
@@ -2703,7 +2707,7 @@ mod tests {
         assert!(data_on.contains(&"set:psk:off".to_string()));
         assert!(data_on.contains(&"set:lang:ru".to_string()));
         assert!(data_on.contains(&"set:lang:en".to_string()));
-        assert!(data_on.contains(&"admin:dashboard".to_string()));
+        assert!(data_on.contains(&"admin:system".to_string()));
     }
 
     #[test]
@@ -2770,7 +2774,7 @@ mod tests {
             "restart",
             "repair",
             "migration:local",
-            "admin:dashboard",
+            "admin:system",
         ] {
             assert!(vpn.contains(&expected.to_string()), "missing {expected}");
         }
@@ -2789,7 +2793,7 @@ mod tests {
         assert!(all_callback_data(&finance_menu()).contains(&"admin:dashboard".to_string()));
         assert!(
             all_callback_data(&settings_menu(Lang::Ru, false, false, true, true, true))
-                .contains(&"admin:dashboard".to_string())
+                .contains(&"admin:system".to_string())
         );
     }
 
@@ -2879,7 +2883,7 @@ mod tests {
         let data = all_callback_data(&backup_menu(Lang::Ru));
         assert!(data.contains(&"bk:new".to_string()));
         assert!(data.contains(&"bk:list".to_string()));
-        assert!(data.contains(&"menu".to_string()));
+        assert!(data.contains(&"admin:system".to_string()));
     }
 
     #[test]
@@ -2901,7 +2905,7 @@ mod tests {
         let data = all_callback_data(&backups_list(Lang::Ru, &backups));
         assert!(data.contains(&"bk:card:0".to_string()));
         assert!(data.contains(&"bk:card:1".to_string()));
-        assert!(data.contains(&"menu".to_string()));
+        assert!(data.contains(&"backup".to_string()));
     }
 
     #[test]
@@ -2909,14 +2913,14 @@ mod tests {
         let data = all_callback_data(&backup_card(Lang::Ru, 2));
         assert!(data.contains(&"bk:dl:2".to_string()));
         assert!(data.contains(&"bk:restore:2".to_string()));
-        assert!(data.contains(&"menu".to_string()));
+        assert!(data.contains(&"bk:list".to_string()));
     }
 
     #[test]
     fn confirm_restore_encodes_index() {
         let data = all_callback_data(&confirm_restore(Lang::Ru, 3));
         assert!(data.contains(&"bk:restore_yes:3".to_string()));
-        assert!(data.contains(&"menu".to_string()));
+        assert!(data.contains(&"bk:card:3".to_string()));
     }
 
     fn g(id: i64, name: &str) -> crate::store::GroupRow {
