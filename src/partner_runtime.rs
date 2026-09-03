@@ -58,7 +58,10 @@ async fn run_bot(partner: Partner, token: String, db_path: PathBuf) {
         async move {
             let Some(from) = msg.from.as_ref() else { return Ok(()); };
             let Ok(user_id) = i64::try_from(from.id.0) else { return Ok(()); };
-            let now = chrono::Utc::now().timestamp();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
             let store = match Store::open(&db_path) {
                 Ok(store) => store,
                 Err(error) => { tracing::error!(partner_id=partner.id, %error, "partner database unavailable"); return Ok(()); }
