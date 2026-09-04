@@ -33,6 +33,10 @@ pub enum Action {
     PortalDomain,
     PortalDomainAsk,
     PortalDomainStatus,
+    MirrorBot,
+    MirrorBotAsk,
+    MirrorBotToggle(bool),
+    MirrorBotDelete,
     DatabaseBackupNow,
     DatabaseBackupAudit,
     AdminUpdate,
@@ -261,6 +265,11 @@ fn parse_callback(data: &str) -> Action {
         "admin:portal-domain" => Action::PortalDomain,
         "admin:portal-domain:ask" => Action::PortalDomainAsk,
         "admin:portal-domain:status" => Action::PortalDomainStatus,
+        "admin:mirror" => Action::MirrorBot,
+        "admin:mirror:ask" => Action::MirrorBotAsk,
+        "admin:mirror:on" => Action::MirrorBotToggle(true),
+        "admin:mirror:off" => Action::MirrorBotToggle(false),
+        "admin:mirror:delete" => Action::MirrorBotDelete,
         "admin:db-backup" => Action::DatabaseBackupNow,
         "admin:db-backup-audit" => Action::DatabaseBackupAudit,
         "admin:update" => Action::AdminUpdate,
@@ -1090,6 +1099,43 @@ fn save_partner_bot_token(cfg: &Config, partner_id: i64, token: &str) -> Result<
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+fn save_mirror_bot_token(cfg: &Config, token: &str) -> Result<String, String> {
+    use std::io::Write as _;
+    let parent = cfg
+        .db_path
+        .parent()
+        .ok_or_else(|| "у каталога базы нет родительского пути".to_string())?;
+    let directory = parent.join("bot-secrets");
+    std::fs::create_dir_all(&directory)
+        .map_err(|_| "не удалось создать защищённый каталог".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "не удалось ограничить права каталога".to_string())?;
+    }
+    let path = directory.join("mirror.token");
+    let temporary = directory.join(format!(".mirror-{}.tmp", now_epoch()));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|_| "не удалось подготовить файл токена".to_string())?;
+    file.write_all(token.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "не удалось записать токен".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| "не удалось ограничить права файла".to_string())?;
+    }
+    drop(file);
+    std::fs::rename(&temporary, &path).map_err(|_| "не удалось заменить токен".to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn customer_base_name(user: &crate::store::UserRow) -> String {
@@ -2674,6 +2720,10 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | PortalDomain
         | PortalDomainAsk
         | PortalDomainStatus
+        | MirrorBot
+        | MirrorBotAsk
+        | MirrorBotToggle(_)
+        | MirrorBotDelete
         | DatabaseBackupNow
         | DatabaseBackupAudit
         | AdminUpdate
@@ -3985,6 +4035,57 @@ async fn message_handler(
             Err(error) => {
                 bot.send_message(msg.chat.id, format!("❌ {error}. Токен не сохранён."))
                     .await?;
+            }
+        }
+        return Ok(());
+    }
+    if matches!(state, State::AwaitingMirrorToken) {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let token = msg.text().unwrap_or_default().trim().to_string();
+        let deleted = bot.delete_message(msg.chat.id, msg.id).await.is_ok();
+        let plausible = (20..=256).contains(&token.len())
+            && token.contains(':')
+            && !token.chars().any(char::is_whitespace)
+            && token != cfg.bot_token;
+        if !plausible {
+            bot.send_message(msg.chat.id, "❌ Некорректный токен или это токен основного бота. Отправьте токен отдельного бота от @BotFather.").await?;
+            return Ok(());
+        }
+        let Ok(me) = Bot::new(token.clone()).get_me().await else {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Telegram отклонил токен. Проверьте его в @BotFather.",
+            )
+            .await?;
+            return Ok(());
+        };
+        let username = me.username.clone().unwrap_or_default();
+        if username.is_empty() {
+            bot.send_message(msg.chat.id, "❌ Telegram не вернул username зеркала.")
+                .await?;
+            return Ok(());
+        }
+        match save_mirror_bot_token(&cfg, &token) {
+            Ok(secret_ref) => {
+                settings.set_mirror_bot_config(&username, &secret_ref, true, now_epoch());
+                dialogue.update(State::Idle).await?;
+                let warning = if deleted {
+                    ""
+                } else {
+                    "\n⚠️ Удалите сообщение с токеном вручную."
+                };
+                bot.send_message(msg.chat.id, format!("✅ Зеркало @{username} подключено и запустится в течение 5 секунд. Оно использует ту же базу, права и кабинет.{warning}"))
+                    .reply_markup(menu::mirror_bot_menu(true, true)).await?;
+            }
+            Err(error) => {
+                bot.send_message(
+                    msg.chat.id,
+                    format!("❌ Не удалось сохранить токен: {error}"),
+                )
+                .await?;
             }
         }
         return Ok(());
@@ -6346,6 +6447,42 @@ async fn callback_handler(
         }
         Action::AdminSystem => {
             admin_system_screen(&bot, chat, &settings).await?;
+        }
+        Action::MirrorBot => {
+            let config = settings.mirror_bot_config();
+            let (text, configured, enabled) = match config {
+                Some((username, _, enabled, _)) => (format!("🪞 Бот-зеркало\n\nБот: @{username}\nСтатус: {}\n\nЗеркало полностью повторяет клиентскую и административную часть основного бота и использует общую базу.", if enabled { "🟢 работает" } else { "⏸ выключено" }), true, enabled),
+                None => ("🪞 Бот-зеркало\n\nНе подключено. Создайте отдельного бота через @BotFather и отправьте его токен мастеру. Основной бот продолжит работать скрыто.".into(), false, false),
+            };
+            bot.send_message(chat, text)
+                .reply_markup(menu::mirror_bot_menu(configured, enabled))
+                .await?;
+        }
+        Action::MirrorBotAsk => {
+            bot.send_message(chat, "🔐 Отправьте токен отдельного Telegram-бота от @BotFather одним сообщением. Сообщение будет удалено, токен сохранится в файле с правами 0600.")
+                .reply_markup(menu::admin_system_hub()).await?;
+            dialogue.update(State::AwaitingMirrorToken).await?;
+        }
+        Action::MirrorBotToggle(enabled) => {
+            if settings.set_mirror_bot_enabled(enabled, now_epoch()) {
+                bot.send_message(
+                    chat,
+                    if enabled {
+                        "✅ Зеркало включается. Оно начнёт принимать команды в течение 5 секунд."
+                    } else {
+                        "⏸ Зеркало выключается. Основной бот продолжает работать."
+                    },
+                )
+                .reply_markup(menu::mirror_bot_menu(true, enabled))
+                .await?;
+            }
+        }
+        Action::MirrorBotDelete => {
+            if let Some(path) = settings.clear_mirror_bot_config() {
+                let _ = std::fs::remove_file(path);
+            }
+            bot.send_message(chat, "🗑 Зеркало отключено, его токен удалён с сервера. Сам бот в @BotFather не удаляется.")
+                .reply_markup(menu::mirror_bot_menu(false, false)).await?;
         }
         Action::PortalDomain => {
             let current = cfg.portal_public_url.as_deref().unwrap_or("не настроен");
@@ -11943,6 +12080,10 @@ mod tests {
             PortalDomain,
             PortalDomainAsk,
             PortalDomainStatus,
+            MirrorBot,
+            MirrorBotAsk,
+            MirrorBotToggle(true),
+            MirrorBotDelete,
             DatabaseBackupNow,
             DatabaseBackupAudit,
             AdminUpdate,
@@ -12165,6 +12306,10 @@ mod tests {
                 PortalDomain => {}
                 PortalDomainAsk => {}
                 PortalDomainStatus => {}
+                MirrorBot => {}
+                MirrorBotAsk => {}
+                MirrorBotToggle(_) => {}
+                MirrorBotDelete => {}
                 DatabaseBackupNow => {}
                 DatabaseBackupAudit => {}
                 AdminUpdate => {}
@@ -12548,6 +12693,10 @@ mod tests {
             (Action::PortalDomain, true, false),
             (Action::PortalDomainAsk, true, false),
             (Action::PortalDomainStatus, true, false),
+            (Action::MirrorBot, true, false),
+            (Action::MirrorBotAsk, true, false),
+            (Action::MirrorBotToggle(true), true, false),
+            (Action::MirrorBotDelete, true, false),
             (Action::DatabaseBackupNow, true, false),
             (Action::DatabaseBackupAudit, true, false),
             (Action::AdminUpdate, true, false),

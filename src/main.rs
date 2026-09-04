@@ -113,25 +113,11 @@ async fn main() {
         vpn.clone(),
         store.clone(),
     ));
-
-    if let Some(token) = cfg.mirror_bot_token.clone() {
-        let mirror_cfg = cfg.clone();
-        let mirror_vpn = vpn.clone();
-        let mirror_store = store.clone();
-        tokio::spawn(async move {
-            tracing::info!("запуск long polling бота-зеркала");
-            Dispatcher::builder(Bot::new(token), handlers::schema())
-                .dependencies(dptree::deps![
-                    InMemStorage::<State>::new(),
-                    mirror_cfg,
-                    mirror_vpn,
-                    mirror_store
-                ])
-                .build()
-                .dispatch()
-                .await;
-        });
-    }
+    tokio::spawn(awgram::mirror_runtime::supervise(
+        cfg.clone(),
+        vpn.clone(),
+        store.clone(),
+    ));
 
     tracing::info!("запуск long polling основного бота");
     Dispatcher::builder(bot, handlers::schema())

@@ -293,6 +293,7 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
         ],
         vec![cb("⬆️ Обновить бота", "admin:update")],
         vec![cb("🌐 Домен и HTTPS", "admin:portal-domain")],
+        vec![cb("🪞 Бот-зеркало", "admin:mirror")],
         vec![cb(
             "🧪 Проверить систему сейчас",
             "admin:operations:refresh",
@@ -300,6 +301,34 @@ pub fn admin_system_hub() -> InlineKeyboardMarkup {
         vec![cb("📋 Журнал обновления", "admin:update:status")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
+}
+
+pub fn mirror_bot_menu(configured: bool, enabled: bool) -> InlineKeyboardMarkup {
+    let mut rows = vec![vec![cb(
+        if configured {
+            "🔑 Заменить токен"
+        } else {
+            "➕ Подключить зеркало"
+        },
+        "admin:mirror:ask",
+    )]];
+    if configured {
+        rows.push(vec![cb(
+            if enabled {
+                "⏸ Выключить"
+            } else {
+                "▶️ Включить"
+            },
+            if enabled {
+                "admin:mirror:off"
+            } else {
+                "admin:mirror:on"
+            },
+        )]);
+        rows.push(vec![cb("🗑 Удалить зеркало", "admin:mirror:delete")]);
+    }
+    rows.push(vec![cb("⬅️ Система", "admin:system")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn portal_domain_menu(configured: bool) -> InlineKeyboardMarkup {

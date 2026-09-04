@@ -5,6 +5,7 @@ pub mod collector;
 pub mod config;
 pub mod error;
 pub mod i18n;
+pub mod mirror_runtime;
 pub mod operations;
 pub mod partner_runtime;
 pub mod portal;

@@ -155,6 +155,40 @@ impl Store {
             )
         });
     }
+    pub fn mirror_bot_config(&self) -> Option<(String, String, bool, i64)> {
+        self.get_json("mirror_bot_config")
+    }
+    pub fn set_mirror_bot_config(
+        &self,
+        username: &str,
+        secret_ref: &str,
+        enabled: bool,
+        revision: i64,
+    ) {
+        self.set_json(
+            "mirror_bot_config",
+            &(
+                username.trim_start_matches('@').to_string(),
+                secret_ref.to_string(),
+                enabled,
+                revision,
+            ),
+        );
+    }
+    pub fn set_mirror_bot_enabled(&self, enabled: bool, revision: i64) -> bool {
+        let Some((username, secret_ref, _, _)) = self.mirror_bot_config() else {
+            return false;
+        };
+        self.set_mirror_bot_config(&username, &secret_ref, enabled, revision);
+        true
+    }
+    pub fn clear_mirror_bot_config(&self) -> Option<String> {
+        let secret = self.mirror_bot_config().map(|(_, path, _, _)| path);
+        let _ = self.with_conn(|connection| {
+            connection.execute("DELETE FROM settings WHERE key='mirror_bot_config'", [])
+        });
+        secret
+    }
     pub fn tariff_price_kopecks(&self, months: i64) -> Option<i64> {
         let defaults = [20_000, 60_000, 100_000, 200_000];
         let prices = self
