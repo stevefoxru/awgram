@@ -436,6 +436,45 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn server_edit_menu(id: i64) -> InlineKeyboardMarkup {
+    let item = |label: &str, field: &str| cb(label, &format!("server:editfield:{id}:{field}"));
+    InlineKeyboardMarkup::new(vec![
+        vec![item("🏷 Название", "name"), item("🌍 Локация", "location")],
+        vec![item("🖥 Hostname", "hostname"), item("🌐 IP", "public_ip")],
+        vec![
+            item("🏢 Провайдер", "provider"),
+            item("📊 Вместимость", "capacity"),
+        ],
+        vec![
+            item("📅 Дата открытия", "opened_at"),
+            item("📝 Заметка", "note"),
+        ],
+        vec![cb("⬅️ К серверу", &format!("server:{id}"))],
+    ])
+}
+
+pub fn cancel_to_server_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![cb("❌ Отмена", &format!("server:{id}"))]])
+}
+
+pub fn server_billing_edit_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("📅 +1 месяц", &format!("server:billing:extend:{id}:1")),
+            cb("📅 +3 месяца", &format!("server:billing:extend:{id}:3")),
+        ],
+        vec![
+            cb("📅 +6 месяцев", &format!("server:billing:extend:{id}:6")),
+            cb("📅 +12 месяцев", &format!("server:billing:extend:{id}:12")),
+        ],
+        vec![cb(
+            "✏️ Точная дата и реквизиты",
+            &format!("server:billing:custom:{id}"),
+        )],
+        vec![cb("⬅️ К серверу", &format!("server:{id}"))],
+    ])
+}
+
 pub fn server_inventory_menu(
     id: i64,
     panel_only: bool,
@@ -1717,6 +1756,10 @@ fn filter_label(lang: Lang, f: ClientFilter) -> String {
         (Lang::En, ClientFilter::Offline) => "Offline",
         (Lang::Ru, ClientFilter::Never) => "Никогда",
         (Lang::En, ClientFilter::Never) => "Never",
+        (Lang::Ru, ClientFilter::Unowned) => "Без владельца",
+        (Lang::En, ClientFilter::Unowned) => "Unowned",
+        (Lang::Ru, ClientFilter::UsedUnowned) => "Использовались без владельца",
+        (Lang::En, ClientFilter::UsedUnowned) => "Used, unowned",
     };
     format!("{mark} {name}")
 }
@@ -1727,6 +1770,8 @@ fn filter_row(lang: Lang, current: ClientFilter) -> Vec<InlineKeyboardButton> {
         ClientFilter::Online,
         ClientFilter::Offline,
         ClientFilter::Never,
+        ClientFilter::Unowned,
+        ClientFilter::UsedUnowned,
     ]
     .iter()
     .map(|&f| {

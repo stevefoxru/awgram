@@ -164,6 +164,10 @@ pub enum State {
     AwaitingServerPassport {
         server_id: i64,
     },
+    AwaitingServerField {
+        server_id: i64,
+        field: String,
+    },
     AwaitingServerDeployCredentials {
         server_id: i64,
     },

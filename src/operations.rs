@@ -457,6 +457,11 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         }
     }
 
+    // Remote panel samples are collected by this monitor even when the controller
+    // has no local VPN. Keep daily analytics current in controller-only mode too.
+    store.rollup(now);
+    store.prune(now);
+
     if !cfg.controller_only
         && !store.local_migration_notice_sent()
         && vpn
@@ -504,6 +509,9 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         let Some(paid_until) = server.paid_until else {
             continue;
         };
+        if store.server_billing_snoozed_until(server.id) > now {
+            continue;
+        }
         let seconds = paid_until - now;
         let days = seconds.div_euclid(86_400);
         let threshold = match days {
@@ -536,7 +544,29 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
             std::cmp::Ordering::Equal => "сегодня".into(),
             std::cmp::Ordering::Greater => format!("через {days} дн."),
         };
-        notify_admins(bot,cfg,format!("💳 Оплата VPN-сервера {urgency}\n\n🖥 {}\n🏢 {}\n🌐 {}\n📅 Оплачен до: {}\n💰 Сумма: {}",server.name,server.provider,server.public_ip,crate::calendar::format_date(paid_until),cost)).await;
+        let text = format!("💳 Оплата VPN-сервера {urgency}\n\n🖥 {}\n🏢 {}\n🌐 {}\n📅 Оплачен до: {}\n💰 Сумма: {}",server.name,server.provider,server.public_ip,crate::calendar::format_date(paid_until),cost);
+        let keyboard = teloxide::types::InlineKeyboardMarkup::new(vec![
+            vec![
+                teloxide::types::InlineKeyboardButton::callback(
+                    "⏰ Не оплачено · завтра",
+                    format!("server:billing:snooze:{}", server.id),
+                ),
+                teloxide::types::InlineKeyboardButton::callback(
+                    "✅ Указать оплату",
+                    format!("server:bill:{}", server.id),
+                ),
+            ],
+            vec![teloxide::types::InlineKeyboardButton::callback(
+                "🖥 Открыть сервер",
+                format!("server:{}", server.id),
+            )],
+        ]);
+        for id in &cfg.admin_ids {
+            let _ = bot
+                .send_message(ChatId(*id), &text)
+                .reply_markup(keyboard.clone())
+                .await;
+        }
     }
 
     match create_database_backup(cfg, store, now, false) {

@@ -51,7 +51,11 @@ pub enum Action {
     RemoteMigrationRollback(i64),
     ServerBilling,
     ServerBillingAsk(i64),
+    ServerBillingSnooze(i64),
+    ServerBillingExtend(i64, i64),
+    ServerBillingCustom(i64),
     ServerPassportAsk(i64),
+    ServerEditField(i64, String),
     ServerEnroll(i64),
     ServerEnrollRevoke(i64),
     ServerSetDefault(i64),
@@ -527,10 +531,33 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::LegacyRequestReject)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:billing:snooze:") {
+                v.parse()
+                    .map(Action::ServerBillingSnooze)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:billing:extend:") {
+                let mut parts = v.splitn(2, ':');
+                match (
+                    parts.next().and_then(|id| id.parse().ok()),
+                    parts.next().and_then(|months| months.parse().ok()),
+                ) {
+                    (Some(id), Some(months)) => Action::ServerBillingExtend(id, months),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("server:billing:custom:") {
+                v.parse()
+                    .map(Action::ServerBillingCustom)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:bill:") {
                 v.parse()
                     .map(Action::ServerBillingAsk)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:editfield:") {
+                let mut parts = v.splitn(2, ':');
+                match (parts.next().and_then(|id| id.parse().ok()), parts.next()) {
+                    (Some(id), Some(field)) => Action::ServerEditField(id, field.to_string()),
+                    _ => Action::Unknown,
+                }
             } else if let Some(v) = data.strip_prefix("server:edit:") {
                 v.parse()
                     .map(Action::ServerPassportAsk)
@@ -2665,7 +2692,11 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | RemoteMigrationRollback(_)
         | ServerBilling
         | ServerBillingAsk(_)
+        | ServerBillingSnooze(_)
+        | ServerBillingExtend(_, _)
+        | ServerBillingCustom(_)
         | ServerPassportAsk(_)
+        | ServerEditField(_, _)
         | ServerEnroll(_)
         | ServerEnrollRevoke(_)
         | ServerSetDefault(_)
@@ -4685,6 +4716,32 @@ async fn message_handler(
         }
         return Ok(());
     }
+    if let State::AwaitingServerField { server_id, field } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let value = msg.text().unwrap_or_default().trim();
+        if settings.update_server_field(server_id, &field, value, now_epoch()) {
+            dialogue.update(State::Idle).await?;
+            let server = settings
+                .vpn_server(server_id)
+                .expect("updated server exists");
+            bot.send_message(
+                msg.chat.id,
+                server_card_text(&server, &settings, now_epoch()),
+            )
+            .reply_markup(menu::server_card_menu(server_id))
+            .await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Не удалось сохранить значение. Проверьте формат и длину.",
+            )
+            .await?;
+        }
+        return Ok(());
+    }
     if let State::AwaitingServerPassport { server_id } = state.clone() {
         if !role.is_owner() {
             dialogue.update(State::Idle).await?;
@@ -5991,7 +6048,19 @@ async fn render_clients_list(
             // apply_filter_and_sort возвращает owned Vec — clients_list берёт срез по странице.
             let filter = settings.client_filter(uid);
             let clients =
-                crate::vpn::model::apply_filter_and_sort(&all_clients, filter, now_epoch());
+                crate::vpn::model::apply_filter_and_sort(&all_clients, filter, now_epoch())
+                    .into_iter()
+                    .filter(|client| match filter {
+                        crate::vpn::model::ClientFilter::Unowned => {
+                            settings.client_owner(&client.name).is_none()
+                        }
+                        crate::vpn::model::ClientFilter::UsedUnowned => {
+                            settings.client_owner(&client.name).is_none()
+                                && client.last_handshake.is_some_and(|value| value > 0)
+                        }
+                        _ => true,
+                    })
+                    .collect::<Vec<_>>();
             // Скоуп: групповому админу — его текущая группа; владельцу — выбранный
             // фильтр группы (Task 13) или все.
             let clients: Vec<_> = clients
@@ -6027,6 +6096,12 @@ async fn render_clients_list(
                 (Lang::En, crate::vpn::model::ClientFilter::Offline) => "offline",
                 (Lang::Ru, crate::vpn::model::ClientFilter::Never) => "без подключений",
                 (Lang::En, crate::vpn::model::ClientFilter::Never) => "never connected",
+                (Lang::Ru, crate::vpn::model::ClientFilter::Unowned) => "без владельца",
+                (Lang::En, crate::vpn::model::ClientFilter::Unowned) => "unowned",
+                (Lang::Ru, crate::vpn::model::ClientFilter::UsedUnowned) => {
+                    "использовались, без владельца"
+                }
+                (Lang::En, crate::vpn::model::ClientFilter::UsedUnowned) => "used, unowned",
             };
             let title = match lang {
                 Lang::Ru => format!("🔑 <b>Ключи</b>\nПоказано: {} из {}\nСтатус: {filter_name} · Охват: {scope_name}\n\nВыберите ключ:", clients.len(), all_clients.len()),
@@ -6559,18 +6634,81 @@ async fn callback_handler(
             .await?;
         }
         Action::ServerBillingAsk(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                bot.send_message(chat, format!("💳 Оплата VPS «{}»\n\nВыберите новую дату быстрым календарём или откройте точное редактирование суммы, валюты, периода и автопродления.", server.name))
+                    .reply_markup(menu::server_billing_edit_menu(id))
+                    .await?;
+            }
+        }
+        Action::ServerBillingCustom(id) => {
             if settings.vpn_server(id).is_some() {
-                bot.send_message(chat,"Введите:\nОПЛАЧЕН ДО | ПЕРИОД В МЕСЯЦАХ | СТОИМОСТЬ | ВАЛЮТА | АВТОПРОДЛЕНИЕ\n\nПример: 2026-09-15 | 1 | 6.00 | EUR | да").await?;
+                bot.send_message(chat,"Введите:\nОПЛАЧЕН ДО | ПЕРИОД В МЕСЯЦАХ | СТОИМОСТЬ | ВАЛЮТА | АВТОПРОДЛЕНИЕ\n\nПример: 2026-09-15 | 1 | 6.00 | EUR | да").reply_markup(menu::cancel_to_server_menu(id)).await?;
                 dialogue
                     .update(State::AwaitingServerBilling { server_id: id })
                     .await?;
             }
         }
+        Action::ServerBillingExtend(id, months) => {
+            if let Some(server) = settings.vpn_server(id) {
+                let base = server.paid_until.unwrap_or_else(now_epoch).max(now_epoch());
+                let paid_until = base.saturating_add(months.saturating_mul(30 * 86_400));
+                let changed = settings.update_server_billing(
+                    id,
+                    &crate::store::ServerBillingUpdate {
+                        paid_until,
+                        period_months: months,
+                        cost_minor: server.cost_minor.unwrap_or_default(),
+                        currency: server.currency.as_deref().unwrap_or("RUB"),
+                        auto_renew: server.auto_renew,
+                    },
+                    now_epoch(),
+                );
+                if changed {
+                    settings.snooze_server_billing(id, 0);
+                    let updated = settings.vpn_server(id).expect("updated server exists");
+                    bot.send_message(chat, server_card_text(&updated, &settings, now_epoch()))
+                        .reply_markup(menu::server_card_menu(id))
+                        .await?;
+                }
+            }
+        }
+        Action::ServerBillingSnooze(id) => {
+            if settings.vpn_server(id).is_some() {
+                let tomorrow = now_epoch() + 86_400;
+                settings.snooze_server_billing(id, tomorrow);
+                bot.send_message(chat, "⏰ Оплата пока не выполнена. Напомню завтра и продолжу напоминать ежедневно, пока вы не укажете новую дату оплаты.")
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+            }
+        }
         Action::ServerPassportAsk(id) => {
             if let Some(server) = settings.vpn_server(id) {
-                bot.send_message(chat,format!("✏️ Редактирование паспорта\n\nОтправьте:\nНАЗВАНИЕ | HOSTNAME | IP | ХОСТЕР | ЛОКАЦИЯ | ПРОТОКОЛ | ДАТА ОТКРЫТИЯ\n\nПоддерживаются только: amneziawg-2, amneziawg-1 и amneziawg-panel.\n\nТекущие данные:\n{} | {} | {} | {} | {} | {} | {}",server.name,server.hostname,server.public_ip,server.provider,server.location,server.protocol,server.opened_at.map(crate::calendar::format_date).unwrap_or_else(||"YYYY-MM-DD".into()))).await?;
+                bot.send_message(chat, format!("✏️ Данные VPS «{}»\n\nВыберите одно поле. Остальные значения останутся без изменений.", server.name))
+                    .reply_markup(menu::server_edit_menu(id))
+                    .await?;
+            }
+        }
+        Action::ServerEditField(id, field) => {
+            if settings.vpn_server(id).is_some() {
+                let prompt = match field.as_str() {
+                    "name" => "Введите новое название сервера:",
+                    "hostname" => "Введите hostname:",
+                    "public_ip" => "Введите IP-адрес:",
+                    "provider" => "Введите название провайдера:",
+                    "location" => "Введите страну или локацию:",
+                    "capacity" => "Введите максимальное количество ключей:",
+                    "opened_at" => "Введите дату открытия в формате ГГГГ-ММ-ДД:",
+                    "note" => "Введите заметку:",
+                    _ => return Ok(()),
+                };
+                bot.send_message(chat, prompt)
+                    .reply_markup(menu::cancel_to_server_menu(id))
+                    .await?;
                 dialogue
-                    .update(State::AwaitingServerPassport { server_id: id })
+                    .update(State::AwaitingServerField {
+                        server_id: id,
+                        field,
+                    })
                     .await?;
             }
         }

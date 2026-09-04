@@ -87,6 +87,8 @@ pub enum ClientFilter {
     Online,
     Offline,
     Never,
+    Unowned,
+    UsedUnowned,
 }
 
 impl ClientFilter {
@@ -97,6 +99,8 @@ impl ClientFilter {
             ClientFilter::Online => "online",
             ClientFilter::Offline => "offline",
             ClientFilter::Never => "never",
+            ClientFilter::Unowned => "unowned",
+            ClientFilter::UsedUnowned => "used_unowned",
         }
     }
 
@@ -109,6 +113,8 @@ impl ClientFilter {
             "online" => Some(ClientFilter::Online),
             "offline" => Some(ClientFilter::Offline),
             "never" => Some(ClientFilter::Never),
+            "unowned" => Some(ClientFilter::Unowned),
+            "used_unowned" => Some(ClientFilter::UsedUnowned),
             _ => None,
         }
     }
@@ -121,6 +127,8 @@ impl ClientFilter {
             ClientFilter::Online => c.mark(now) == "🟢",
             ClientFilter::Offline => c.mark(now) == "🔴",
             ClientFilter::Never => c.mark(now) == "🟡",
+            // Ownership lives in Store and is applied by the bot handler.
+            ClientFilter::Unowned | ClientFilter::UsedUnowned => true,
         }
     }
 
@@ -131,6 +139,8 @@ impl ClientFilter {
             ClientFilter::Online => "🟢",
             ClientFilter::Offline => "🔴",
             ClientFilter::Never => "🟡",
+            ClientFilter::Unowned => "🔗",
+            ClientFilter::UsedUnowned => "📡",
         }
     }
 }

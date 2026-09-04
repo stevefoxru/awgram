@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone)]
 pub struct Config {
     pub bot_token: String,
+    pub mirror_bot_token: Option<String>,
     pub admin_ids: Vec<i64>,
     pub manage_script: PathBuf,
     pub clients_dir: PathBuf,
@@ -30,6 +31,10 @@ impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
             .field("bot_token", &"<redacted>")
+            .field(
+                "mirror_bot_token",
+                &self.mirror_bot_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("admin_ids", &self.admin_ids)
             .field("manage_script", &self.manage_script)
             .field("clients_dir", &self.clients_dir)
@@ -66,6 +71,8 @@ pub enum ConfigError {
 #[derive(serde::Deserialize)]
 struct Raw {
     bot_token: Option<String>,
+    #[serde(default)]
+    mirror_bot_token: Option<String>,
     admin_ids: Vec<i64>,
     manage_script: PathBuf,
     clients_dir: PathBuf,
@@ -121,6 +128,14 @@ impl Config {
             .filter(|s| !s.is_empty())
             .or_else(|| raw.bot_token.filter(|s| !s.is_empty()))
             .ok_or(ConfigError::MissingToken)?;
+        let mirror_bot_token = std::env::var("AWGRAM_MIRROR_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                raw.mirror_bot_token
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .filter(|value| value != &bot_token);
 
         if raw.admin_ids.is_empty() {
             return Err(ConfigError::NoAdmins);
@@ -153,6 +168,7 @@ impl Config {
         };
         Ok(Config {
             bot_token,
+            mirror_bot_token,
             admin_ids: raw.admin_ids,
             manage_script: raw.manage_script,
             clients_dir: raw.clients_dir,

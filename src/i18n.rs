@@ -546,6 +546,10 @@ pub fn clients_title_filtered(
         (Lang::En, crate::vpn::model::ClientFilter::Offline) => "offline",
         (Lang::Ru, crate::vpn::model::ClientFilter::Never) => "никогда",
         (Lang::En, crate::vpn::model::ClientFilter::Never) => "never",
+        (Lang::Ru, crate::vpn::model::ClientFilter::Unowned) => "без владельца",
+        (Lang::En, crate::vpn::model::ClientFilter::Unowned) => "unowned",
+        (Lang::Ru, crate::vpn::model::ClientFilter::UsedUnowned) => "использовались без владельца",
+        (Lang::En, crate::vpn::model::ClientFilter::UsedUnowned) => "used, unowned",
         _ => "",
     };
     match lang {

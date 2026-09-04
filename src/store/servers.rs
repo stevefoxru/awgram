@@ -271,6 +271,52 @@ impl Store {
         .is_ok_and(|n| n == 1)
     }
 
+    pub fn update_server_field(&self, id: i64, field: &str, value: &str, now: i64) -> bool {
+        let value = value.trim();
+        if value.is_empty() || value.chars().count() > 200 {
+            return false;
+        }
+        let result = match field {
+            "name" | "hostname" | "public_ip" | "provider" | "location" | "note" => {
+                let column = field;
+                self.with_conn(|connection| {
+                    connection.execute(
+                        &format!("UPDATE vpn_servers SET {column}=?2,updated_at=?3 WHERE id=?1"),
+                        rusqlite::params![id, value, now],
+                    )
+                })
+            }
+            "capacity" => value
+                .parse::<i64>()
+                .ok()
+                .filter(|v| (1..=100_000).contains(v))
+                .map_or_else(
+                    || Err(rusqlite::Error::InvalidQuery),
+                    |capacity| {
+                        self.with_conn(|connection| {
+                            connection.execute(
+                                "UPDATE vpn_servers SET capacity=?2,updated_at=?3 WHERE id=?1",
+                                rusqlite::params![id, capacity, now],
+                            )
+                        })
+                    },
+                ),
+            "opened_at" => crate::calendar::parse_date(value).map_or_else(
+                || Err(rusqlite::Error::InvalidQuery),
+                |date| {
+                    self.with_conn(|connection| {
+                        connection.execute(
+                            "UPDATE vpn_servers SET opened_at=?2,updated_at=?3 WHERE id=?1",
+                            rusqlite::params![id, date, now],
+                        )
+                    })
+                },
+            ),
+            _ => return false,
+        };
+        result.is_ok_and(|changed| changed == 1)
+    }
+
     pub fn set_local_server_status(&self, status: &str, now: i64) -> bool {
         let Some(server) = self
             .vpn_servers()

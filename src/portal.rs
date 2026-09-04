@@ -6,7 +6,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 
 use crate::store::Store;
@@ -240,6 +240,36 @@ async fn me(State(state): State<PortalState>, headers: HeaderMap) -> Response {
             Json(overview).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RenameKeyRequest {
+    label: String,
+}
+
+async fn rename_key(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+    Json(input): Json<RenameKeyRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if state.store.set_device_label(&name, user_id, &input.label) {
+        Json(serde_json::json!({"ok":true,"label":input.label.trim()})).into_response()
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            "Название должно содержать 1–40 символов",
+        )
+            .into_response()
     }
 }
 
@@ -845,6 +875,7 @@ pub async fn run(
         .route("/api/logout", post(logout))
         .route("/api/keys/{name}/config", get(download_config))
         .route("/api/keys/{name}/qr", get(download_qr))
+        .route("/api/keys/{name}/label", patch(rename_key))
         .route("/api/support", post(support))
         .route("/api/notifications", post(update_notifications))
         .route("/api/payments/topup", post(create_topup))

@@ -142,6 +142,19 @@ impl Store {
     pub fn set_default_vpn_server(&self, server_id: i64) {
         self.set_json("default_vpn_server", &server_id);
     }
+    pub fn server_billing_snoozed_until(&self, server_id: i64) -> i64 {
+        self.get_json(&format!("server_billing_snooze:{server_id}"))
+            .unwrap_or_default()
+    }
+    pub fn snooze_server_billing(&self, server_id: i64, until: i64) {
+        self.set_json(&format!("server_billing_snooze:{server_id}"), &until);
+        let _ = self.with_conn(|connection| {
+            connection.execute(
+                "DELETE FROM server_billing_notifications WHERE server_id=?1",
+                [server_id],
+            )
+        });
+    }
     pub fn tariff_price_kopecks(&self, months: i64) -> Option<i64> {
         let defaults = [20_000, 60_000, 100_000, 200_000];
         let prices = self
