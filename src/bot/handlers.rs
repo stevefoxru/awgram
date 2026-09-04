@@ -11961,7 +11961,11 @@ mod tests {
             RemoteMigrationRollback(1),
             ServerBilling,
             ServerBillingAsk(1),
+            ServerBillingSnooze(1),
+            ServerBillingExtend(1, 1),
+            ServerBillingCustom(1),
             ServerPassportAsk(1),
+            ServerEditField(1, "name".into()),
             ServerEnroll(1),
             ServerEnrollRevoke(1),
             ServerSetDefault(1),
@@ -12179,7 +12183,11 @@ mod tests {
                 RemoteMigrationRollback(_) => {}
                 ServerBilling => {}
                 ServerBillingAsk(_) => {}
+                ServerBillingSnooze(_) => {}
+                ServerBillingExtend(_, _) => {}
+                ServerBillingCustom(_) => {}
                 ServerPassportAsk(_) => {}
+                ServerEditField(_, _) => {}
                 ServerEnroll(_) => {}
                 ServerEnrollRevoke(_) => {}
                 ServerSetDefault(_) => {}
@@ -12558,7 +12566,11 @@ mod tests {
             (Action::RemoteMigrationRollback(1), true, false),
             (Action::ServerBilling, true, false),
             (Action::ServerBillingAsk(1), true, false),
+            (Action::ServerBillingSnooze(1), true, false),
+            (Action::ServerBillingExtend(1, 1), true, false),
+            (Action::ServerBillingCustom(1), true, false),
             (Action::ServerPassportAsk(1), true, false),
+            (Action::ServerEditField(1, "name".into()), true, false),
             (Action::ServerEnroll(1), true, false),
             (Action::ServerEnrollRevoke(1), true, false),
             (Action::ServerSetDefault(1), true, false),
