@@ -8,6 +8,10 @@ use crate::vpn::validate::ModifyParam;
 pub enum State {
     #[default]
     Idle,
+    AwaitingUnusedKeysDelete {
+        names: Vec<String>,
+        created_at: i64,
+    },
     AwaitingName,
     AwaitingExpiry {
         name: String,

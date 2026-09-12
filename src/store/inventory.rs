@@ -43,6 +43,33 @@ pub struct InventoryReport {
 }
 
 impl Store {
+    /// Unknown/stale telemetry is never evidence that a key was unused.
+    pub fn client_confirmed_unused(&self, name: &str, now: i64) -> bool {
+        let Some(server) = self.client_vpn_server(name) else {
+            return false;
+        };
+        let Some(runtime) = self.client_runtime_stats(name) else {
+            return false;
+        };
+        if server.status != "online"
+            || runtime.observed_at > now
+            || now.saturating_sub(runtime.observed_at) > 600
+            || runtime.rx != 0
+            || runtime.tx != 0
+            || runtime.last_handshake.is_some_and(|value| value > 0)
+        {
+            return false;
+        }
+        self.with_conn(|connection| connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM clients c WHERE c.name=?1 AND c.removed_at IS NULL
+             AND NOT EXISTS(SELECT 1 FROM traffic_samples t WHERE t.client_id=c.id AND (t.rx>0 OR t.tx>0 OR t.online>0))
+             AND NOT EXISTS(SELECT 1 FROM traffic_daily d WHERE d.client_id=c.id AND (d.rx_bytes>0 OR d.tx_bytes>0 OR d.online_minutes>0))
+             AND NOT EXISTS(SELECT 1 FROM traffic_hourly h WHERE h.client_id=c.id AND (h.rx_bytes>0 OR h.tx_bytes>0 OR h.online_minutes>0))
+             AND NOT EXISTS(SELECT 1 FROM events e WHERE e.client=c.name AND e.kind='online'))",
+            [name], |row| row.get::<_, bool>(0),
+        )).unwrap_or(false)
+    }
+
     pub fn client_runtime_stats(&self, name: &str) -> Option<KeyRuntimeStats> {
         let inventory = self
             .with_conn(|connection| {
@@ -424,5 +451,64 @@ mod tests {
             }
         );
         assert_eq!(store.server_runtime_summary(server, 2_000).online, 0);
+    }
+
+    #[test]
+    fn unused_cleanup_requires_fresh_zero_telemetry_and_no_history() {
+        let store = Store::open_in_memory();
+        let server = store
+            .add_vpn_server(
+                &NewVpnServer {
+                    name: "NL",
+                    hostname: "nl",
+                    public_ip: "1.2.3.4",
+                    provider: "x",
+                    location: "NL",
+                    protocol: "amneziawg-panel",
+                    opened_at: None,
+                    is_local: false,
+                },
+                1,
+                1,
+            )
+            .unwrap();
+        store.sync_panel_clients(server, &[("unused".into(), "10.0.0.2".into())], 2);
+        store.set_server_status(server, "online", 1_000);
+        assert!(!store.client_confirmed_unused("unused", 1_000));
+        let item = InventoryItem {
+            remote_id: "1".into(),
+            name: "unused".into(),
+            enabled: true,
+            rx: 0,
+            tx: 0,
+            last_handshake: None,
+        };
+        store.reconcile_inventory(server, 1_000, std::slice::from_ref(&item));
+        assert!(store.client_confirmed_unused("unused", 1_000));
+        assert!(!store.client_confirmed_unused("unused", 1_601));
+        assert!(!store.client_confirmed_unused("unused", 999));
+        store.set_server_status(server, "offline", 1_000);
+        assert!(!store.client_confirmed_unused("unused", 1_000));
+        store.set_server_status(server, "online", 1_000);
+        let used = InventoryItem {
+            last_handshake: Some(900),
+            ..item.clone()
+        };
+        store.reconcile_inventory(server, 1_000, &[used]);
+        assert!(!store.client_confirmed_unused("unused", 1_000));
+        store.ingest_panel(
+            server,
+            1_000,
+            &[crate::store::Sample {
+                name: "unused".into(),
+                ip: "10.0.0.2".into(),
+                rx: 100,
+                tx: 0,
+                last_handshake: Some(900),
+            }],
+        );
+        store.reconcile_inventory(server, 1_100, &[item]);
+        assert!(!store.client_confirmed_unused("unused", 1_100));
+        assert!(!store.client_confirmed_unused("unknown", 1_100));
     }
 }

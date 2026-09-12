@@ -24,6 +24,7 @@ pub enum Action {
     AdminServers,
     AdminKeys,
     AdminKeyHealth,
+    AdminDeleteUnused(bool),
     AdminUsersHub,
     AdminCommunication,
     AdminOperations,
@@ -256,6 +257,8 @@ fn parse_callback(data: &str) -> Action {
         "migration:rollback" => Action::LocalMigrationRollback,
         "admin:keys" => Action::AdminKeys,
         "admin:keys:health" => Action::AdminKeyHealth,
+        "admin:keys:unused" => Action::AdminDeleteUnused(false),
+        "admin:keys:unused:confirm" => Action::AdminDeleteUnused(true),
         "admin:users" => Action::AdminUsersHub,
         "admin:communication" => Action::AdminCommunication,
         "admin:operations" => Action::AdminOperations,
@@ -2711,6 +2714,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminServers
         | AdminKeys
         | AdminKeyHealth
+        | AdminDeleteUnused(_)
         | AdminUsersHub
         | AdminCommunication
         | AdminOperations
@@ -6347,6 +6351,81 @@ async fn callback_handler(
             )
             .reply_markup(menu::admin_keys_hub())
             .await?;
+        }
+        Action::AdminDeleteUnused(confirm) => {
+            let now = now_epoch();
+            let snapshot = if confirm {
+                match dialogue.get().await?.unwrap_or_default() {
+                    State::AwaitingUnusedKeysDelete { names, created_at }
+                        if now >= created_at && now - created_at <= 600 =>
+                    {
+                        names
+                    }
+                    _ => {
+                        bot.send_message(
+                            chat,
+                            "Подтверждение устарело или уже выполнено. Откройте проверку заново.",
+                        )
+                        .reply_markup(menu::admin_keys_hub())
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            dialogue.update(State::Idle).await?;
+            bot.send_message(chat, "🔎 Проверяю панели и историю использования ключей…")
+                .await?;
+            crate::operations::run_once(&bot, &cfg, &vpn, &settings).await;
+            let checked_at = now_epoch();
+            if confirm {
+                let mut removed = 0;
+                let mut skipped = 0;
+                let mut failed = 0;
+                for name in snapshot {
+                    if !settings.client_confirmed_unused(&name, checked_at) {
+                        skipped += 1;
+                        continue;
+                    }
+                    match client_remove(&vpn, &settings, &name).await {
+                        Ok(()) => {
+                            removed += 1;
+                            settings.log_event(
+                                now_epoch(),
+                                EventKind::ClientRemove,
+                                Some(&name),
+                                Some(uid),
+                                Some("confirmed unused key cleanup"),
+                            );
+                        }
+                        Err(_) => failed += 1,
+                    }
+                }
+                bot.send_message(chat, format!("🗑 Очистка завершена\n\nУдалено: {removed}\nПропущено после повторной проверки: {skipped}\nОшибок удаления: {failed}\n\nКлючи с ошибками сохранены. Балансы и платежи не изменены."))
+                    .reply_markup(menu::admin_keys_hub()).await?;
+            } else {
+                let names = settings
+                    .registered_clients()
+                    .into_iter()
+                    .filter(|client| settings.client_confirmed_unused(&client.name, checked_at))
+                    .take(50)
+                    .map(|client| client.name)
+                    .collect::<Vec<_>>();
+                if names.is_empty() {
+                    bot.send_message(chat, "Нет подтверждённо неиспользованных ключей. Ключи без свежей телеметрии не удаляются.")
+                        .reply_markup(menu::admin_keys_hub()).await?;
+                } else {
+                    bot.send_message(chat, format!("⚠️ Удаление неиспользованных ключей\n\nВ этой партии: {} (максимум 50)\n\n{}\n\nНет handshake, трафика и сохранённой истории использования. Привязанные пользователям ключи тоже включены. Удаление с VPN-сервера нельзя отменить. Перед удалением выполнится повторная проверка; новые ключи в партию не добавятся.", names.len(), names.join("\n")))
+                        .reply_markup(menu::unused_keys_delete_menu()).await?;
+                    dialogue
+                        .update(State::AwaitingUnusedKeysDelete {
+                            names,
+                            created_at: checked_at,
+                        })
+                        .await?;
+                }
+            }
         }
         Action::AdminKeyHealth => match managed_clients(&vpn, &settings).await {
             Ok(clients) => {
@@ -12071,6 +12150,7 @@ mod tests {
             AdminServers,
             AdminKeys,
             AdminKeyHealth,
+            AdminDeleteUnused(false),
             AdminUsersHub,
             AdminCommunication,
             AdminOperations,
@@ -12297,6 +12377,7 @@ mod tests {
                 AdminServers => {}
                 AdminKeys => {}
                 AdminKeyHealth => {}
+                AdminDeleteUnused(_) => {}
                 AdminUsersHub => {}
                 AdminCommunication => {}
                 AdminOperations => {}
@@ -12684,6 +12765,8 @@ mod tests {
             (Action::AdminServers, true, false),
             (Action::AdminKeys, true, false),
             (Action::AdminKeyHealth, true, false),
+            (Action::AdminDeleteUnused(false), true, false),
+            (Action::AdminDeleteUnused(true), true, false),
             (Action::AdminUsersHub, true, false),
             (Action::AdminCommunication, true, false),
             (Action::AdminOperations, true, false),
