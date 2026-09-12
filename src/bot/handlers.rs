@@ -6388,8 +6388,19 @@ async fn callback_handler(
                         skipped += 1;
                         continue;
                     }
-                    match client_remove(&vpn, &settings, &name).await {
+                    let result = match settings.client_vpn_server(&name) {
+                        Some(server) if server.status == "online" && !server.is_local => {
+                            nonlocal_remove(&vpn, &settings, &server, &name).await
+                        }
+                        Some(server) if server.status == "online" => vpn.remove(&name).await,
+                        _ => {
+                            skipped += 1;
+                            continue;
+                        }
+                    };
+                    match result {
                         Ok(()) => {
+                            settings.retire_client(&name, now_epoch());
                             removed += 1;
                             settings.log_event(
                                 now_epoch(),

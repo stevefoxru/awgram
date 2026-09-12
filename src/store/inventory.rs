@@ -65,7 +65,8 @@ impl Store {
              AND NOT EXISTS(SELECT 1 FROM traffic_samples t WHERE t.client_id=c.id AND (t.rx>0 OR t.tx>0 OR t.online>0))
              AND NOT EXISTS(SELECT 1 FROM traffic_daily d WHERE d.client_id=c.id AND (d.rx_bytes>0 OR d.tx_bytes>0 OR d.online_minutes>0))
              AND NOT EXISTS(SELECT 1 FROM traffic_hourly h WHERE h.client_id=c.id AND (h.rx_bytes>0 OR h.tx_bytes>0 OR h.online_minutes>0))
-             AND NOT EXISTS(SELECT 1 FROM events e WHERE e.client=c.name AND e.kind='online'))",
+             AND NOT EXISTS(SELECT 1 FROM events e WHERE e.client=c.name AND e.kind='online')
+             AND NOT EXISTS(SELECT 1 FROM settings s WHERE s.key='key_ever_used:'||c.name))",
             [name], |row| row.get::<_, bool>(0),
         )).unwrap_or(false)
     }
@@ -165,6 +166,12 @@ impl Store {
                 rusqlite::params![server_id, now],
             )?;
             for item in items {
+                if item.rx > 0 || item.tx > 0 || item.last_handshake.is_some_and(|value| value > 0) {
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO settings(key,value) VALUES(?1,'true')",
+                        [format!("key_ever_used:{}", item.name)],
+                    )?;
+                }
                 transaction.execute(
                     "INSERT INTO key_inventory(server_id,remote_id,name,enabled,rx,tx,last_handshake,first_seen_at,last_seen_at,missing_since)
                      VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8,NULL)
@@ -496,6 +503,8 @@ mod tests {
         };
         store.reconcile_inventory(server, 1_000, &[used]);
         assert!(!store.client_confirmed_unused("unused", 1_000));
+        store.reconcile_inventory(server, 1_050, std::slice::from_ref(&item));
+        assert!(!store.client_confirmed_unused("unused", 1_050));
         store.ingest_panel(
             server,
             1_000,
