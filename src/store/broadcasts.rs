@@ -115,6 +115,8 @@ mod tests {
     #[test]
     fn same_source_message_cannot_start_twice() {
         let store = Store::open_in_memory();
+        store.upsert_user(10, None, "Alice", None, 100);
+        store.upsert_user(11, None, "Bob", None, 100);
         let first = store.create_broadcast_run(1, 1, 77, "all", &[10, 11], 100);
         assert!(first.is_some());
         assert!(store
