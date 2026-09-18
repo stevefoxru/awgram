@@ -91,7 +91,12 @@ pub enum Action {
     AdminSupport,
     AdminBroadcast,
     AdminBroadcastTemplates,
+    BroadcastHistory,
+    BroadcastReport(i64),
     BroadcastAudience(String),
+    BroadcastSend(i32),
+    BroadcastEdit,
+    BroadcastCancel,
     BroadcastRetry(i64),
     AdminHelp,
     AdminSearch,
@@ -287,6 +292,9 @@ fn parse_callback(data: &str) -> Action {
         "admin:support" => Action::AdminSupport,
         "admin:broadcast" => Action::AdminBroadcast,
         "admin:broadcast:templates" => Action::AdminBroadcastTemplates,
+        "admin:broadcast:history" => Action::BroadcastHistory,
+        "broadcast:edit" => Action::BroadcastEdit,
+        "broadcast:cancel" => Action::BroadcastCancel,
         "admin:help" => Action::AdminHelp,
         "admin:search" => Action::AdminSearch,
         "admin:roles" => Action::AdminRoles,
@@ -475,6 +483,14 @@ fn parse_callback(data: &str) -> Action {
                 Action::AdminRoleAction(v.to_string())
             } else if let Some(v) = data.strip_prefix("admin:promo:") {
                 Action::AdminPromoAction(v.to_string())
+            } else if let Some(v) = data.strip_prefix("broadcast:send:") {
+                v.parse()
+                    .map(Action::BroadcastSend)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("broadcast:report:") {
+                v.parse()
+                    .map(Action::BroadcastReport)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("broadcast:audience:") {
                 Action::BroadcastAudience(v.to_string())
             } else if let Some(v) = data.strip_prefix("broadcast:retry:") {
@@ -2781,7 +2797,12 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminSupport
         | AdminBroadcast
         | AdminBroadcastTemplates
+        | BroadcastHistory
+        | BroadcastReport(_)
         | BroadcastAudience(_)
+        | BroadcastSend(_)
+        | BroadcastEdit
+        | BroadcastCancel
         | BroadcastRetry(_)
         | AdminHelp
         | AdminSearch
@@ -2935,6 +2956,55 @@ async fn show_group_card(
         menu::group_card_menu(lang, id, has_invite),
     )
     .await;
+}
+
+fn broadcast_audience_label(audience: &str, settings: &Store) -> String {
+    match audience {
+        "all" => "все пользователи Telegram".into(),
+        "active" => "с активными ключами".into(),
+        "expiring" => "истекают за 7 дней".into(),
+        "nokeys" => "без ключей".into(),
+        _ => audience
+            .strip_prefix("server:")
+            .and_then(|value| value.parse::<i64>().ok())
+            .and_then(|id| settings.vpn_server(id))
+            .map(|server| format!("владельцы ключей сервера «{}»", server.name))
+            .unwrap_or_else(|| "неизвестная аудитория".into()),
+    }
+}
+
+fn broadcast_recipients(audience: &str, settings: &Store, vpn: &Vpn, now: i64) -> Vec<i64> {
+    settings
+        .all_user_ids()
+        .into_iter()
+        .filter(|user_id| *user_id > 0)
+        .filter(|user_id| {
+            let keys = settings.user_client_names(*user_id);
+            match audience {
+                "all" => true,
+                "active" => keys.iter().any(|name| {
+                    !vpn.client_disabled(name)
+                        && vpn.client_expiry(name).is_none_or(|expiry| expiry > now)
+                }),
+                "expiring" => keys.iter().any(|name| {
+                    vpn.client_expiry(name)
+                        .is_some_and(|expiry| expiry > now && expiry - now <= 7 * 86_400)
+                }),
+                "nokeys" => keys.is_empty(),
+                value if value.starts_with("server:") => value
+                    .strip_prefix("server:")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .is_some_and(|server_id| {
+                        keys.iter().any(|name| {
+                            settings
+                                .client_vpn_server(name)
+                                .is_some_and(|server| server.id == server_id)
+                        })
+                    }),
+                _ => false,
+            }
+        })
+        .collect()
 }
 
 async fn message_handler(
@@ -3333,134 +3403,50 @@ async fn message_handler(
         return Ok(());
     }
     if let State::AwaitingBroadcast { audience } = state.clone() {
-        bot.send_message(
-            msg.chat.id,
-            format!("Предпросмотр готов. Сегмент: {audience}. Для запуска напишите: ОТПРАВИТЬ"),
-        )
-        .reply_markup(menu::admin_keyboard())
-        .await?;
+        if msg.text().is_some_and(|value| value.starts_with('/')) {
+            bot.send_message(
+                msg.chat.id,
+                "Отправьте текст, фото или документ рассылки. Для выхода нажмите «Отмена».",
+            )
+            .reply_markup(menu::broadcast_compose_menu())
+            .await?;
+            return Ok(());
+        }
+        match bot.copy_message(msg.chat.id, msg.chat.id, msg.id).await {
+            Ok(preview) => preview,
+            Err(_) => {
+                bot.send_message(msg.chat.id, "Это сообщение нельзя скопировать для рассылки. Отправьте обычный текст, фото или документ.")
+                    .reply_markup(menu::broadcast_compose_menu()).await?;
+                return Ok(());
+            }
+        };
+        let recipients = broadcast_recipients(&audience, &settings, &vpn, now_epoch());
+        if recipients.is_empty() {
+            bot.send_message(msg.chat.id, "В выбранной аудитории нет получателей Telegram. Выберите другой сегмент; ничего не отправлено.")
+                .reply_markup(menu::broadcast_audience_menu()).await?;
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let count = recipients.len();
+        bot.send_message(msg.chat.id, format!("📣 Предпросмотр рассылки выше\n\nАудитория: {}\nПолучателей: {count}\n\nПроверьте содержание и нажмите кнопку отправки. До этого момента пользователям ничего не отправлено.", broadcast_audience_label(&audience, &settings)))
+            .reply_markup(menu::broadcast_confirm_menu(msg.id.0)).await?;
         dialogue
             .update(State::AwaitingBroadcastConfirm {
                 source_chat_id: msg.chat.id.0,
                 source_message_id: msg.id.0,
                 audience,
+                recipients,
+                created_at: now_epoch(),
             })
             .await?;
         return Ok(());
     }
     if let State::AwaitingBroadcastConfirm {
-        source_chat_id,
-        source_message_id,
-        audience,
-    } = state.clone()
+        source_message_id, ..
+    } = state
     {
-        if msg.text().is_some_and(|v| v.trim() == "ОТПРАВИТЬ") {
-            let mut delivered = 0;
-            let mut failed = 0;
-            let now = now_epoch();
-            let recipients = settings
-                .all_user_ids()
-                .into_iter()
-                .filter(|user_id| {
-                    let keys = settings.user_client_names(*user_id);
-                    match audience.as_str() {
-                        "active" => keys.iter().any(|n| {
-                            !vpn.client_disabled(n) && vpn.client_expiry(n).is_none_or(|e| e > now)
-                        }),
-                        "expiring" => keys.iter().any(|n| {
-                            vpn.client_expiry(n)
-                                .is_some_and(|e| e > now && e - now <= 7 * 86_400)
-                        }),
-                        "nokeys" => keys.is_empty(),
-                        value if value.starts_with("server:") => value
-                            .strip_prefix("server:")
-                            .and_then(|value| value.parse::<i64>().ok())
-                            .is_some_and(|server_id| {
-                                keys.iter().any(|name| {
-                                    settings
-                                        .client_vpn_server(name)
-                                        .is_some_and(|server| server.id == server_id)
-                                })
-                            }),
-                        _ => true,
-                    }
-                })
-                .collect::<Vec<_>>();
-            let broadcast_id = settings.create_broadcast_run(
-                uid,
-                source_chat_id,
-                source_message_id,
-                &audience,
-                &recipients,
-                now,
-            );
-            for user_id in recipients {
-                match bot
-                    .copy_message(
-                        ChatId(user_id),
-                        ChatId(source_chat_id),
-                        MessageId(source_message_id),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        delivered += 1;
-                        if let Some(id) = broadcast_id {
-                            settings.record_broadcast_delivery(
-                                id,
-                                user_id,
-                                true,
-                                None,
-                                now_epoch(),
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        failed += 1;
-                        if let Some(id) = broadcast_id {
-                            settings.record_broadcast_delivery(
-                                id,
-                                user_id,
-                                false,
-                                Some(&error.to_string()),
-                                now_epoch(),
-                            );
-                        }
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            }
-            let report = bot.send_message(
-                msg.chat.id,
-                format!(
-                    "✅ Рассылка завершена: доставлено {delivered}, ошибок {failed}.{}",
-                    broadcast_id
-                        .map(|id| format!("\nНомер отчёта: #{id}"))
-                        .unwrap_or_default()
-                ),
-            );
-            if let Some(id) = broadcast_id {
-                report
-                    .reply_markup(menu::broadcast_report_menu(id, failed > 0))
-                    .await?;
-            } else {
-                report.reply_markup(menu::admin_dashboard_menu()).await?;
-            }
-            settings.log_event(
-                now_epoch(),
-                EventKind::Broadcast,
-                None,
-                Some(uid),
-                Some(&format!(
-                    "audience={audience} delivered={delivered} failed={failed}"
-                )),
-            );
-        } else {
-            bot.send_message(msg.chat.id, "Рассылка отменена.")
-                .reply_markup(menu::admin_keyboard())
-                .await?;
-        }
-        dialogue.update(State::Idle).await?;
+        bot.send_message(msg.chat.id, "Черновик рассылки сохранён. Используйте кнопки «Отправить», «Заменить сообщение» или «Отмена» под предпросмотром.")
+            .reply_markup(menu::broadcast_confirm_menu(source_message_id)).await?;
         return Ok(());
     }
     if role.is_owner() {
@@ -7642,13 +7628,168 @@ async fn callback_handler(
             }
         }
         Action::AdminBroadcast => {
-            bot.send_message(chat, "Выберите получателей рассылки:")
+            dialogue.update(State::Idle).await?;
+            bot.send_message(chat, "📣 Новая рассылка\n\n1. Выберите аудиторию.\n2. Отправьте текст, фото или документ.\n3. Проверьте предпросмотр и подтвердите кнопкой.\n\nБез подтверждения сообщение никому не отправится.")
                 .reply_markup(menu::broadcast_audience_menu())
                 .await?;
+        }
+        Action::BroadcastCancel => {
+            dialogue.update(State::Idle).await?;
+            bot.send_message(
+                chat,
+                "Рассылка отменена. Пользователям ничего не отправлено.",
+            )
+            .reply_markup(menu::admin_communication_hub())
+            .await?;
+        }
+        Action::BroadcastEdit => {
+            if let State::AwaitingBroadcastConfirm { audience, .. } =
+                dialogue.get().await?.unwrap_or_default()
+            {
+                dialogue
+                    .update(State::AwaitingBroadcast { audience })
+                    .await?;
+                bot.send_message(
+                    chat,
+                    "✏️ Отправьте новое сообщение. Предыдущий черновик больше нельзя отправить.",
+                )
+                .reply_markup(menu::broadcast_compose_menu())
+                .await?;
+            } else {
+                bot.send_message(chat, "Черновик уже закрыт. Создайте новую рассылку.")
+                    .reply_markup(menu::admin_communication_hub())
+                    .await?;
+            }
+        }
+        Action::BroadcastSend(requested_source_id) => {
+            let State::AwaitingBroadcastConfirm {
+                source_chat_id,
+                source_message_id,
+                audience,
+                recipients,
+                created_at,
+            } = dialogue.get().await?.unwrap_or_default()
+            else {
+                bot.send_message(
+                    chat,
+                    "Черновик уже отправлен или отменён. Создайте новую рассылку.",
+                )
+                .reply_markup(menu::admin_communication_hub())
+                .await?;
+                return Ok(());
+            };
+            if source_chat_id != chat.0 || source_message_id != requested_source_id {
+                bot.send_message(
+                    chat,
+                    "Это кнопка другого черновика. Текущий предпросмотр остаётся доступен.",
+                )
+                .reply_markup(menu::broadcast_confirm_menu(source_message_id))
+                .await?;
+                return Ok(());
+            }
+            dialogue.update(State::Idle).await?;
+            if recipients.is_empty() || now_epoch().saturating_sub(created_at) > 1800 {
+                bot.send_message(
+                    chat,
+                    "Предпросмотр устарел. Создайте новую рассылку; ничего не отправлено.",
+                )
+                .reply_markup(menu::admin_communication_hub())
+                .await?;
+                return Ok(());
+            }
+            let Some(id) = settings.create_broadcast_run(
+                uid,
+                source_chat_id,
+                source_message_id,
+                &audience,
+                &recipients,
+                now_epoch(),
+            ) else {
+                bot.send_message(chat, "Рассылка уже была запущена или не удалось создать отчёт. Повторная отправка не выполнялась.")
+                    .reply_markup(menu::admin_communication_hub()).await?;
+                return Ok(());
+            };
+            bot.send_message(
+                chat,
+                format!(
+                    "⏳ Рассылка #{id} запущена. Получателей: {}. Дождитесь отчёта.",
+                    recipients.len()
+                ),
+            )
+            .await?;
+            let mut delivered = 0usize;
+            let mut failed = 0usize;
+            for user_id in recipients {
+                match bot
+                    .copy_message(
+                        ChatId(user_id),
+                        ChatId(source_chat_id),
+                        MessageId(source_message_id),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        delivered += 1;
+                        settings.record_broadcast_delivery(id, user_id, true, None, now_epoch());
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        settings.record_broadcast_delivery(
+                            id,
+                            user_id,
+                            false,
+                            Some(&error.to_string()),
+                            now_epoch(),
+                        );
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            settings.log_event(
+                now_epoch(),
+                EventKind::Broadcast,
+                None,
+                Some(uid),
+                Some(&format!(
+                    "id={id} audience={audience} delivered={delivered} failed={failed}"
+                )),
+            );
+            bot.send_message(chat, format!("📊 Рассылка #{id} завершена\n\n✅ Доставлено: {delivered}\n❌ Ошибок: {failed}\n\nНеудачные доставки можно повторить отдельной кнопкой."))
+                .reply_markup(menu::broadcast_report_menu(id, failed > 0)).await?;
         }
         Action::AdminBroadcastTemplates => {
             bot.send_message(chat, "📝 Шаблоны рассылок\n\nНажмите на текст сообщения, чтобы быстро выделить и скопировать. Перед отправкой замените значения в {фигурных скобках}.\n\n<pre>⚠️ Технические работы\n\n{дата} с {начало} до {конец} возможны перерывы подключения на сервере {страна}. После завершения ничего переустанавливать не нужно.</pre>\n\n<pre>🔑 Требуется замена ключа\n\nВаш старый ключ на сервере {страна} больше не работает. Откройте «Мои ключи», выберите его и нажмите «Заменить нерабочий ключ».</pre>\n\n<pre>✅ Новый сервер доступен\n\nДобавлена локация {страна} на AWG 1.0. Приобрести подключение можно в разделе «Купить ключ».</pre>\n\n<pre>💳 Напоминание об оплате\n\nСрок ключа {ключ} истекает {дата}. Продлить его можно из карточки ключа.</pre>")
                 .parse_mode(ParseMode::Html).reply_markup(menu::broadcast_templates_menu()).await?;
+        }
+        Action::BroadcastHistory => {
+            let runs = settings.recent_broadcasts(10);
+            let text = if runs.is_empty() {
+                "📊 История рассылок\n\nПока рассылок нет.".to_string()
+            } else {
+                format!("📊 Последние рассылки\n\n{}\n\nНажмите на отчёт для подробностей и повтора ошибок.", runs.iter().map(|run| format!("#{} · {} · доставлено {} · ошибок {}", run.id, broadcast_audience_label(&run.audience, &settings), run.delivered, run.failed)).collect::<Vec<_>>().join("\n"))
+            };
+            bot.send_message(chat, text)
+                .reply_markup(menu::broadcast_history_menu(&runs))
+                .await?;
+        }
+        Action::BroadcastReport(id) => {
+            if let Some(run) = settings.broadcast_run(id) {
+                bot.send_message(
+                    chat,
+                    format!(
+                        "📊 Рассылка #{id}\n\nАудитория: {}\n✅ Доставлено: {}\n❌ Ошибок: {}",
+                        broadcast_audience_label(&run.audience, &settings),
+                        run.delivered,
+                        run.failed
+                    ),
+                )
+                .reply_markup(menu::broadcast_report_menu(id, run.failed > 0))
+                .await?;
+            } else {
+                bot.send_message(chat, "Отчёт рассылки не найден.")
+                    .reply_markup(menu::admin_communication_hub())
+                    .await?;
+            }
         }
         Action::BroadcastAudience(audience) => {
             let server_segment = audience
@@ -7658,11 +7799,9 @@ async fn callback_handler(
             if matches!(audience.as_str(), "all" | "active" | "expiring" | "nokeys")
                 || server_segment.is_some()
             {
-                let label = server_segment
-                    .as_ref()
-                    .map(|server| format!("владельцы ключей сервера «{}»", server.name))
-                    .unwrap_or_else(|| audience.clone());
-                bot.send_message(chat,format!("Сегмент: {label}.\n\nОтправьте сообщение для предпросмотра; поддерживаются текст, фото и документы.\n\nРекомендуемый текст:\n❌ Ваш старый VPN-ключ больше не работает. Откройте «🔑 Мои ключи», выберите подключение со статусом «требуется замена» и нажмите «🛟 Заменить нерабочий ключ». Новый ключ будет выдан автоматически.")).await?;
+                let label = broadcast_audience_label(&audience, &settings);
+                let count = broadcast_recipients(&audience, &settings, &vpn, now_epoch()).len();
+                bot.send_message(chat,format!("👥 Аудитория: {label}\nСейчас в сегменте: {count}\n\nОтправьте сообщение для предпросмотра (текст, фото или документ). После него появится кнопка отправки. Доступны только пользователи Telegram, уже открывшие этого бота.")).reply_markup(menu::broadcast_compose_menu()).await?;
                 dialogue
                     .update(State::AwaitingBroadcast { audience })
                     .await?;
@@ -12035,6 +12174,9 @@ mod tests {
             menu::admin_users_hub(),
             menu::admin_communication_hub(),
             menu::broadcast_templates_menu(),
+            menu::broadcast_compose_menu(),
+            menu::broadcast_confirm_menu(77),
+            menu::broadcast_history_menu(&[]),
             menu::broadcast_report_menu(1, true),
             menu::admin_system_hub(),
             menu::portal_domain_menu(false),
@@ -12223,7 +12365,12 @@ mod tests {
             AdminSupport,
             AdminBroadcast,
             AdminBroadcastTemplates,
+            BroadcastHistory,
+            BroadcastReport(1),
             BroadcastAudience("all".into()),
+            BroadcastSend(77),
+            BroadcastEdit,
+            BroadcastCancel,
             BroadcastRetry(1),
             AdminHelp,
             AdminSearch,
@@ -12455,7 +12602,12 @@ mod tests {
                 AdminSupport => {}
                 AdminBroadcast => {}
                 AdminBroadcastTemplates => {}
+                BroadcastHistory => {}
+                BroadcastReport(_) => {}
                 BroadcastAudience(_) => {}
+                BroadcastSend(_) => {}
+                BroadcastEdit => {}
+                BroadcastCancel => {}
                 BroadcastRetry(_) => {}
                 AdminHelp => {}
                 AdminSearch => {}
@@ -12844,7 +12996,12 @@ mod tests {
             (Action::AdminSupport, true, false),
             (Action::AdminBroadcast, true, false),
             (Action::AdminBroadcastTemplates, true, false),
+            (Action::BroadcastHistory, true, false),
+            (Action::BroadcastReport(1), true, false),
             (Action::BroadcastAudience("all".into()), true, false),
+            (Action::BroadcastSend(77), true, false),
+            (Action::BroadcastEdit, true, false),
+            (Action::BroadcastCancel, true, false),
             (Action::BroadcastRetry(1), true, false),
             (Action::AdminHelp, true, false),
             (Action::AdminSearch, true, false),

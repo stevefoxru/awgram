@@ -24,6 +24,12 @@ impl Store {
     ) -> Option<i64> {
         self.with_conn(|connection| {
             let transaction = connection.unchecked_transaction()?;
+            let already_sent: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM broadcasts WHERE source_chat_id=?1 AND source_message_id=?2)",
+                rusqlite::params![source_chat_id, source_message_id],
+                |row| row.get(0),
+            )?;
+            if already_sent { return Ok(None); }
             transaction.execute(
                 "INSERT INTO broadcasts(admin_id,source_chat_id,source_message_id,audience,created_at)
                  VALUES(?1,?2,?3,?4,?5)",
@@ -38,8 +44,8 @@ impl Store {
                 )?;
             }
             transaction.commit()?;
-            Ok(id)
-        }).ok()
+            Ok(Some(id))
+        }).ok().flatten()
     }
 
     pub fn record_broadcast_delivery(
@@ -86,5 +92,40 @@ impl Store {
             [id],
             |row| Ok(BroadcastRun { id:row.get(0)?,source_chat_id:row.get(1)?,source_message_id:row.get(2)?,audience:row.get(3)?,delivered:row.get(4)?,failed:row.get(5)? }),
         ).optional()).ok().flatten()
+    }
+
+    pub fn recent_broadcasts(&self, limit: usize) -> Vec<BroadcastRun> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id,source_chat_id,source_message_id,audience,delivered,failed FROM broadcasts ORDER BY id DESC LIMIT ?1",
+            )?;
+            let rows = statement.query_map([limit.min(20) as i64], |row| Ok(BroadcastRun {
+                id: row.get(0)?, source_chat_id: row.get(1)?, source_message_id: row.get(2)?,
+                audience: row.get(3)?, delivered: row.get(4)?, failed: row.get(5)?,
+            }))?;
+            rows.collect()
+        }).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+
+    #[test]
+    fn same_source_message_cannot_start_twice() {
+        let store = Store::open_in_memory();
+        let first = store.create_broadcast_run(1, 1, 77, "all", &[10, 11], 100);
+        assert!(first.is_some());
+        assert!(store
+            .create_broadcast_run(1, 1, 77, "all", &[10, 11], 101)
+            .is_none());
+        let id = first.unwrap();
+        store.record_broadcast_delivery(id, 10, true, None, 102);
+        store.record_broadcast_delivery(id, 11, false, Some("blocked"), 102);
+        assert_eq!(store.failed_broadcast_recipients(id), vec![11]);
+        let report = store.broadcast_run(id).unwrap();
+        assert_eq!((report.delivered, report.failed), (1, 1));
+        assert_eq!(store.recent_broadcasts(10).len(), 1);
     }
 }

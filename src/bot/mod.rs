@@ -118,6 +118,8 @@ pub enum State {
         source_chat_id: i64,
         source_message_id: i32,
         audience: String,
+        recipients: Vec<i64>,
+        created_at: i64,
     },
     AwaitingAdminSearch,
     AwaitingStaffRole {

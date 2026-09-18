@@ -262,6 +262,7 @@ pub fn admin_communication_hub() -> InlineKeyboardMarkup {
             cb("📣 Рассылка", "admin:broadcast"),
         ],
         vec![cb("📝 Шаблоны рассылок", "admin:broadcast:templates")],
+        vec![cb("📊 История рассылок", "admin:broadcast:history")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
     ])
 }
@@ -281,6 +282,24 @@ pub fn broadcast_report_menu(id: i64, can_retry: bool) -> InlineKeyboardMarkup {
             &format!("broadcast:retry:{id}"),
         )]);
     }
+    rows.push(vec![
+        cb("📊 История", "admin:broadcast:history"),
+        cb("⬅️ Связь", "admin:communication"),
+    ]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn broadcast_history_menu(runs: &[crate::store::BroadcastRun]) -> InlineKeyboardMarkup {
+    let mut rows = runs
+        .iter()
+        .map(|run| {
+            vec![cb(
+                &format!("#{} · ✅ {} / ❌ {}", run.id, run.delivered, run.failed),
+                &format!("broadcast:report:{}", run.id),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("📣 Новая рассылка", "admin:broadcast")]);
     rows.push(vec![cb("⬅️ Связь", "admin:communication")]);
     InlineKeyboardMarkup::new(rows)
 }
@@ -1178,6 +1197,27 @@ pub fn broadcast_audience_menu() -> InlineKeyboardMarkup {
             cb("🆕 Без ключей", "broadcast:audience:nokeys"),
         ],
         vec![cb("⬅️ Связь", "admin:communication")],
+    ])
+}
+
+pub fn broadcast_compose_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("↩️ Выбрать другую аудиторию", "admin:broadcast")],
+        vec![cb("❌ Отмена", "broadcast:cancel")],
+    ])
+}
+
+pub fn broadcast_confirm_menu(source_message_id: i32) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "📣 Отправить рассылку",
+            &format!("broadcast:send:{source_message_id}"),
+        )],
+        vec![cb("✏️ Заменить сообщение", "broadcast:edit")],
+        vec![
+            cb("👥 Сменить аудиторию", "admin:broadcast"),
+            cb("❌ Отмена", "broadcast:cancel"),
+        ],
     ])
 }
 
