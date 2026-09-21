@@ -180,6 +180,9 @@ pub enum State {
     AwaitingPanelCredentials {
         server_id: i64,
     },
+    AwaitingAmneziaAccessKey {
+        server_id: i64,
+    },
     AwaitingMirrorToken,
     AwaitingLocalMigrationConfirm {
         operation: String,

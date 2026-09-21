@@ -603,6 +603,60 @@ impl Store {
         .and_then(|value| serde_json::from_str(&value).ok())
     }
 
+    /// Stores an AmneziaVPN full-access export encrypted by the controller.
+    /// The server remains in maintenance: importing a key never enables sales.
+    pub fn set_amnezia_access(&self, id: i64, host: &str, encrypted_uri: &str, now: i64) -> bool {
+        let key = format!("amnezia_access_{id}");
+        let Ok(secret) = serde_json::to_string(encrypted_uri) else {
+            return false;
+        };
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE vpn_servers
+                 SET hostname=?2,public_ip=?2,protocol='amneziawg-3',status='maintenance',
+                     enabled_for_provisioning=0,updated_at=?3
+                 WHERE id=?1 AND is_local=0",
+                rusqlite::params![id, host, now],
+            )?;
+            if changed != 1 {
+                return Ok(false);
+            }
+            transaction.execute(
+                "UPDATE vpn_nodes SET transport='restricted_ssh',status='unknown',updated_at=?2
+                 WHERE server_id=?1",
+                rusqlite::params![id, now],
+            )?;
+            transaction.execute(
+                "UPDATE vpn_instances SET protocol='amneziawg-3',driver='amneziawg-3',
+                 status='maintenance',updated_at=?2 WHERE server_id=?1 AND is_default=1",
+                rusqlite::params![id, now],
+            )?;
+            transaction.execute(
+                "INSERT INTO settings(key,value) VALUES(?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                rusqlite::params![key, secret],
+            )?;
+            transaction.commit()?;
+            Ok(true)
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn amnezia_access(&self, id: i64) -> Option<String> {
+        let key = format!("amnezia_access_{id}");
+        self.with_conn(|connection| {
+            connection
+                .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+        })
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str(&value).ok())
+    }
+
     pub fn sync_panel_clients(
         &self,
         server_id: i64,

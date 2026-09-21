@@ -73,12 +73,13 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "awgram"
-version = "1.44.0"
+version = "1.45.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
  "chacha20poly1305",
  "chrono",
+ "flate2",
  "hmac",
  "image",
  "lettre",

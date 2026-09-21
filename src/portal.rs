@@ -99,7 +99,7 @@ async fn catalog(State(state): State<PortalState>) -> Response {
         })
         .collect::<Vec<_>>();
     let servers = state.store.available_vpn_servers().into_iter().map(|server| serde_json::json!({
-        "id":server.id,"name":server.name,"location":server.location,"protocol":"AWG 1.0",
+        "id":server.id,"name":server.name,"location":server.location,"protocol":match server.protocol.as_str(){"amneziawg-3"=>"AWG 3.1","amneziawg-2"=>"AWG 2.0",_=>"AWG 1.0"},
         "available":server.capacity.saturating_sub(state.store.server_client_count(server.id)).max(0)
     })).collect::<Vec<_>>();
     Json(serde_json::json!({"brand":"ZuevVPN","tariffs":tariffs,"servers":servers})).into_response()

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum Protocol {
     AmneziaWg1,
     AmneziaWg2,
+    AmneziaWg3,
     AmneziaWgPanel,
 }
 
@@ -13,6 +14,7 @@ impl Protocol {
         match value.trim().to_ascii_lowercase().as_str() {
             "legacy" | "amneziawg-1" => Some(Self::AmneziaWg1),
             "modern" | "amneziawg-2" => Some(Self::AmneziaWg2),
+            "amneziawg-3" | "amneziawg-3.1" => Some(Self::AmneziaWg3),
             "amneziawg-panel" => Some(Self::AmneziaWgPanel),
             _ => None,
         }
@@ -22,6 +24,7 @@ impl Protocol {
         match self {
             Self::AmneziaWg1 => "amneziawg-1",
             Self::AmneziaWg2 => "amneziawg-2",
+            Self::AmneziaWg3 => "amneziawg-3",
             Self::AmneziaWgPanel => "amneziawg-panel",
         }
     }
@@ -29,6 +32,9 @@ impl Protocol {
     pub const fn capabilities(self) -> DriverCapabilities {
         match self {
             Self::AmneziaWg1 | Self::AmneziaWg2 => DriverCapabilities::full(false, true),
+            // AWG 3.1 installed by AmneziaVPN needs its own container adapter.
+            // Until its preflight succeeds it is deliberately inventory-only.
+            Self::AmneziaWg3 => DriverCapabilities::inventory_only(),
             Self::AmneziaWgPanel => DriverCapabilities::full(true, false),
         }
     }
@@ -51,6 +57,22 @@ pub struct DriverCapabilities {
 }
 
 impl DriverCapabilities {
+    const fn inventory_only() -> Self {
+        Self {
+            install: false,
+            list_clients: false,
+            create_client: false,
+            download_config: false,
+            regenerate: false,
+            revoke: false,
+            enable_disable: false,
+            expiry: false,
+            traffic: false,
+            backup_restore: false,
+            panel_sync: false,
+            kernel_module: false,
+        }
+    }
     const fn full(panel_sync: bool, kernel_module: bool) -> Self {
         Self {
             install: true,
@@ -113,5 +135,13 @@ mod tests {
         let capabilities = Protocol::AmneziaWgPanel.capabilities();
         assert!(capabilities.panel_sync);
         assert!(!capabilities.kernel_module);
+    }
+
+    #[test]
+    fn awg31_has_a_distinct_safe_driver() {
+        let protocol = Protocol::parse("amneziawg-3.1").unwrap();
+        assert_eq!(protocol.canonical(), "amneziawg-3");
+        assert!(!protocol.capabilities().create_client);
+        assert!(!protocol.capabilities().list_clients);
     }
 }

@@ -73,6 +73,7 @@ pub enum Action {
     ServerDiagnose(i64),
     ServerProvisioningProbe(i64),
     ServerPanelConnect(i64),
+    ServerAmneziaConnect(i64),
     ServerPanelSync(i64),
     ServerPanelAudit(i64),
     ServerPanelArchiveMissingAsk(i64),
@@ -657,6 +658,10 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:panel:") {
                 v.parse()
                     .map(Action::ServerPanelConnect)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:amnezia:") {
+                v.parse()
+                    .map(Action::ServerAmneziaConnect)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
@@ -1670,13 +1675,13 @@ fn customer_key_view(
         || "не определён".to_string(),
         |server| format!("{} · {}", server.location, server.name),
     );
-    let protocol = server.as_ref().map_or("AWG 1.0", |server| {
-        if server.protocol == "amneziawg-2" {
-            "AWG 2.0"
-        } else {
-            "AWG 1.0"
-        }
-    });
+    let protocol = server
+        .as_ref()
+        .map_or("AWG 1.0", |server| match server.protocol.as_str() {
+            "amneziawg-3" => "AWG 3.1",
+            "amneziawg-2" => "AWG 2.0",
+            _ => "AWG 1.0",
+        });
     let expiry = crate::vpn::model::format_expiry(settings.lang(uid), now, vpn.client_expiry(name));
     let traffic = runtime.as_ref().map_or_else(
         || "пока нет данных".to_string(),
@@ -2305,8 +2310,13 @@ fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64
             )
         },
     );
+    let protocol = match server.protocol.as_str() {
+        "amneziawg-3" => "AWG 3.1",
+        "amneziawg-2" => "AWG 2.0",
+        _ => "AWG 1.0",
+    };
     format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🚀 Развёртывание\nПоследняя задача: {installation}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
-        server.name,server.status,panel_health,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,if server.protocol=="amneziawg-2"{"AWG 2.0"}else{"AWG 1.0"},server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
+        server.name,server.status,panel_health,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,protocol,server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
 async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
@@ -2779,6 +2789,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerDiagnose(_)
         | ServerProvisioningProbe(_)
         | ServerPanelConnect(_)
+        | ServerAmneziaConnect(_)
         | ServerPanelSync(_)
         | ServerPanelAudit(_)
         | ServerPanelArchiveMissingAsk(_)
@@ -4746,7 +4757,7 @@ async fn message_handler(
             .reply_markup(menu::server_card_menu(id))
             .await?;
         } else {
-            bot.send_message(msg.chat.id,"Не удалось сохранить. Допустимы только: amneziawg-2, amneziawg-1 или amneziawg-panel.").await?;
+            bot.send_message(msg.chat.id,"Не удалось сохранить. Допустимы только: amneziawg-3, amneziawg-2, amneziawg-1 или amneziawg-panel.").await?;
         }
         return Ok(());
     }
@@ -4874,7 +4885,7 @@ async fn message_handler(
             .reply_markup(menu::server_card_menu(server_id))
             .await?;
         } else {
-            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Допустимы только: amneziawg-2, amneziawg-1 или amneziawg-panel.").await?;
+            bot.send_message(msg.chat.id,"Не удалось обновить паспорт. Допустимы только: amneziawg-3, amneziawg-2, amneziawg-1 или amneziawg-panel.").await?;
         }
         return Ok(());
     }
@@ -4962,6 +4973,102 @@ async fn message_handler(
             }
         }
         dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
+    if let State::AwaitingAmneziaAccessKey { server_id } = state.clone() {
+        if !role.is_owner() {
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        let mut raw = msg.text().unwrap_or_default().trim().to_owned();
+        // The URI can contain root credentials. Remove the Telegram message
+        // before parsing and never include the value in logs or responses.
+        let _ = bot.delete_message(msg.chat.id, msg.id).await;
+        let Some(server) = settings
+            .vpn_server(server_id)
+            .filter(|server| !server.is_local)
+        else {
+            raw.clear();
+            dialogue.update(State::Idle).await?;
+            bot.send_message(msg.chat.id, "Удалённый сервер не найден.")
+                .await?;
+            return Ok(());
+        };
+        let access = match crate::vpn::amnezia_share::decode(&raw) {
+            Ok(access) => access,
+            Err(error) => {
+                raw.clear();
+                bot.send_message(
+                    msg.chat.id,
+                    format!("❌ Ключ AmneziaVPN не принят: {error}\n\nСоздайте в приложении ключ «Полный доступ», а не обычный ключ подключения."),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if !access.is_full_access() {
+            raw.clear();
+            bot.send_message(msg.chat.id, "❌ Это пользовательский ключ подключения. Для управления сервером нужен экспорт AmneziaVPN «Полный доступ» с SSH-данными.")
+                .await?;
+            return Ok(());
+        }
+        if !access.has_awg31 {
+            raw.clear();
+            let containers = if access.containers.is_empty() {
+                "не указаны".to_owned()
+            } else {
+                access.containers.join(", ")
+            };
+            bot.send_message(msg.chat.id, format!("❌ В ключе не найден контейнер AWG 3.1 (`amnezia-awg2`).\nКонтейнеры: {containers}"))
+                .await?;
+            return Ok(());
+        }
+        let encrypted = match vpn.protect_panel_password(&raw) {
+            Ok(value) => value,
+            Err(error) => {
+                raw.clear();
+                dialogue.update(State::Idle).await?;
+                bot.send_message(
+                    msg.chat.id,
+                    format!("❌ Не удалось зашифровать ключ доступа: {error}"),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        raw.clear();
+        let saved = settings.set_amnezia_access(server.id, &access.host, &encrypted, now_epoch());
+        dialogue.update(State::Idle).await?;
+        if saved {
+            settings.log_event(
+                now_epoch(),
+                EventKind::Migration,
+                None,
+                Some(uid),
+                Some(&format!(
+                    "AmneziaVPN AWG 3.1 access imported server={} host={} port={} user={}",
+                    server.id,
+                    access.host,
+                    access.port,
+                    access.user.as_deref().unwrap_or("unknown")
+                )),
+            );
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "✅ Ключ полного доступа распознан и зашифрован.\n\nСервер: {}\nSSH: {}:{}\nПротокол: AWG 3.1\nКонтейнер: amnezia-awg2\nРежим: 🚧 проверка, выдача выключена\n\nСекрет в сообщениях и журнале не сохраняется. Следующий шаг — установить совместимый мост и выполнить тестовую выдачу.",
+                    access.description.as_deref().unwrap_or(&server.name),
+                    access.host,
+                    access.port
+                ),
+            )
+            .reply_markup(menu::server_card_menu(server.id))
+            .await?;
+        } else {
+            bot.send_message(msg.chat.id, "❌ Не удалось сохранить подключение AWG 3.1.")
+                .reply_markup(menu::server_card_menu(server.id))
+                .await?;
+        }
         return Ok(());
     }
     if let State::AwaitingServerDeployCredentials { server_id } = state.clone() {
@@ -7336,6 +7443,24 @@ async fn callback_handler(
                     bot.send_message(chat, format!("🔐 Подключение панели для «{}»\n\nОтправьте одним сообщением:\nURL | ПАРОЛЬ\n\nПример: http://panel.example:1240 | пароль\n\nСообщение будет сразу удалено. В базе сохранится только зашифрованный пароль.", server.name)).await?;
                     dialogue
                         .update(State::AwaitingPanelCredentials { server_id: id })
+                        .await?;
+                }
+            }
+        }
+        Action::ServerAmneziaConnect(id) => {
+            if let Some(server) = settings.vpn_server(id) {
+                if server.is_local {
+                    bot.send_message(
+                        chat,
+                        "Импорт AmneziaVPN доступен только для удалённого сервера.",
+                    )
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+                } else {
+                    bot.send_message(chat, format!("🔑 Подключение AmneziaVPN · AWG 3.1 для «{}»\n\nВ приложении AmneziaVPN выберите сервер → Поделиться → Полный доступ и отправьте сюда строку `vpn://…`.\n\nСообщение будет сразу удалено, ключ сохранится только в зашифрованном виде. Обычный пользовательский ключ не подойдёт. До диагностики выдача останется выключенной.", server.name))
+                        .await?;
+                    dialogue
+                        .update(State::AwaitingAmneziaAccessKey { server_id: id })
                         .await?;
                 }
             }
@@ -11919,6 +12044,15 @@ mod tests {
     #[test]
     fn parse_callback_diagnose() {
         assert_eq!(parse_callback("diagnose"), Action::Diagnose);
+    }
+
+    #[test]
+    fn parse_callback_amnezia_full_access() {
+        assert_eq!(
+            parse_callback("server:amnezia:42"),
+            Action::ServerAmneziaConnect(42)
+        );
+        assert_eq!(parse_callback("server:amnezia:x"), Action::Unknown);
     }
 
     #[test]

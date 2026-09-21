@@ -431,6 +431,10 @@ pub fn server_setup_method_menu(id: i64) -> InlineKeyboardMarkup {
             &format!("server:panel:{id}"),
         )],
         vec![cb(
+            "🔑 Импорт AmneziaVPN · AWG 3.1",
+            &format!("server:amnezia:{id}"),
+        )],
+        vec![cb(
             "🔗 Подключить bootstrap-командой",
             &format!("server:enroll:{id}"),
         )],
@@ -474,6 +478,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("🔗 SSH-мост", &format!("server:enroll:{id}")),
             cb("🔐 VPN-панель", &format!("server:panel:{id}")),
         ],
+        vec![cb(
+            "🔑 Доступ AmneziaVPN · AWG 3.1",
+            &format!("server:amnezia:{id}"),
+        )],
         vec![
             cb("🚀 Установить AWG", &format!("server:deploy:{id}")),
             cb("🔀 Миграция AWG", &format!("server:migrate:{id}")),
@@ -985,10 +993,10 @@ pub fn buy_servers_menu(
     let mut rows = servers
         .iter()
         .map(|server| {
-            let protocol = if server.protocol == "amneziawg-2" {
-                "AWG 2.0 · тестовый"
-            } else {
-                "AWG 1.0 · стабильно"
+            let protocol = match server.protocol.as_str() {
+                "amneziawg-3" => "AWG 3.1 · проверка",
+                "amneziawg-2" => "AWG 2.0 · тестовый",
+                _ => "AWG 1.0 · стабильно",
             };
             let used = store.server_client_count(server.id);
             let free = server.capacity.saturating_sub(used);
@@ -1060,10 +1068,10 @@ pub fn bulk_servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardM
                 &format!(
                     "📍 {} · {}",
                     server.location,
-                    if server.protocol == "amneziawg-2" {
-                        "AWG 2.0"
-                    } else {
-                        "AWG 1.0"
+                    match server.protocol.as_str() {
+                        "amneziawg-3" => "AWG 3.1",
+                        "amneziawg-2" => "AWG 2.0",
+                        _ => "AWG 1.0",
                     }
                 ),
                 &format!("bulkserver:{}", server.id),
@@ -2929,6 +2937,7 @@ mod tests {
             "server:maintenance:42",
             "server:maintenance:finish:42",
             "server:panel:42",
+            "server:amnezia:42",
             "server:panel:sync:42",
             "server:default:42",
         ] {
@@ -2942,6 +2951,7 @@ mod tests {
         for expected in [
             "server:deploy:42",
             "server:panel:42",
+            "server:amnezia:42",
             "server:enroll:42",
             "server:42",
         ] {

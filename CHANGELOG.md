@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.45.0] - 2026-09-21
+
+### Добавлено
+
+- Первый безопасный этап поддержки серверов AmneziaVPN с AWG 3.1: отдельный
+  драйвер `amneziawg-3`, который не смешивается с AWG 1.0/2.0.
+- В мастер сервера добавлен импорт ключа полного доступа `vpn://`, включая
+  Base64URL и Qt/zlib-сжатые экспорты официального клиента AmneziaVPN.
+- Бот отличает пользовательский ключ от полного доступа, проверяет наличие
+  контейнера `amnezia-awg2`, немедленно удаляет сообщение с секретом и хранит
+  ключ только в зашифрованном виде.
+- Импортированный сервер остаётся в `maintenance`, а выдача ключей выключена
+  до установки совместимого моста и успешной тестовой выдачи.
+
+### Added
+
+- The first safe integration stage for AmneziaVPN-managed AWG 3.1 servers: a
+  distinct `amneziawg-3` driver that is never confused with AWG 1.0/2.0.
+- Server setup can now import full-access `vpn://` exports, including Base64URL
+  and Qt/zlib-compressed configurations produced by the official client.
+- The bot rejects client-only keys, verifies the `amnezia-awg2` container,
+  deletes the secret message immediately, and stores only an encrypted value.
+- Imported servers stay in maintenance with provisioning disabled until the
+  compatible bridge and a full create/download/revoke probe succeed.
+
 ## [1.44.0] - 2026-09-18
 
 - Раздел рассылки переработан в пошаговый мастер: аудитория, сообщение,
