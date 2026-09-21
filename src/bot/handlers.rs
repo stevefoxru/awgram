@@ -10082,12 +10082,6 @@ async fn callback_handler(
                 .await?;
                 return Ok(());
             };
-            if source.status == "online" {
-                bot.send_message(chat, "Этот ключ находится на доступном сервере, поэтому аварийная замена для него не требуется.")
-                    .reply_markup(menu::customer_key_menu(&name))
-                    .await?;
-                return Ok(());
-            }
             let servers = settings
                 .default_vpn_server()
                 .and_then(|id| {
@@ -10104,7 +10098,12 @@ async fn callback_handler(
                     .await?;
                 return Ok(());
             }
-            bot.send_message(chat, "🛟 Безопасная замена ключа\n\nНовый ключ будет создан на рабочем сервере. Установите и проверьте его: старый ключ удалится только после вашего подтверждения. Если новый ключ не заработает, нажмите кнопку отката.")
+            let reason = if source.status == "online" {
+                "Администратор назначил новый сервер для переноса. Технический статус старого сервера не мешает замене: он может быть доступен боту, но недоступен в вашей сети."
+            } else {
+                "Старый сервер отмечен как недоступный."
+            };
+            bot.send_message(chat, format!("🛟 Безопасная замена ключа\n\n{reason}\n\nНовый ключ будет создан на выбранном рабочем сервере. Установите и проверьте его: старый ключ окончательно удалится только после вашего подтверждения. Если новый ключ не заработает, нажмите кнопку отката."))
                 .reply_markup(menu::customer_move_servers_menu(&name, &servers, &settings))
                 .await?;
         }
@@ -10118,8 +10117,8 @@ async fn callback_handler(
             let Some(source) = settings.client_vpn_server(&name) else {
                 return Ok(());
             };
-            if source.status == "online" || source.id == server_id {
-                bot.send_message(chat, "Замена разрешена только для ключа с недоступного исходного сервера на другой рабочий сервер.")
+            if source.id == server_id {
+                bot.send_message(chat, "Нельзя заменить ключ на том же сервере. Администратор должен назначить другой рабочий сервер для новых ключей и замены.")
                     .reply_markup(menu::customer_key_menu(&name))
                     .await?;
                 return Ok(());

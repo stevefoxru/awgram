@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.45.1] - 2026-09-21
+
+### Исправлено
+
+- Безопасная замена теперь разрешена, когда администратор явно назначил другой
+  рабочий сервер кнопкой «Новые ключи и замена», даже если старый сервер
+  технически доступен боту. Это учитывает серверы, доступные из дата-центра,
+  но недоступные пользователям из отдельных сетей или регионов.
+- Замена на тот же сервер и повторное создание при незавершённой операции
+  остаются запрещены.
+
+### Fixed
+
+- Safe replacement is now allowed when an administrator explicitly selects a
+  different healthy replacement server, even if the old server is technically
+  reachable by the bot but unavailable from a user's network or region.
+- Same-server replacement and duplicate pending replacements remain blocked.
+
 ## [1.45.0] - 2026-09-21
 
 ### Добавлено
