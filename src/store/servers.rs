@@ -1119,6 +1119,7 @@ mod tests {
         store.upsert_user(7, Some("alice"), "Alice", None, 100);
         store.assign_client_group("old-key", None, 100);
         assert!(store.assign_client_owner("old-key", Some(7)));
+        assert!(store.assign_client_server("old-key", server_id, "amneziawg-1"));
         assert!(store.set_device_label("old-key", 7, "Телефон"));
         let id = store
             .create_key_replacement(7, "old-key", "new-key", server_id, 101)
