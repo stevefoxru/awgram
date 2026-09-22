@@ -64,6 +64,7 @@ pub enum Action {
     ServerEnroll(i64),
     ServerEnrollRevoke(i64),
     ServerSetDefault(i64),
+    ServerRknSet(i64, bool),
     ServerMaintenanceAsk(i64),
     ServerMaintenanceStart(i64),
     ServerMaintenanceStartNotify(i64),
@@ -230,6 +231,8 @@ pub enum Action {
     CustomerKey(String),
     CustomerMove(String),
     CustomerMoveServer(String, i64),
+    CustomerBulkMove(i64),
+    CustomerBulkMoveRun(i64, i64),
     CustomerMoveConfirm(i64),
     CustomerMoveCancel(i64),
     CustomerRefresh(String),
@@ -421,6 +424,19 @@ fn parse_callback(data: &str) -> Action {
                 Action::CustomerKey(v.to_string())
             } else if let Some(v) = data.strip_prefix("move:choose:") {
                 Action::CustomerMove(v.to_string())
+            } else if let Some(v) = data.strip_prefix("move:bulk-run:") {
+                let mut parts = v.splitn(2, ':');
+                match (
+                    parts.next().and_then(|id| id.parse().ok()),
+                    parts.next().and_then(|id| id.parse().ok()),
+                ) {
+                    (Some(source), Some(target)) => Action::CustomerBulkMoveRun(source, target),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("move:bulk:") {
+                v.parse()
+                    .map(Action::CustomerBulkMove)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("move:run:") {
                 let mut parts = v.rsplitn(2, ':');
                 match (parts.next().and_then(|id| id.parse().ok()), parts.next()) {
@@ -662,6 +678,14 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:amnezia:") {
                 v.parse()
                     .map(Action::ServerAmneziaConnect)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:rkn:on:") {
+                v.parse()
+                    .map(|id| Action::ServerRknSet(id, true))
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:rkn:off:") {
+                v.parse()
+                    .map(|id| Action::ServerRknSet(id, false))
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
@@ -1438,6 +1462,105 @@ async fn resume_pending_replacement(
     Ok(true)
 }
 
+async fn stage_customer_replacement(
+    vpn: &Vpn,
+    settings: &Store,
+    user_id: i64,
+    old_name: &str,
+    server_id: i64,
+) -> crate::error::Result<(i64, String, crate::vpn::model::AddResult)> {
+    if settings.client_owner(old_name) != Some(user_id) {
+        return Err(crate::error::Error::Parse(
+            "ключ не принадлежит пользователю".into(),
+        ));
+    }
+    if settings
+        .pending_key_replacement(user_id, old_name)
+        .is_some()
+    {
+        return Err(crate::error::Error::Parse(
+            "для ключа уже создана замена".into(),
+        ));
+    }
+    let source = settings.client_vpn_server(old_name).ok_or_else(|| {
+        crate::error::Error::Parse("не удалось определить исходный сервер".into())
+    })?;
+    let server = settings
+        .available_vpn_servers()
+        .into_iter()
+        .find(|server| server.id == server_id && server.id != source.id)
+        .ok_or_else(|| crate::error::Error::Parse("сервер замены недоступен".into()))?;
+    let user = settings
+        .user(user_id)
+        .ok_or_else(|| crate::error::Error::Parse("пользователь не найден".into()))?;
+    let existing = settings
+        .active_client_names()
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let new_name =
+        crate::vpn::validate::gen_available_names(&customer_base_name(&user), 1, &existing)
+            .map_err(|error| crate::error::Error::Parse(error.to_string()))?
+            .remove(0);
+    let expiry = vpn.client_expiry(old_name);
+    let created_at = now_epoch();
+    let replacement_id = settings
+        .create_key_replacement(user_id, old_name, &new_name, server_id, created_at)
+        .ok_or_else(|| crate::error::Error::Parse("не удалось зарегистрировать замену".into()))?;
+    let replacement = if server.is_local {
+        vpn.add(&new_name, None, settings.psk_default()).await
+    } else {
+        nonlocal_add(vpn, settings, &server, &new_name).await
+    };
+    let replacement = match replacement {
+        Ok(value) => value,
+        Err(error) => {
+            settings.decide_key_replacement(replacement_id, user_id, "cancelled", now_epoch());
+            return Err(error);
+        }
+    };
+    if let Some(expires_at) = expiry {
+        let result = if server.is_local {
+            vpn.set_client_expiry(&new_name, Some(expires_at)).await
+        } else {
+            nonlocal_set_expiry(vpn, settings, &server, &new_name, expires_at).await
+        };
+        if let Err(error) = result {
+            if server.is_local {
+                let _ = vpn.remove(&new_name).await;
+            } else {
+                let _ = nonlocal_remove(vpn, settings, &server, &new_name).await;
+            }
+            settings.decide_key_replacement(replacement_id, user_id, "cancelled", now_epoch());
+            return Err(error);
+        }
+    }
+    if !settings.stage_key_replacement(
+        replacement_id,
+        user_id,
+        server_id,
+        &server.protocol,
+        now_epoch(),
+    ) {
+        settings.decide_key_replacement(replacement_id, user_id, "cancelled", now_epoch());
+        if server.is_local {
+            let _ = vpn.remove(&new_name).await;
+        } else {
+            let _ = nonlocal_remove(vpn, settings, &server, &new_name).await;
+        }
+        return Err(crate::error::Error::Parse(
+            "не удалось атомарно сохранить замену".into(),
+        ));
+    }
+    settings.log_event(
+        now_epoch(),
+        EventKind::Regen,
+        Some(&new_name),
+        Some(user_id),
+        Some(&format!("replaced={old_name} server={server_id}")),
+    );
+    Ok((replacement_id, new_name, replacement))
+}
+
 async fn provision_customer_key(
     vpn: &Vpn,
     settings: &Store,
@@ -1666,7 +1789,7 @@ fn customer_key_view(
     let expired = vpn.client_expiry(name).is_some_and(|expiry| expiry <= now);
     let server_unavailable = server
         .as_ref()
-        .is_none_or(|server| server.status != "online");
+        .is_none_or(|server| server.status != "online" || server.blocked_by_rkn);
     let disabled = runtime
         .as_ref()
         .and_then(|value| value.enabled)
@@ -2342,8 +2465,8 @@ fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64
         "amneziawg-2" => "AWG 2.0",
         _ => "AWG 1.0",
     };
-    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🚀 Развёртывание\nПоследняя задача: {installation}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
-        server.name,server.status,panel_health,if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,protocol,server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
+    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nДоступ из РФ: {}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🚀 Развёртывание\nПоследняя задача: {installation}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
+        server.name,server.status,panel_health,if server.blocked_by_rkn{"🔴 блокировка РКН"}else{"🟢 не отмечена"},if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,protocol,server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
 async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
@@ -2681,6 +2804,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | CustomerKey(_)
         | CustomerMove(_)
         | CustomerMoveServer(_, _)
+        | CustomerBulkMove(_)
+        | CustomerBulkMoveRun(_, _)
         | CustomerMoveConfirm(_)
         | CustomerMoveCancel(_)
         | CustomerRefresh(_)
@@ -2807,6 +2932,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerEnroll(_)
         | ServerEnrollRevoke(_)
         | ServerSetDefault(_)
+        | ServerRknSet(_, _)
         | ServerMaintenanceAsk(_)
         | ServerMaintenanceStart(_)
         | ServerMaintenanceStartNotify(_)
@@ -6410,6 +6536,8 @@ async fn callback_handler(
             | Action::CustomerKey(_)
             | Action::CustomerMove(_)
             | Action::CustomerMoveServer(_, _)
+            | Action::CustomerBulkMove(_)
+            | Action::CustomerBulkMoveRun(_, _)
             | Action::CustomerMoveConfirm(_)
             | Action::CustomerMoveCancel(_)
             | Action::CustomerRefresh(_)
@@ -7110,7 +7238,10 @@ async fn callback_handler(
         Action::ServerSetDefault(id) => {
             if let Some(server) = settings.vpn_server(id) {
                 let assigned = settings.server_client_count(id);
-                if server.status != "online" {
+                if server.blocked_by_rkn {
+                    bot.send_message(chat, "Сервер отмечен как заблокированный РКН. Сначала снимите отметку и повторно проверьте доступность.")
+                        .reply_markup(menu::server_card_menu(id)).await?;
+                } else if server.status != "online" {
                     bot.send_message(chat, "Сервер должен иметь статус online. Сначала завершите обслуживание или устраните ошибку подключения.")
                         .reply_markup(menu::server_card_menu(id)).await?;
                 } else if assigned >= server.capacity {
@@ -7126,6 +7257,53 @@ async fn callback_handler(
                         .await?;
                 }
             }
+        }
+        Action::ServerRknSet(id, blocked) => {
+            let Some(server) = settings.vpn_server(id) else {
+                return Ok(());
+            };
+            if !settings.set_server_rkn_blocked(id, blocked, now_epoch()) {
+                bot.send_message(chat, if blocked {
+                    "Сервер уже отмечен как заблокированный РКН. Повторная рассылка не выполнялась."
+                } else {
+                    "На сервере нет отметки блокировки РКН."
+                }).reply_markup(menu::server_card_menu(id)).await?;
+                return Ok(());
+            }
+            if !blocked {
+                bot.send_message(chat, format!("✅ С «{}» снята отметка РКН. Выдача ключей не включалась автоматически: сначала проверьте сервер, затем нажмите «🎯 Использовать для выдачи».", server.name))
+                    .reply_markup(menu::server_card_menu(id)).await?;
+                return Ok(());
+            }
+            let mut owners = std::collections::BTreeMap::<i64, Vec<String>>::new();
+            for (owner, name) in settings.server_client_owners(id) {
+                owners.entry(owner).or_default().push(name);
+            }
+            let mut delivered = 0usize;
+            for (owner, names) in &owners {
+                let keys = names
+                    .iter()
+                    .map(|name| {
+                        let label = settings.device_label(name).unwrap_or_else(|| name.clone());
+                        (name.clone(), format!("🔁 {label}"))
+                    })
+                    .collect::<Vec<_>>();
+                let text = if names.len() > 2 {
+                    format!("🚨 Сервер VPN заблокирован\n\nСервер «{}» отмечен как недоступный из российских сетей. У вас на нём {} ключа(ей). Нажмите кнопку ниже: бот безопасно создаст новые подключения на рабочем сервере, сохранив сроки подписок. Старые ключи будут скрыты, но окончательно удалятся только после подтверждения.", server.name, names.len())
+                } else {
+                    format!("🚨 Сервер VPN заблокирован\n\nСервер «{}» отмечен как недоступный из российских сетей. Выберите ключ для безопасной замены на рабочем сервере.", server.name)
+                };
+                if bot
+                    .send_message(ChatId(*owner), text)
+                    .reply_markup(menu::rkn_replacement_menu(id, &keys))
+                    .await
+                    .is_ok()
+                {
+                    delivered += 1;
+                }
+            }
+            bot.send_message(chat, format!("🚫 «{}» отмечен как заблокированный РКН. Выдача на нём отключена.\n\nВладельцев: {}\nУведомлений доставлено: {}\nКлючей затронуто: {}", server.name, owners.len(), delivered, owners.values().map(Vec::len).sum::<usize>()))
+                .reply_markup(menu::server_card_menu(id)).await?;
         }
         Action::ServerMaintenanceAsk(id) => {
             if let Some(server) = settings.vpn_server(id) {
@@ -10129,7 +10307,9 @@ async fn callback_handler(
                     .await?;
                 return Ok(());
             }
-            let reason = if source.status == "online" {
+            let reason = if source.blocked_by_rkn {
+                "Старый сервер отмечен администратором как заблокированный РКН."
+            } else if source.status == "online" {
                 "Администратор назначил новый сервер для переноса. Технический статус старого сервера не мешает замене: он может быть доступен боту, но недоступен в вашей сети."
             } else {
                 "Старый сервер отмечен как недоступный."
@@ -10154,90 +10334,141 @@ async fn callback_handler(
                     .await?;
                 return Ok(());
             }
-            let Some(server) = settings.vpn_server(server_id).filter(|server| {
-                server.enabled_for_provisioning
-                    && settings.server_client_count(server.id) < server.capacity
-            }) else {
-                bot.send_message(chat, "Локация заполнена или недоступна.")
-                    .await?;
-                return Ok(());
-            };
-            let user = settings
-                .user(uid)
-                .ok_or_else(|| crate::error::Error::Parse("пользователь не найден".into()))?;
-            let existing = settings
-                .active_client_names()
-                .into_iter()
-                .collect::<std::collections::HashSet<_>>();
-            let new_name =
-                crate::vpn::validate::gen_available_names(&customer_base_name(&user), 1, &existing)
-                    .map_err(|error| crate::error::Error::Parse(error.to_string()))?
-                    .remove(0);
-            let expiry = vpn.client_expiry(&name);
-            let Some(replacement_id) =
-                settings.create_key_replacement(uid, &name, &new_name, server_id, now_epoch())
-            else {
-                resume_pending_replacement(&bot, chat, &vpn, &settings, lang, uid, &name).await?;
-                return Ok(());
-            };
-            let replacement = if server.is_local {
-                vpn.add(&new_name, None, settings.psk_default()).await
-            } else {
-                nonlocal_add(&vpn, &settings, &server, &new_name).await
-            };
-            let replacement = match replacement {
-                Ok(result) => result,
-                Err(error) => {
-                    settings.decide_key_replacement(replacement_id, uid, "cancelled", now_epoch());
-                    return Err(error.into());
-                }
-            };
-            if let Some(expires_at) = expiry {
-                let result = if server.is_local {
-                    vpn.set_client_expiry(&new_name, Some(expires_at)).await
-                } else {
-                    nonlocal_set_expiry(&vpn, &settings, &server, &new_name, expires_at).await
-                };
-                if let Err(error) = result {
-                    if server.is_local {
-                        let _ = vpn.remove(&new_name).await;
-                    } else {
-                        let _ = nonlocal_remove(&vpn, &settings, &server, &new_name).await;
+            let (replacement_id, new_name, replacement) =
+                match stage_customer_replacement(&vpn, &settings, uid, &name, server_id).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                        return Ok(());
                     }
-                    settings.decide_key_replacement(replacement_id, uid, "cancelled", now_epoch());
-                    return Err(error.into());
-                }
+                };
+            let server = settings
+                .vpn_server(server_id)
+                .expect("validated replacement server");
+            bot.send_message(chat, format!("✅ Новый ключ «{new_name}» готов: {} ({}).\n\nСтарый нерабочий ключ «{name}» уже скрыт из списка. Добавьте новый ключ в приложение и проверьте подключение.", server.location, server.protocol))
+                .reply_markup(menu::replacement_confirm_menu(replacement_id)).await?;
+            render::send_client_files(&bot, chat, lang, &replacement).await?;
+        }
+        Action::CustomerBulkMove(source_id) => {
+            let names = settings.user_server_client_names(uid, source_id);
+            let Some(source) = settings.vpn_server(source_id) else {
+                return Ok(());
+            };
+            if !source.blocked_by_rkn {
+                bot.send_message(chat, "Массовая аварийная замена доступна только для сервера, отмеченного администратором как заблокированный РКН.")
+                    .reply_markup(menu::customer_keyboard()).await?;
+                return Ok(());
             }
-            if !settings.stage_key_replacement(
-                replacement_id,
-                uid,
-                server_id,
-                &server.protocol,
-                now_epoch(),
-            ) {
-                settings.decide_key_replacement(replacement_id, uid, "cancelled", now_epoch());
-                if server.is_local {
-                    let _ = vpn.remove(&new_name).await;
-                } else {
-                    let _ = nonlocal_remove(&vpn, &settings, &server, &new_name).await;
-                }
+            if names.len() < 3 {
                 bot.send_message(
                     chat,
-                    "Не удалось атомарно сохранить замену. Новый ключ удалён, старый остался в кабинете. Повторите позже.",
+                    "Для одного или двух ключей используйте отдельные кнопки замены.",
+                )
+                .reply_markup(menu::customer_keyboard())
+                .await?;
+                return Ok(());
+            }
+            let target = settings.default_vpn_server().and_then(|target_id| {
+                settings
+                    .available_vpn_servers()
+                    .into_iter()
+                    .find(|server| server.id == target_id && server.id != source_id)
+            });
+            let Some(target) = target else {
+                bot.send_message(chat, "Рабочий сервер массовой замены пока не настроен. Администратор уже может выбрать его в разделе серверов.").await?;
+                return Ok(());
+            };
+            bot.send_message(chat, format!("🔁 Массовая замена\n\nБудет обработано ключей: {}\nСтарый сервер: {}\nНовый сервер: {}\n\nДля каждого ключа сохранится срок подписки. Уже начатые замены не дублируются. Новые ключи будут выданы отдельными сообщениями и потребуют проверки.", names.len(), source.name, target.name))
+                .reply_markup(menu::bulk_replacement_confirm_menu(source_id, target.id)).await?;
+        }
+        Action::CustomerBulkMoveRun(source_id, target_id) => {
+            let Some(source) = settings
+                .vpn_server(source_id)
+                .filter(|server| server.blocked_by_rkn)
+            else {
+                bot.send_message(
+                    chat,
+                    "Отметка блокировки уже снята; массовая замена отменена.",
+                )
+                .await?;
+                return Ok(());
+            };
+            let names = settings.user_server_client_names(uid, source_id);
+            if names.len() < 3 {
+                bot.send_message(
+                    chat,
+                    "Подходящих ключей для массовой замены уже меньше трёх.",
                 )
                 .await?;
                 return Ok(());
             }
-            settings.log_event(
-                now_epoch(),
-                EventKind::Regen,
-                Some(&new_name),
-                Some(uid),
-                Some(&format!("replaced={name} server={server_id}")),
-            );
-            bot.send_message(chat, format!("✅ Новый ключ «{new_name}» готов: {} ({}).\n\nСтарый нерабочий ключ «{name}» уже скрыт из списка. Добавьте новый ключ в приложение и проверьте подключение.", server.location, server.protocol))
-                .reply_markup(menu::replacement_confirm_menu(replacement_id)).await?;
-            render::send_client_files(&bot, chat, lang, &replacement).await?;
+            if !settings
+                .available_vpn_servers()
+                .iter()
+                .any(|server| server.id == target_id && server.id != source_id)
+            {
+                bot.send_message(
+                    chat,
+                    "Сервер замены больше недоступен. Операция остановлена без изменений.",
+                )
+                .await?;
+                return Ok(());
+            }
+            bot.send_message(
+                chat,
+                format!(
+                    "⏳ Начинаю безопасную замену {} ключей с сервера «{}»…",
+                    names.len(),
+                    source.name
+                ),
+            )
+            .await?;
+            let mut created = 0usize;
+            let mut skipped = 0usize;
+            let mut failed = Vec::new();
+            for name in names {
+                if let Some((id, new, _)) = settings.pending_key_replacement(uid, &name) {
+                    skipped += 1;
+                    bot.send_message(
+                        chat,
+                        format!("♻️ Для «{name}» уже ожидает проверки ключ «{new}»."),
+                    )
+                    .reply_markup(menu::replacement_confirm_menu(id))
+                    .await?;
+                    continue;
+                }
+                match stage_customer_replacement(&vpn, &settings, uid, &name, target_id).await {
+                    Ok((id, new_name, files)) => {
+                        created += 1;
+                        bot.send_message(
+                            chat,
+                            format!(
+                                "✅ «{name}» заменён на «{new_name}». Проверьте новое подключение."
+                            ),
+                        )
+                        .reply_markup(menu::replacement_confirm_menu(id))
+                        .await?;
+                        if let Err(error) =
+                            render::send_client_files(&bot, chat, lang, &files).await
+                        {
+                            failed.push(format!("{new_name}: отправка файла — {error}"));
+                        }
+                    }
+                    Err(error) => failed.push(format!("{name}: {error}")),
+                }
+            }
+            let failed_count = failed.len();
+            let errors = if failed.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\nНе завершено:\n{}",
+                    failed.into_iter().take(10).collect::<Vec<_>>().join("\n")
+                )
+            };
+            bot.send_message(chat, format!("🏁 Массовая замена завершена\n\nСоздано: {created}\nУже ожидали проверки: {skipped}\nОшибок: {failed_count}{errors}\n\nСтарые ключи скрыты, но не удалены физически до подтверждения каждого нового подключения."))
+                .reply_markup(menu::customer_keyboard()).await?;
         }
         Action::CustomerMoveConfirm(id) => {
             let Some((old, new)) =
@@ -12080,6 +12311,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_callback_rkn_and_bulk_replacement() {
+        assert_eq!(
+            parse_callback("server:rkn:on:7"),
+            Action::ServerRknSet(7, true)
+        );
+        assert_eq!(
+            parse_callback("server:rkn:off:7"),
+            Action::ServerRknSet(7, false)
+        );
+        assert_eq!(parse_callback("move:bulk:7"), Action::CustomerBulkMove(7));
+        assert_eq!(
+            parse_callback("move:bulk-run:7:9"),
+            Action::CustomerBulkMoveRun(7, 9)
+        );
+    }
+
+    #[test]
     fn parse_callback_amnezia_full_access() {
         assert_eq!(
             parse_callback("server:amnezia:42"),
@@ -12393,6 +12641,8 @@ mod tests {
             menu::troubleshooting_menu("alice"),
             menu::customer_refresh_confirm_menu("alice"),
             menu::replacement_confirm_menu(1),
+            menu::rkn_replacement_menu(1, &[("alice".into(), "Alice".into())]),
+            menu::bulk_replacement_confirm_menu(1, 2),
             menu::renew_terms_menu("alice", [100, 200, 300, 400]),
             menu::auto_renew_menu("alice"),
             menu::renew_method_menu("alice", 1),
@@ -12510,6 +12760,7 @@ mod tests {
             ServerEnroll(1),
             ServerEnrollRevoke(1),
             ServerSetDefault(1),
+            ServerRknSet(1, true),
             ServerMaintenanceAsk(1),
             ServerMaintenanceStart(1),
             ServerMaintenanceStartNotify(1),
@@ -12659,6 +12910,8 @@ mod tests {
             CustomerKey("s".into()),
             CustomerMove("s".into()),
             CustomerMoveServer("s".into(), 1),
+            CustomerBulkMove(1),
+            CustomerBulkMoveRun(1, 2),
             CustomerMoveConfirm(1),
             CustomerMoveCancel(1),
             CustomerRefresh("s".into()),
@@ -12742,6 +12995,7 @@ mod tests {
                 ServerEnroll(_) => {}
                 ServerEnrollRevoke(_) => {}
                 ServerSetDefault(_) => {}
+                ServerRknSet(_, _) => {}
                 ServerMaintenanceAsk(_) => {}
                 ServerMaintenanceStart(_) => {}
                 ServerMaintenanceStartNotify(_) => {}
@@ -12902,6 +13156,8 @@ mod tests {
                 CustomerKey(_) => {}
                 CustomerMove(_) => {}
                 CustomerMoveServer(_, _) => {}
+                CustomerBulkMove(_) => {}
+                CustomerBulkMoveRun(_, _) => {}
                 CustomerMoveConfirm(_) => {}
                 CustomerMoveCancel(_) => {}
                 CustomerRefresh(_) => {}
@@ -13136,6 +13392,7 @@ mod tests {
             (Action::ServerEnroll(1), true, false),
             (Action::ServerEnrollRevoke(1), true, false),
             (Action::ServerSetDefault(1), true, false),
+            (Action::ServerRknSet(1, true), true, false),
             (Action::ServerMaintenanceAsk(1), true, false),
             (Action::ServerMaintenanceStart(1), true, false),
             (Action::ServerMaintenanceStartNotify(1), true, false),
@@ -13208,6 +13465,8 @@ mod tests {
             (Action::BuyServer(1), true, true),
             (Action::CustomerMove("mine".into()), true, true),
             (Action::CustomerMoveServer("mine".into(), 1), true, true),
+            (Action::CustomerBulkMove(1), true, true),
+            (Action::CustomerBulkMoveRun(1, 2), true, true),
             (Action::CustomerMoveConfirm(1), true, true),
             (Action::CustomerMoveCancel(1), true, true),
         ];

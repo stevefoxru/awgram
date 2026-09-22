@@ -469,6 +469,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
                 &format!("server:maintenance:finish:{id}"),
             ),
         ],
+        vec![
+            cb("🚫 Блокировка РКН", &format!("server:rkn:on:{id}")),
+            cb("✅ Снять отметку РКН", &format!("server:rkn:off:{id}")),
+        ],
         vec![cb("🧪 Тестовая выдача", &format!("server:probe:{id}"))],
         vec![
             cb("✏️ Данные VPS", &format!("server:edit:{id}")),
@@ -497,6 +501,32 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("⬅️ Все серверы", "admin:servers"),
             cb("🏠 Админ-панель", "admin:dashboard"),
         ],
+    ])
+}
+
+pub fn rkn_replacement_menu(server_id: i64, keys: &[(String, String)]) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if keys.len() > 2 {
+        rows.push(vec![cb(
+            &format!("🔁 Заменить все ключи ({})", keys.len()),
+            &format!("move:bulk:{server_id}"),
+        )]);
+    } else {
+        for (name, title) in keys {
+            rows.push(vec![cb(title, &format!("move:choose:{name}"))]);
+        }
+    }
+    rows.push(vec![cb("🔑 Мои ключи", "mykeys")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn bulk_replacement_confirm_menu(source_id: i64, target_id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "🔁 Начать массовую замену",
+            &format!("move:bulk-run:{source_id}:{target_id}"),
+        )],
+        vec![cb("Отмена", "mykeys")],
     ])
 }
 

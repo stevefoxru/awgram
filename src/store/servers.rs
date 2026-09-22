@@ -25,6 +25,8 @@ pub struct VpnServer {
     pub note: Option<String>,
     pub is_local: bool,
     pub capacity: i64,
+    pub blocked_by_rkn: bool,
+    pub rkn_blocked_at: Option<i64>,
 }
 
 pub struct NewVpnServer<'a> {
@@ -69,10 +71,12 @@ fn server_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VpnServer> {
         note: row.get(18)?,
         is_local: row.get::<_, i64>(19)? != 0,
         capacity: row.get(20)?,
+        blocked_by_rkn: row.get::<_, i64>(21)? != 0,
+        rkn_blocked_at: row.get(22)?,
     })
 }
 
-const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local,capacity";
+const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local,capacity,blocked_by_rkn,rkn_blocked_at";
 
 impl Store {
     pub fn ensure_local_vpn_server(&self, hostname: &str, actor: i64, now: i64) -> Option<i64> {
@@ -372,11 +376,57 @@ impl Store {
     pub fn set_server_provisioning(&self, id: i64, enabled: bool, now: i64) -> bool {
         self.with_conn(|c| {
             c.execute(
-                "UPDATE vpn_servers SET enabled_for_provisioning=?2,updated_at=?3 WHERE id=?1",
+                "UPDATE vpn_servers SET enabled_for_provisioning=?2,updated_at=?3
+                 WHERE id=?1 AND (?2=0 OR blocked_by_rkn=0)",
                 rusqlite::params![id, enabled as i64, now],
             )
         })
         .is_ok_and(|changed| changed == 1)
+    }
+
+    /// Sets the regulatory reachability flag. Marking a server blocked also
+    /// removes it from every provisioning/replacement flow atomically.
+    pub fn set_server_rkn_blocked(&self, id: i64, blocked: bool, now: i64) -> bool {
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE vpn_servers
+                 SET blocked_by_rkn=?2,
+                     rkn_blocked_at=CASE WHEN ?2=1 THEN ?3 ELSE NULL END,
+                     enabled_for_provisioning=CASE WHEN ?2=1 THEN 0 ELSE enabled_for_provisioning END,
+                     updated_at=?3
+                 WHERE id=?1 AND blocked_by_rkn<>?2",
+                rusqlite::params![id, blocked as i64, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn user_server_client_names(&self, user_id: i64, server_id: i64) -> Vec<String> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT name FROM clients
+                 WHERE owner_user_id=?1 AND server_id=?2 AND removed_at IS NULL
+                 ORDER BY name COLLATE NOCASE",
+            )?;
+            statement
+                .query_map(rusqlite::params![user_id, server_id], |row| row.get(0))?
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn server_client_owners(&self, server_id: i64) -> Vec<(i64, String)> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT owner_user_id,name FROM clients
+                 WHERE server_id=?1 AND owner_user_id IS NOT NULL AND removed_at IS NULL
+                 ORDER BY owner_user_id,name COLLATE NOCASE",
+            )?;
+            statement
+                .query_map([server_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     pub fn begin_server_maintenance(&self, id: i64, actor_id: i64, now: i64) -> bool {
@@ -752,6 +802,7 @@ impl Store {
             .into_iter()
             .filter(|server| {
                 server.enabled_for_provisioning
+                    && !server.blocked_by_rkn
                     && valid_protocol(&server.protocol)
                     && server.status != "offline"
                     && self.server_client_count(server.id) < server.capacity

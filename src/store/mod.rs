@@ -733,6 +733,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     r#"
     CREATE UNIQUE INDEX idx_users_email ON users(lower(email)) WHERE email IS NOT NULL;
     "#,
+    // v33: операторская отметка блокировки сервера Роскомнадзором. Она не
+    // смешивается с техническим health-check: узел может отвечать боту, но
+    // быть недоступен пользователям из российских сетей.
+    r#"
+    ALTER TABLE vpn_servers ADD COLUMN blocked_by_rkn INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE vpn_servers ADD COLUMN rkn_blocked_at INTEGER;
+    "#,
 ];
 
 pub struct Store {
