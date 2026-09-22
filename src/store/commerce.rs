@@ -229,6 +229,150 @@ impl Store {
         .max(0) as usize
     }
 
+    pub fn user_pending_key_replacements(&self, user_id: i64) -> Vec<KeyReplacement> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id,user_id,old_client,new_client,target_server_id,created_at
+                   FROM key_replacements
+                  WHERE user_id=?1 AND status='pending'
+                  ORDER BY created_at ASC,id ASC",
+            )?;
+            let rows = statement.query_map([user_id], |row| {
+                Ok(KeyReplacement {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    old_client: row.get(2)?,
+                    new_client: row.get(3)?,
+                    target_server_id: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Atomically publishes a newly created replacement and archives the old
+    /// record. A partial owner/server assignment must never make both keys
+    /// disappear from the customer's cabinet.
+    pub fn stage_key_replacement(
+        &self,
+        replacement_id: i64,
+        user_id: i64,
+        server_id: i64,
+        protocol: &str,
+        now: i64,
+    ) -> bool {
+        if crate::vpn::driver::Protocol::parse(protocol).is_none() {
+            return false;
+        }
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let (old, new, expected_server): (String, String, i64) = transaction.query_row(
+                "SELECT old_client,new_client,target_server_id FROM key_replacements
+                 WHERE id=?1 AND user_id=?2 AND status='pending'",
+                rusqlite::params![replacement_id, user_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if expected_server != server_id {
+                return Ok(false);
+            }
+            let old_exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM clients WHERE name=?1 AND owner_user_id=?2)",
+                rusqlite::params![old, user_id],
+                |row| row.get(0),
+            )?;
+            if !old_exists {
+                return Ok(false);
+            }
+            transaction.execute(
+                "INSERT INTO clients(name,ip,first_seen,last_seen,owner_user_id,group_id,device_label,server_id,protocol,instance_id,removed_at)
+                 SELECT ?2,'',?5,?5,?3,group_id,device_label,?4,?6,
+                        (SELECT id FROM vpn_instances WHERE server_id=?4 AND is_default=1),NULL
+                   FROM clients WHERE name=?1
+                 ON CONFLICT(name) DO UPDATE SET
+                   owner_user_id=?3,
+                   group_id=(SELECT group_id FROM clients WHERE name=?1),
+                   device_label=COALESCE(clients.device_label,(SELECT device_label FROM clients WHERE name=?1)),
+                   server_id=?4,protocol=?6,
+                   instance_id=(SELECT id FROM vpn_instances WHERE server_id=?4 AND is_default=1),
+                   removed_at=NULL",
+                rusqlite::params![old, new, user_id, server_id, now, protocol],
+            )?;
+            let published: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM clients WHERE name=?1 AND owner_user_id=?2 AND server_id=?3 AND removed_at IS NULL)",
+                rusqlite::params![new, user_id, server_id],
+                |row| row.get(0),
+            )?;
+            if !published {
+                return Ok(false);
+            }
+            transaction.execute(
+                "INSERT INTO client_archive_events(client_name,server_id,owner_user_id,reason,archived_at)
+                 SELECT name,server_id,owner_user_id,'replacement_pending',?2 FROM clients
+                 WHERE name=?1 AND removed_at IS NULL",
+                rusqlite::params![old, now],
+            )?;
+            let retired = transaction.execute(
+                "UPDATE clients SET removed_at=?2 WHERE name=?1 AND owner_user_id=?3 AND removed_at IS NULL",
+                rusqlite::params![old, now, user_id],
+            )?;
+            if retired != 1 {
+                return Ok(false);
+            }
+            transaction.commit()?;
+            Ok(true)
+        })
+        .unwrap_or(false)
+    }
+
+    /// Repairs interrupted legacy replacement attempts. If the new database
+    /// record was never created, the old key is revived and the operation is
+    /// cancelled. Valid pending replacements remain available to confirm.
+    pub fn repair_user_key_replacements(&self, user_id: i64, now: i64) -> usize {
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let mut statement = transaction.prepare(
+                "SELECT id,old_client,new_client FROM key_replacements
+                 WHERE user_id=?1 AND status='pending'",
+            )?;
+            let rows = statement
+                .query_map([user_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            let mut repaired = 0usize;
+            for (id, old, new) in rows {
+                let valid_new: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM clients WHERE name=?1 AND owner_user_id=?2 AND removed_at IS NULL)",
+                    rusqlite::params![new, user_id],
+                    |row| row.get(0),
+                )?;
+                if valid_new {
+                    continue;
+                }
+                transaction.execute(
+                    "UPDATE clients SET removed_at=NULL WHERE name=?1 AND owner_user_id=?2",
+                    rusqlite::params![old, user_id],
+                )?;
+                transaction.execute(
+                    "UPDATE key_replacements SET status='cancelled',decided_at=?3
+                     WHERE id=?1 AND user_id=?2 AND status='pending'",
+                    rusqlite::params![id, user_id, now],
+                )?;
+                repaired += 1;
+            }
+            transaction.commit()?;
+            Ok(repaired)
+        })
+        .unwrap_or_default()
+    }
+
     pub fn create_key_replacement(
         &self,
         user_id: i64,

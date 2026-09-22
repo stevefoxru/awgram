@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.45.2] - 2026-09-22
+
+### Исправлено
+
+- Замена ключа теперь сохраняется атомарно: новый ключ получает владельца,
+  целевой сервер, группу и название устройства в одной транзакции, и только
+  после этого старый ключ архивируется.
+- Ошибка любого шага удаляет неудачный новый ключ и оставляет старый в
+  кабинете; ошибки привязки больше не игнорируются.
+- Повреждённые незавершённые замены автоматически проверяются при открытии
+  кабинета и раздела «Мои ключи». Если новый ключ не был сохранён, старый
+  восстанавливается, а зависшая операция закрывается.
+- Незавершённые замены постоянно отображаются с кнопками «Новый работает» и
+  «Вернуть старый», поэтому потеря сообщения Telegram больше не блокирует
+  подтверждение или откат.
+- При подтверждении бот находит исходный сервер даже у уже архивированного
+  старого ключа и пытается удалить его физически.
+
+### Fixed
+
+- Replacement publication is now atomic: owner, target server, group and
+  device label are committed before the old key is archived.
+- Interrupted or partially saved replacements are repaired when the customer
+  opens the dashboard or key list; the old key is restored when no valid new
+  record exists.
+- Pending replacement controls remain accessible from the key cabinet, and
+  confirmed replacements can still locate and revoke the archived source key.
+
 ## [1.45.1] - 2026-09-21
 
 ### Исправлено

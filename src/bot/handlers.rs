@@ -1510,6 +1510,14 @@ async fn customer_dashboard(
     vpn: &Vpn,
     settings: &Store,
 ) -> HandlerResult {
+    let repaired = settings.repair_user_key_replacements(uid, now_epoch());
+    if repaired > 0 {
+        tracing::warn!(
+            user_id = uid,
+            repaired,
+            "repaired interrupted key replacements"
+        );
+    }
     let me = bot.get_me().await?;
     let username = me.username.clone().unwrap_or_default();
     let display_name = settings
@@ -1549,6 +1557,25 @@ async fn customer_dashboard(
     )
     .reply_markup(menu::customer_keyboard())
     .await?;
+    send_pending_replacements(bot, chat, uid, settings).await?;
+    Ok(())
+}
+
+async fn send_pending_replacements(
+    bot: &Bot,
+    chat: ChatId,
+    user_id: i64,
+    settings: &Store,
+) -> HandlerResult {
+    let pending = settings.user_pending_key_replacements(user_id);
+    if !pending.is_empty() {
+        bot.send_message(
+            chat,
+            "🔄 Незавершённые замены\n\nНовый ключ уже создан, а старый сохранён в архиве до вашего решения. Проверьте новый ключ и подтвердите замену либо верните старый.",
+        )
+        .reply_markup(menu::pending_replacements_menu(&pending))
+        .await?;
+    }
     Ok(())
 }
 
@@ -5270,6 +5297,7 @@ async fn message_handler(
                 .await?;
             }
             "🔑 Мои ключи" => {
+                settings.repair_user_key_replacements(uid, now_epoch());
                 let (lines, buttons) = customer_key_list(&settings, &vpn, uid);
                 let text = if lines.is_empty() {
                     "🔑 У вас пока нет ключей. Вы можете приобрести ключ или обратиться в поддержку.".to_string()
@@ -5284,6 +5312,7 @@ async fn message_handler(
                     request = request.reply_markup(menu::customer_keys_menu(&buttons));
                 }
                 request.await?;
+                send_pending_replacements(&bot, msg.chat.id, uid, &settings).await?;
             }
             "➕ Пополнить" => {
                 bot.send_message(
@@ -9245,6 +9274,7 @@ async fn callback_handler(
             }
         }
         Action::MyKeys => {
+            settings.repair_user_key_replacements(uid, now_epoch());
             let (lines, buttons) = customer_key_list(&settings, &vpn, uid);
             let text = if lines.is_empty() {
                 "У вас пока нет ключей.".to_string()
@@ -9256,6 +9286,7 @@ async fn callback_handler(
                 request = request.reply_markup(menu::customer_keys_menu(&buttons));
             }
             request.await?;
+            send_pending_replacements(&bot, chat, uid, &settings).await?;
         }
         Action::Balance => {
             let entries = settings.balance_history(uid, 10);
@@ -10177,10 +10208,13 @@ async fn callback_handler(
                     return Err(error.into());
                 }
             }
-            settings.assign_client_group(&new_name, None, now_epoch());
-            settings.assign_client_owner(&new_name, Some(uid));
-            settings.assign_client_server(&new_name, server_id, &server.protocol);
-            if !settings.retire_client(&name, now_epoch()) {
+            if !settings.stage_key_replacement(
+                replacement_id,
+                uid,
+                server_id,
+                &server.protocol,
+                now_epoch(),
+            ) {
                 settings.decide_key_replacement(replacement_id, uid, "cancelled", now_epoch());
                 if server.is_local {
                     let _ = vpn.remove(&new_name).await;
@@ -10189,7 +10223,7 @@ async fn callback_handler(
                 }
                 bot.send_message(
                     chat,
-                    "Не удалось скрыть старый ключ. Новый ключ удалён, повторите замену позже.",
+                    "Не удалось атомарно сохранить замену. Новый ключ удалён, старый остался в кабинете. Повторите позже.",
                 )
                 .await?;
                 return Ok(());
@@ -10211,7 +10245,7 @@ async fn callback_handler(
             else {
                 return Ok(());
             };
-            let source = settings.client_vpn_server(&old);
+            let source = settings.client_vpn_server_including_retired(&old);
             let source_unavailable = source
                 .as_ref()
                 .is_none_or(|server| server.status != "online");

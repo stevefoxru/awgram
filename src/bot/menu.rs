@@ -1376,6 +1376,30 @@ pub fn replacement_confirm_menu(id: i64) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn pending_replacements_menu(
+    replacements: &[crate::store::KeyReplacement],
+) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    for replacement in replacements {
+        rows.push(vec![cb(
+            &format!("🔑 Открыть {}", replacement.new_client),
+            &format!("mykey:{}", replacement.new_client),
+        )]);
+        rows.push(vec![
+            cb(
+                "✅ Новый работает",
+                &format!("move:confirm:{}", replacement.id),
+            ),
+            cb(
+                "↩️ Вернуть старый",
+                &format!("move:cancel:{}", replacement.id),
+            ),
+        ]);
+    }
+    rows.push(vec![cb("⬅️ Мои ключи", "mykeys")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
 pub fn renew_terms_menu(name: &str, prices: [i64; 4]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![

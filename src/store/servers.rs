@@ -798,6 +798,20 @@ impl Store {
         .flatten()
     }
 
+    pub fn client_vpn_server_including_retired(&self, name: &str) -> Option<VpnServer> {
+        self.with_conn(|connection| {
+            connection
+                .query_row(
+                    &format!("SELECT {SERVER_COLUMNS} FROM vpn_servers WHERE id=(SELECT server_id FROM clients WHERE name=?1)"),
+                    [name],
+                    server_from_row,
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
     /// Logically retires a client whose source server cannot be contacted.
     /// This keeps history intact while removing the stale key from all active
     /// customer/admin lists and capacity calculations.
@@ -1046,6 +1060,49 @@ mod tests {
             Some(("old-key".into(), "new-key".into()))
         );
         assert_eq!(store.pending_key_replacement(7, "old-key"), None);
+    }
+
+    #[test]
+    fn replacement_staging_is_atomic_and_preserves_customer_metadata() {
+        let store = Store::open_in_memory();
+        let server_id = store.ensure_local_vpn_server("vpn", 1, 100).unwrap();
+        store.upsert_user(7, Some("alice"), "Alice", None, 100);
+        store.assign_client_group("old-key", None, 100);
+        assert!(store.assign_client_owner("old-key", Some(7)));
+        assert!(store.set_device_label("old-key", 7, "Телефон"));
+        let id = store
+            .create_key_replacement(7, "old-key", "new-key", server_id, 101)
+            .unwrap();
+
+        assert!(store.stage_key_replacement(id, 7, server_id, "amneziawg-1", 102));
+        assert_eq!(store.user_client_names(7), vec!["new-key"]);
+        assert_eq!(store.device_label("new-key").as_deref(), Some("Телефон"));
+        assert_eq!(store.client_owner("new-key"), Some(7));
+        assert_eq!(store.client_vpn_server("new-key").unwrap().id, server_id);
+        assert_eq!(
+            store
+                .client_vpn_server_including_retired("old-key")
+                .unwrap()
+                .id,
+            server_id
+        );
+    }
+
+    #[test]
+    fn interrupted_replacement_revives_old_key() {
+        let store = Store::open_in_memory();
+        let server_id = store.ensure_local_vpn_server("vpn", 1, 100).unwrap();
+        store.upsert_user(7, Some("alice"), "Alice", None, 100);
+        store.assign_client_group("old-key", None, 100);
+        assert!(store.assign_client_owner("old-key", Some(7)));
+        store
+            .create_key_replacement(7, "old-key", "missing-new", server_id, 101)
+            .unwrap();
+        assert!(store.retire_client("old-key", 102));
+
+        assert_eq!(store.repair_user_key_replacements(7, 103), 1);
+        assert_eq!(store.user_client_names(7), vec!["old-key"]);
+        assert_eq!(store.user_pending_key_replacement_count(7), 0);
     }
 
     #[test]
