@@ -12770,6 +12770,7 @@ mod tests {
             ServerDiagnose(1),
             ServerProvisioningProbe(1),
             ServerPanelConnect(1),
+            ServerAmneziaConnect(1),
             ServerPanelSync(1),
             ServerPanelAudit(1),
             ServerPanelArchiveMissingAsk(1),
@@ -13005,6 +13006,7 @@ mod tests {
                 ServerDiagnose(_) => {}
                 ServerProvisioningProbe(_) => {}
                 ServerPanelConnect(_) => {}
+                ServerAmneziaConnect(_) => {}
                 ServerPanelSync(_) => {}
                 ServerPanelAudit(_) => {}
                 ServerPanelArchiveMissingAsk(_) => {}
@@ -13402,6 +13404,7 @@ mod tests {
             (Action::ServerDiagnose(1), true, false),
             (Action::ServerProvisioningProbe(1), true, false),
             (Action::ServerPanelConnect(1), true, false),
+            (Action::ServerAmneziaConnect(1), true, false),
             (Action::ServerPanelSync(1), true, false),
             (Action::ServerPanelAudit(1), true, false),
             (Action::ServerPanelArchiveMissingAsk(1), true, false),

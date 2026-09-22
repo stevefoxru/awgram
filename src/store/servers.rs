@@ -408,9 +408,9 @@ impl Store {
                  WHERE owner_user_id=?1 AND server_id=?2 AND removed_at IS NULL
                  ORDER BY name COLLATE NOCASE",
             )?;
-            statement
-                .query_map(rusqlite::params![user_id, server_id], |row| row.get(0))?
-                .collect()
+            let rows =
+                statement.query_map(rusqlite::params![user_id, server_id], |row| row.get(0))?;
+            rows.collect()
         })
         .unwrap_or_default()
     }
@@ -422,9 +422,8 @@ impl Store {
                  WHERE server_id=?1 AND owner_user_id IS NOT NULL AND removed_at IS NULL
                  ORDER BY owner_user_id,name COLLATE NOCASE",
             )?;
-            statement
-                .query_map([server_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect()
+            let rows = statement.query_map([server_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect()
         })
         .unwrap_or_default()
     }
