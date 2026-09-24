@@ -70,6 +70,8 @@ pub enum Action {
     ServerUnavailableSet(i64, bool),
     ServerUnavailableReason(i64, String),
     ServerRetirement(i64),
+    ServerMigrationTargets(i64),
+    ServerMigrationExport(i64, String),
     ServerCleanup(i64),
     ServerCleanupEnabled(i64, bool),
     ServerCleanupDays(i64, i64),
@@ -755,6 +757,18 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::ServerRetirement)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:offboard:targets:") {
+                v.parse()
+                    .map(Action::ServerMigrationTargets)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:offboard:export:") {
+                let mut parts = v.splitn(2, ':');
+                match (parts.next().and_then(|id| id.parse().ok()), parts.next()) {
+                    (Some(id), Some(format @ ("csv" | "json"))) => {
+                        Action::ServerMigrationExport(id, format.to_string())
+                    }
+                    _ => Action::Unknown,
+                }
             } else if let Some(v) = data.strip_prefix("server:cleanup:enabled:") {
                 let mut parts = v.split(':');
                 match (
@@ -2824,6 +2838,72 @@ async fn server_cleanup_screen(
     Ok(())
 }
 
+fn migration_target_rankings(
+    settings: &Store,
+    source: &crate::store::VpnServer,
+    now: i64,
+) -> Vec<(crate::store::VpnServer, i64, String)> {
+    let mut ranked = settings
+        .available_vpn_servers()
+        .into_iter()
+        .filter(|server| server.id != source.id)
+        .map(|server| {
+            let assigned = settings.server_client_count(server.id).max(0);
+            let free = server.capacity.saturating_sub(assigned).max(0);
+            let load = if server.capacity > 0 {
+                assigned.saturating_mul(100) / server.capacity
+            } else {
+                100
+            };
+            let runtime = settings.server_runtime_summary(server.id, now);
+            let telemetry_fresh = runtime
+                .observed_at
+                .is_some_and(|observed| now.saturating_sub(observed) <= 15 * 60);
+            let mut score = 0i64;
+            score += match server.status.as_str() {
+                "online" => 40,
+                "warning" => 10,
+                _ => 0,
+            };
+            if server.enabled_for_provisioning {
+                score += 25;
+            }
+            score += (100 - load).clamp(0, 100) / 5;
+            if telemetry_fresh {
+                score += 10;
+            }
+            if server.location.eq_ignore_ascii_case(&source.location) {
+                score += 5;
+            }
+            if server.protocol == "amneziawg-panel" || server.protocol == "amneziawg-1" {
+                score += 5;
+            }
+            let reason = format!(
+                "свободно {free}/{} · загрузка {load}% · телеметрия {} · {}",
+                server.capacity,
+                if telemetry_fresh {
+                    "свежая"
+                } else {
+                    "устарела"
+                },
+                server.protocol
+            );
+            (server, score, reason)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.id.cmp(&right.0.id))
+    });
+    ranked
+}
+
+fn csv_cell(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
 async fn notify_unavailable_server_owners(
     bot: &Bot,
     settings: &Store,
@@ -3380,6 +3460,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerUnavailableSet(_, _)
         | ServerUnavailableReason(_, _)
         | ServerRetirement(_)
+        | ServerMigrationTargets(_)
+        | ServerMigrationExport(_, _)
         | ServerCleanup(_)
         | ServerCleanupEnabled(_, _)
         | ServerCleanupDays(_, _)
@@ -7988,6 +8070,129 @@ async fn callback_handler(
                 .collect::<Vec<_>>();
             bot.send_message(chat, format!("📦 Центр миграции сервера\n\nСервер: {}\nСостояние: {}\nПричина: {}\nАвтоархив ключей: {cleanup}\n\n📊 Кампания миграции\nЗафиксировано ключей: {total}\nУведомлено: {notified}/{total}\nЗамен ожидает подтверждения: {pending}\nПеренесено или архивировано: {completed}/{total}\nОсталось: {remaining}\n\nТекущее состояние сервера\nАктивных ключей: {keys}\nВладельцев: {owners}\n\nПорядок действий:\n1. Укажите причину отключения.\n2. Синхронизируйте ключи.\n3. Уведомите владельцев и дождитесь замен.\n4. Невосстановленные ключи будут скрыты по действующей политике очистки.\n5. Когда активных ключей не останется, переместите сервер в архив.\n\nПоследние действия:\n{}", server.name, if server.operator_unavailable { "❌ нерабочий" } else { "✅ рабочий" }, server.unavailable_reason.as_deref().unwrap_or("не указана"), if history.is_empty() { "—".into() } else { history.join("\n") }))
                 .reply_markup(menu::server_retirement_menu(id, server.operator_unavailable))
+                .await?;
+        }
+        Action::ServerMigrationTargets(id) => {
+            let Some(source) = settings.vpn_server(id) else {
+                return Ok(());
+            };
+            let ranked = migration_target_rankings(&settings, &source, now_epoch());
+            if ranked.is_empty() {
+                bot.send_message(chat, "Нет доступного сервера для замены. Рабочий сервер должен быть online, иметь свободные места и быть включён для выдачи.")
+                    .reply_markup(menu::server_retirement_menu(id, source.operator_unavailable))
+                    .await?;
+            } else {
+                let lines = ranked
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (server, score, reason))| {
+                        format!(
+                            "{}. {}{} · оценка {score}\n   {reason}",
+                            index + 1,
+                            if index == 0 { "⭐ " } else { "" },
+                            server.name
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let buttons = ranked
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (server, score, _))| {
+                        (
+                            server.id,
+                            format!(
+                                "{}{} · {score}",
+                                if index == 0 { "⭐ " } else { "" },
+                                server.name
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                bot.send_message(chat, format!("🎯 Сервер для замены\n\nИсходный: {} · {}\n\n{}\n\n⭐ Первый сервер рекомендован по совокупности доступности, ёмкости, загрузки, телеметрии, протокола и локации. Выбор назначит сервером новых ключей и безопасной замены.", source.name, source.location, lines.join("\n\n")))
+                    .reply_markup(menu::migration_targets_menu(id, &buttons))
+                    .await?;
+            }
+        }
+        Action::ServerMigrationExport(id, format) => {
+            let Some(server) = settings.vpn_server(id) else {
+                return Ok(());
+            };
+            let Some(campaign) = settings.ensure_server_migration_campaign(id, uid, now_epoch())
+            else {
+                bot.send_message(chat, "Не удалось подготовить кампанию для экспорта.")
+                    .await?;
+                return Ok(());
+            };
+            let items = settings.server_migration_items(campaign.id);
+            let file_name;
+            let bytes = if format == "json" {
+                file_name = format!("server-{}-migration.json", server.id);
+                let rows = items
+                    .iter()
+                    .map(|item| {
+                        serde_json::json!({
+                            "client_name": &item.client_name,
+                            "device": settings.device_label(&item.client_name),
+                            "owner_user_id": item.owner_user_id,
+                            "notified_at": item.notified_at,
+                            "replacement_pending": item.replacement_pending,
+                            "completed_at": item.completed_at,
+                            "active": item.active,
+                            "cleanup_exempt": settings.client_cleanup_exempt(&item.client_name),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "exported_at": now_epoch(),
+                    "server": {
+                        "id": server.id, "name": &server.name, "location": &server.location,
+                        "hostname": &server.hostname, "public_ip": &server.public_ip,
+                        "provider": &server.provider, "protocol": &server.protocol,
+                        "status": &server.status, "blocked_by_rkn": server.blocked_by_rkn,
+                        "operator_unavailable": server.operator_unavailable,
+                        "unavailable_reason": &server.unavailable_reason,
+                        "archived_at": server.archived_at,
+                    },
+                    "campaign": { "id": campaign.id, "created_at": campaign.created_at },
+                    "items": rows,
+                }))
+                .unwrap_or_default()
+            } else {
+                file_name = format!("server-{}-migration.csv", server.id);
+                let mut csv = "client_name,device,owner_user_id,notified_at,replacement_pending,completed_at,active,cleanup_exempt\n".to_string();
+                for item in &items {
+                    csv.push_str(&format!(
+                        "{},{},{},{},{},{},{},{}\n",
+                        csv_cell(&item.client_name),
+                        csv_cell(
+                            settings
+                                .device_label(&item.client_name)
+                                .as_deref()
+                                .unwrap_or("")
+                        ),
+                        item.owner_user_id
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        item.notified_at
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        item.replacement_pending,
+                        item.completed_at
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        item.active,
+                        settings.client_cleanup_exempt(&item.client_name),
+                    ));
+                }
+                csv.into_bytes()
+            };
+            bot.send_document(chat, InputFile::memory(bytes).file_name(file_name))
+                .caption(format!(
+                    "📤 Экспорт миграции · {}\nКампания #{} · ключей: {}",
+                    server.name,
+                    campaign.id,
+                    items.len()
+                ))
                 .await?;
         }
         Action::ServerCleanup(id) => {
@@ -13364,6 +13569,7 @@ mod tests {
             menu::server_archive_confirm_menu(1),
             menu::server_unavailable_reason_menu(1),
             menu::server_retirement_menu(1, false),
+            menu::migration_targets_menu(1, &[(2, "target".into())]),
             menu::server_cleanup_menu(1, true, 30, &[("old-key".into(), false)]),
             menu::server_health_menu(1),
             menu::server_keys_hub_menu(1),
@@ -13538,6 +13744,8 @@ mod tests {
             ServerUnavailableSet(1, true),
             ServerUnavailableReason(1, "broken".into()),
             ServerRetirement(1),
+            ServerMigrationTargets(1),
+            ServerMigrationExport(1, "csv".into()),
             ServerCleanup(1),
             ServerCleanupEnabled(1, true),
             ServerCleanupDays(1, 30),
@@ -13792,6 +14000,8 @@ mod tests {
                 ServerUnavailableSet(_, _) => {}
                 ServerUnavailableReason(_, _) => {}
                 ServerRetirement(_) => {}
+                ServerMigrationTargets(_) => {}
+                ServerMigrationExport(_, _) => {}
                 ServerCleanup(_) => {}
                 ServerCleanupEnabled(_, _) => {}
                 ServerCleanupDays(_, _) => {}
@@ -14216,6 +14426,8 @@ mod tests {
                 false,
             ),
             (Action::ServerRetirement(1), true, false),
+            (Action::ServerMigrationTargets(1), true, false),
+            (Action::ServerMigrationExport(1, "csv".into()), true, false),
             (Action::ServerCleanup(1), true, false),
             (Action::ServerCleanupEnabled(1, true), true, false),
             (Action::ServerCleanupDays(1, 30), true, false),

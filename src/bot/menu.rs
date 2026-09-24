@@ -658,6 +658,20 @@ pub fn server_retirement_menu(id: i64, unavailable: bool) -> InlineKeyboardMarku
         &format!("server:panel:sync:{id}"),
     )]);
     rows.push(vec![cb(
+        "🎯 Сервер для замены",
+        &format!("server:offboard:targets:{id}"),
+    )]);
+    rows.push(vec![
+        cb(
+            "📄 Экспорт CSV",
+            &format!("server:offboard:export:{id}:csv"),
+        ),
+        cb(
+            "🧾 Экспорт JSON",
+            &format!("server:offboard:export:{id}:json"),
+        ),
+    ]);
+    rows.push(vec![cb(
         "🧹 Политика и список очистки",
         &format!("server:cleanup:{id}"),
     )]);
@@ -666,6 +680,18 @@ pub fn server_retirement_menu(id: i64, unavailable: bool) -> InlineKeyboardMarku
         &format!("server:archive:ask:{id}"),
     )]);
     rows.push(vec![cb("⬅️ К серверу", &format!("server:{id}"))]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn migration_targets_menu(source_id: i64, targets: &[(i64, String)]) -> InlineKeyboardMarkup {
+    let mut rows = targets
+        .iter()
+        .map(|(id, label)| vec![cb(label, &format!("server:default:{id}"))])
+        .collect::<Vec<_>>();
+    rows.push(vec![cb(
+        "⬅️ К центру миграции",
+        &format!("server:retire:{source_id}"),
+    )]);
     InlineKeyboardMarkup::new(rows)
 }
 
