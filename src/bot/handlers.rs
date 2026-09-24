@@ -251,6 +251,8 @@ pub enum Action {
     CustomerKey(String),
     CustomerMove(String),
     CustomerMoveServer(String, i64),
+    CustomerReplacementCenter,
+    CustomerReplaceAll,
     CustomerBulkMove(i64),
     CustomerBulkMoveRun(i64, i64),
     CustomerMoveConfirm(i64),
@@ -456,6 +458,10 @@ fn parse_callback(data: &str) -> Action {
                 Action::CustomerKey(v.to_string())
             } else if let Some(v) = data.strip_prefix("move:choose:") {
                 Action::CustomerMove(v.to_string())
+            } else if data == "move:center" {
+                Action::CustomerReplacementCenter
+            } else if data == "move:all" {
+                Action::CustomerReplaceAll
             } else if let Some(v) = data.strip_prefix("move:bulk-run:") {
                 let mut parts = v.splitn(2, ':');
                 match (
@@ -2111,7 +2117,12 @@ async fn send_customer_keys_page(
             page_lines.join("\n\n")
         ),
     )
-    .reply_markup(menu::customer_keys_page_menu(&page_buttons, page, pages))
+    .reply_markup(menu::customer_keys_page_menu(
+        &page_buttons,
+        page,
+        pages,
+        replacement,
+    ))
     .await?;
     send_pending_replacements(bot, chat, uid, settings).await?;
     Ok(())
@@ -3326,6 +3337,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | CustomerKey(_)
         | CustomerMove(_)
         | CustomerMoveServer(_, _)
+        | CustomerReplacementCenter
+        | CustomerReplaceAll
         | CustomerBulkMove(_)
         | CustomerBulkMoveRun(_, _)
         | CustomerMoveConfirm(_)
@@ -7075,6 +7088,8 @@ async fn callback_handler(
             | Action::CustomerKey(_)
             | Action::CustomerMove(_)
             | Action::CustomerMoveServer(_, _)
+            | Action::CustomerReplacementCenter
+            | Action::CustomerReplaceAll
             | Action::CustomerBulkMove(_)
             | Action::CustomerBulkMoveRun(_, _)
             | Action::CustomerMoveConfirm(_)
@@ -11269,6 +11284,136 @@ async fn callback_handler(
                 .reply_markup(menu::customer_move_servers_menu(&name, &servers, &settings))
                 .await?;
         }
+        Action::CustomerReplacementCenter => {
+            let now = now_epoch();
+            let retention = settings.blocked_key_cleanup_days();
+            let mut affected = Vec::new();
+            for name in settings.user_client_names(uid) {
+                let view = customer_key_view(&settings, &vpn, uid, &name, now);
+                if view.group != CustomerKeyGroup::Replacement {
+                    continue;
+                }
+                let Some(server) = settings.client_vpn_server(&name) else {
+                    continue;
+                };
+                let marked_at = [
+                    server.rkn_blocked_at,
+                    server.unavailable_at,
+                    server.archived_at,
+                ]
+                .into_iter()
+                .flatten()
+                .min();
+                let deadline = marked_at
+                    .map(|at| crate::calendar::format_date(at.saturating_add(retention * 86_400)));
+                let device = settings
+                    .device_label(&name)
+                    .unwrap_or_else(|| "Без названия".into());
+                affected.push((name, device, server, deadline));
+            }
+            if affected.is_empty() {
+                bot.send_message(chat, "✅ Нерабочих подключений для замены нет.")
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                return Ok(());
+            }
+            let lines = affected
+                .iter()
+                .map(|(name, device, server, deadline)| {
+                    format!(
+                        "🚨 {device}\n{} · {}\nТехническое имя: {name}\nЗаменить до: {}",
+                        server.location,
+                        server.name,
+                        deadline.as_deref().unwrap_or("срок не задан")
+                    )
+                })
+                .collect::<Vec<_>>();
+            let buttons = affected
+                .iter()
+                .map(|(name, device, _, _)| (name.clone(), device.clone()))
+                .collect::<Vec<_>>();
+            bot.send_message(chat, format!("🚨 Центр замены подключений\n\nНерабочих ключей: {}\n\n{}\n\nБезопасная замена сохраняет срок. Старый ключ скрывается, но удаляется только после подтверждения, что новый работает.", affected.len(), lines.join("\n\n")))
+                .reply_markup(menu::customer_replacement_center_menu(&buttons))
+                .await?;
+        }
+        Action::CustomerReplaceAll => {
+            let target = settings.default_vpn_server().and_then(|target_id| {
+                settings
+                    .available_vpn_servers()
+                    .into_iter()
+                    .find(|server| server.id == target_id)
+            });
+            let Some(target) = target else {
+                bot.send_message(chat, "Рабочий сервер замены сейчас не настроен. Мы сохранили ваши старые ключи; обратитесь в поддержку.")
+                    .reply_markup(menu::support_category_menu())
+                    .await?;
+                return Ok(());
+            };
+            let names = settings
+                .user_client_names(uid)
+                .into_iter()
+                .filter(|name| {
+                    let view = customer_key_view(&settings, &vpn, uid, name, now_epoch());
+                    view.group == CustomerKeyGroup::Replacement
+                        && settings
+                            .client_vpn_server(name)
+                            .is_none_or(|source| source.id != target.id)
+                })
+                .collect::<Vec<_>>();
+            if names.is_empty() {
+                bot.send_message(chat, "✅ Все доступные замены уже начаты или завершены.")
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                return Ok(());
+            }
+            bot.send_message(
+                chat,
+                format!(
+                    "⏳ Создаю {} безопасных замен на сервере «{}»…",
+                    names.len(),
+                    target.name
+                ),
+            )
+            .await?;
+            let mut created = 0usize;
+            let mut pending = 0usize;
+            let mut failed = Vec::new();
+            for name in names {
+                if let Some((id, new, _)) = settings.pending_key_replacement(uid, &name) {
+                    pending += 1;
+                    bot.send_message(chat, format!("♻️ «{name}» уже заменяется на «{new}»."))
+                        .reply_markup(menu::replacement_confirm_menu(id))
+                        .await?;
+                    continue;
+                }
+                match stage_customer_replacement(&vpn, &settings, uid, &name, target.id).await {
+                    Ok((id, new_name, files)) => {
+                        created += 1;
+                        bot.send_message(chat, format!("✅ Новый ключ «{new_name}» готов вместо «{name}». Установите и проверьте его."))
+                            .reply_markup(menu::replacement_confirm_menu(id)).await?;
+                        if let Err(error) =
+                            render::send_client_files(&bot, chat, lang, &files).await
+                        {
+                            failed.push(format!("{new_name}: {error}"));
+                        }
+                    }
+                    Err(error) => failed.push(format!("{name}: {error}")),
+                }
+            }
+            bot.send_message(chat, format!("🏁 Пакетная замена подготовлена\n\nНовых: {created}\nУже ожидали проверки: {pending}\nОшибок: {}\n\nПодтвердите каждый новый ключ после проверки. До подтверждения возможен безопасный откат.", failed.len()))
+                .reply_markup(menu::customer_keyboard()).await?;
+            if !failed.is_empty() {
+                bot.send_message(
+                    chat,
+                    format!(
+                        "Не удалось обработать:\n{}",
+                        failed.into_iter().take(10).collect::<Vec<_>>().join("\n")
+                    ),
+                )
+                .reply_markup(menu::support_category_menu())
+                .await?;
+            }
+        }
         Action::CustomerMoveServer(name, server_id) => {
             if settings.client_owner(&name) != Some(uid) {
                 return Ok(());
@@ -13283,6 +13428,11 @@ mod tests {
         );
         assert_eq!(parse_callback("move:bulk:7"), Action::CustomerBulkMove(7));
         assert_eq!(
+            parse_callback("move:center"),
+            Action::CustomerReplacementCenter
+        );
+        assert_eq!(parse_callback("move:all"), Action::CustomerReplaceAll);
+        assert_eq!(
             parse_callback("move:bulk-run:7:9"),
             Action::CustomerBulkMoveRun(7, 9)
         );
@@ -13609,7 +13759,8 @@ mod tests {
             menu::support_ticket_menu(1),
             menu::support_rating_menu(1),
             menu::customer_keys_menu(&[("alice".into(), "Alice".into())]),
-            menu::customer_keys_page_menu(&[("alice".into(), "Alice".into())], 0, 2),
+            menu::customer_keys_page_menu(&[("alice".into(), "Alice".into())], 0, 2, 1),
+            menu::customer_replacement_center_menu(&[("alice".into(), "Alice".into())]),
             menu::customer_key_menu("alice"),
             menu::customer_key_actions_menu("alice", true, false, true),
             menu::customer_key_actions_menu("alice", false, true, false),
@@ -13909,6 +14060,8 @@ mod tests {
             CustomerKey("s".into()),
             CustomerMove("s".into()),
             CustomerMoveServer("s".into(), 1),
+            CustomerReplacementCenter,
+            CustomerReplaceAll,
             CustomerBulkMove(1),
             CustomerBulkMoveRun(1, 2),
             CustomerMoveConfirm(1),
@@ -14176,6 +14329,8 @@ mod tests {
                 CustomerKey(_) => {}
                 CustomerMove(_) => {}
                 CustomerMoveServer(_, _) => {}
+                CustomerReplacementCenter => {}
+                CustomerReplaceAll => {}
                 CustomerBulkMove(_) => {}
                 CustomerBulkMoveRun(_, _) => {}
                 CustomerMoveConfirm(_) => {}
@@ -14514,6 +14669,8 @@ mod tests {
             (Action::BuyServer(1), true, true),
             (Action::CustomerMove("mine".into()), true, true),
             (Action::CustomerMoveServer("mine".into(), 1), true, true),
+            (Action::CustomerReplacementCenter, true, true),
+            (Action::CustomerReplaceAll, true, true),
             (Action::CustomerBulkMove(1), true, true),
             (Action::CustomerBulkMoveRun(1, 2), true, true),
             (Action::CustomerMoveConfirm(1), true, true),

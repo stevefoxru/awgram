@@ -1512,6 +1512,7 @@ pub fn customer_keys_page_menu(
     items: &[(String, String)],
     page: usize,
     pages: usize,
+    replacement_count: usize,
 ) -> InlineKeyboardMarkup {
     let mut rows = items
         .iter()
@@ -1528,8 +1529,28 @@ pub fn customer_keys_page_menu(
         }
         rows.push(navigation);
     }
+    if replacement_count > 0 {
+        rows.push(vec![cb(
+            &format!("🚨 Заменить нерабочие ({replacement_count})"),
+            "move:center",
+        )]);
+    }
     rows.push(vec![cb("➕ Купить новый ключ", "buy")]);
     rows.push(vec![cb("⬅️ Кабинет", "profile")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn customer_replacement_center_menu(items: &[(String, String)]) -> InlineKeyboardMarkup {
+    let mut rows = items
+        .iter()
+        .take(20)
+        .map(|(name, device)| vec![cb(&format!("🔁 {device}"), &format!("move:choose:{name}"))])
+        .collect::<Vec<_>>();
+    if items.len() > 1 {
+        rows.insert(0, vec![cb("🔁 Заменить все", "move:all")]);
+    }
+    rows.push(vec![cb("🆘 Нужна помощь", "support:new:connection")]);
+    rows.push(vec![cb("⬅️ Мои ключи", "mykeys")]);
     InlineKeyboardMarkup::new(rows)
 }
 
