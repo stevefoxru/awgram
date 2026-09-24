@@ -61,6 +61,23 @@ pub struct BlockedClientCleanup {
     pub blocked_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationCampaign {
+    pub id: i64,
+    pub server_id: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationItem {
+    pub client_name: String,
+    pub owner_user_id: Option<i64>,
+    pub notified_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub replacement_pending: bool,
+    pub active: bool,
+}
+
 fn server_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VpnServer> {
     Ok(VpnServer {
         id: row.get(0)?,
@@ -503,6 +520,117 @@ impl Store {
             rows.collect()
         })
         .unwrap_or_default()
+    }
+
+    pub fn ensure_server_migration_campaign(
+        &self,
+        server_id: i64,
+        actor: i64,
+        now: i64,
+    ) -> Option<MigrationCampaign> {
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let existing = transaction
+                .query_row(
+                    "SELECT id,created_at FROM server_migration_campaigns WHERE server_id=?1 AND status='active'",
+                    [server_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            let (id, created_at) = if let Some(value) = existing {
+                value
+            } else {
+                transaction.execute(
+                    "INSERT INTO server_migration_campaigns(server_id,created_by,created_at) VALUES(?1,?2,?3)",
+                    rusqlite::params![server_id, actor, now],
+                )?;
+                (transaction.last_insert_rowid(), now)
+            };
+            transaction.execute(
+                "INSERT OR IGNORE INTO server_migration_items(campaign_id,client_name,owner_user_id)
+                 SELECT ?1,name,owner_user_id FROM clients WHERE server_id=?2 AND removed_at IS NULL",
+                rusqlite::params![id, server_id],
+            )?;
+            transaction.commit()?;
+            Ok(MigrationCampaign { id, server_id, created_at })
+        })
+        .ok()
+    }
+
+    pub fn server_migration_items(&self, campaign_id: i64) -> Vec<MigrationItem> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT i.client_name,i.owner_user_id,i.notified_at,i.completed_at,
+                        EXISTS(SELECT 1 FROM key_replacements k WHERE k.old_client=i.client_name AND k.status='pending'),
+                        EXISTS(SELECT 1 FROM clients c WHERE c.name=i.client_name AND c.removed_at IS NULL)
+                   FROM server_migration_items i WHERE i.campaign_id=?1 ORDER BY i.client_name COLLATE NOCASE",
+            )?;
+            let rows = statement.query_map([campaign_id], |row| {
+                Ok(MigrationItem {
+                    client_name: row.get(0)?,
+                    owner_user_id: row.get(1)?,
+                    notified_at: row.get(2)?,
+                    completed_at: row.get(3)?,
+                    replacement_pending: row.get::<_, i64>(4)? != 0,
+                    active: row.get::<_, i64>(5)? != 0,
+                })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn migration_unnotified_names(
+        &self,
+        campaign_id: i64,
+    ) -> std::collections::HashSet<String> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT client_name FROM server_migration_items WHERE campaign_id=?1 AND notified_at IS NULL AND completed_at IS NULL",
+            )?;
+            let rows = statement.query_map([campaign_id], |row| row.get(0))?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn mark_migration_notified(&self, campaign_id: i64, names: &[String], now: i64) -> usize {
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let mut changed = 0usize;
+            for name in names {
+                changed += transaction.execute(
+                    "UPDATE server_migration_items SET notified_at=COALESCE(notified_at,?3) WHERE campaign_id=?1 AND client_name=?2 AND completed_at IS NULL",
+                    rusqlite::params![campaign_id, name, now],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed)
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn complete_migration_item(&self, name: &str, now: i64) -> bool {
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE server_migration_items SET completed_at=COALESCE(completed_at,?2)
+                 WHERE client_name=?1 AND completed_at IS NULL
+                   AND campaign_id IN(SELECT id FROM server_migration_campaigns WHERE status='active')",
+                rusqlite::params![name, now],
+            )?;
+            transaction.execute(
+                "UPDATE server_migration_campaigns SET status='completed',completed_at=?1
+                 WHERE status='active' AND id IN(
+                   SELECT campaign_id FROM server_migration_items GROUP BY campaign_id
+                   HAVING COUNT(*)>0 AND SUM(CASE WHEN completed_at IS NULL THEN 1 ELSE 0 END)=0
+                 )",
+                [now],
+            )?;
+            transaction.commit()?;
+            Ok(changed)
+        })
+        .is_ok_and(|changed| changed > 0)
     }
 
     pub fn user_server_client_names(&self, user_id: i64, server_id: i64) -> Vec<String> {
@@ -1237,6 +1365,20 @@ mod tests {
         );
         assert!(store.mark_blocked_cleanup_notification("old-key", 200, 7, 300));
         assert!(!store.mark_blocked_cleanup_notification("old-key", 200, 7, 301));
+        let campaign = store.ensure_server_migration_campaign(id, 1, 250).unwrap();
+        assert_eq!(store.server_migration_items(campaign.id).len(), 1);
+        assert!(store
+            .migration_unnotified_names(campaign.id)
+            .contains("old-key"));
+        assert_eq!(
+            store.mark_migration_notified(campaign.id, &["old-key".into()], 260),
+            1
+        );
+        assert!(store.migration_unnotified_names(campaign.id).is_empty());
+        assert!(store.complete_migration_item("old-key", 270));
+        assert!(store.server_migration_items(campaign.id)[0]
+            .completed_at
+            .is_some());
 
         assert!(store.set_server_archived(id, true, 1, 300));
         assert!(store.vpn_servers().is_empty());

@@ -142,6 +142,7 @@ async fn cleanup_blocked_clients(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Sto
         if !store.retire_client(&client.name, now) {
             continue;
         }
+        store.complete_migration_item(&client.name, now);
         removed.push(format!("{} · {}", client.name, client.server_name));
         if let Some(owner) = client.owner_user_id {
             let _ = bot

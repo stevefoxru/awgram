@@ -36,7 +36,10 @@ pub use nodes::{InstallationJob, VpnInstance, VpnNode};
 pub use partners::{Partner, PartnerOrder, PartnerSalesSummary, PartnerWithdrawal};
 pub use portal::{PortalBalanceEntry, PortalKey, PortalOverview, PortalPayment, PortalTicket};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
-pub use servers::{BlockedClientCleanup, NewVpnServer, ServerBillingUpdate, VpnServer};
+pub use servers::{
+    BlockedClientCleanup, MigrationCampaign, MigrationItem, NewVpnServer, ServerBillingUpdate,
+    VpnServer,
+};
 pub use stars::{NewStarOrder, StarOrder, StarPaymentClaim};
 pub use stats::{PeriodTotals, Sample, TrafficSummary};
 
@@ -778,6 +781,27 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE clients ADD COLUMN cleanup_exempt INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE clients ADD COLUMN cleanup_exempt_at INTEGER;
     ALTER TABLE clients ADD COLUMN cleanup_exempt_by INTEGER;
+    "#,
+    // v38: устойчивый прогресс кампании вывода сервера из эксплуатации.
+    r#"
+    CREATE TABLE server_migration_campaigns(
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id),
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','completed')),
+        created_by INTEGER,
+        created_at INTEGER NOT NULL,
+        completed_at INTEGER
+    );
+    CREATE UNIQUE INDEX idx_server_migration_active ON server_migration_campaigns(server_id) WHERE status='active';
+    CREATE TABLE server_migration_items(
+        campaign_id INTEGER NOT NULL REFERENCES server_migration_campaigns(id) ON DELETE CASCADE,
+        client_name TEXT NOT NULL,
+        owner_user_id INTEGER,
+        notified_at INTEGER,
+        completed_at INTEGER,
+        PRIMARY KEY(campaign_id,client_name)
+    );
+    CREATE INDEX idx_server_migration_items_owner ON server_migration_items(campaign_id,owner_user_id,completed_at);
     "#,
 ];
 

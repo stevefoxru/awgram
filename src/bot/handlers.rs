@@ -2828,10 +2828,28 @@ async fn notify_unavailable_server_owners(
     bot: &Bot,
     settings: &Store,
     server: &crate::store::VpnServer,
+    actor: i64,
+    only_unnotified: bool,
 ) -> (usize, usize, usize) {
+    let Some(campaign) = settings.ensure_server_migration_campaign(server.id, actor, now_epoch())
+    else {
+        return (0, 0, 0);
+    };
+    let eligible = if only_unnotified {
+        settings.migration_unnotified_names(campaign.id)
+    } else {
+        settings
+            .server_migration_items(campaign.id)
+            .into_iter()
+            .filter(|item| item.completed_at.is_none() && item.active)
+            .map(|item| item.client_name)
+            .collect()
+    };
     let mut owners = std::collections::BTreeMap::<i64, Vec<String>>::new();
     for (owner, name) in settings.server_client_owners(server.id) {
-        owners.entry(owner).or_default().push(name);
+        if eligible.contains(&name) {
+            owners.entry(owner).or_default().push(name);
+        }
     }
     let affected = owners.values().map(Vec::len).sum();
     let mut delivered = 0usize;
@@ -2870,6 +2888,7 @@ async fn notify_unavailable_server_owners(
             .is_ok()
         {
             delivered += 1;
+            settings.mark_migration_notified(campaign.id, names, now_epoch());
         }
     }
     (owners.len(), delivered, affected)
@@ -7813,7 +7832,7 @@ async fn callback_handler(
             }
             let updated = settings.vpn_server(id).unwrap_or(server);
             let (owners, delivered, affected) =
-                notify_unavailable_server_owners(&bot, &settings, &updated).await;
+                notify_unavailable_server_owners(&bot, &settings, &updated, uid, true).await;
             bot.send_message(chat, format!("🚫 «{}» отмечен как заблокированный РКН. Выдача на нём отключена.\n\nВладельцев: {owners}\nУведомлений доставлено: {delivered}\nКлючей затронуто: {affected}", updated.name))
                 .reply_markup(menu::server_card_menu(id)).await?;
         }
@@ -7834,7 +7853,7 @@ async fn callback_handler(
                 return Ok(());
             }
             let (owners, delivered, affected) =
-                notify_unavailable_server_owners(&bot, &settings, &server).await;
+                notify_unavailable_server_owners(&bot, &settings, &server, uid, false).await;
             bot.send_message(chat, format!("📣 Предложение заменить нерабочие ключи отправлено.\n\nВладельцев: {owners}\nДоставлено: {delivered}\nКлючей: {affected}\n\nЭту кнопку можно использовать после синхронизации и ручной привязки новых ключей."))
                 .reply_markup(menu::server_card_menu(id)).await?;
         }
@@ -7884,7 +7903,7 @@ async fn callback_handler(
             if settings.set_server_operator_unavailable(id, true, Some(label), uid, now_epoch()) {
                 let updated = settings.vpn_server(id).unwrap_or(server);
                 let (owners, delivered, affected) =
-                    notify_unavailable_server_owners(&bot, &settings, &updated).await;
+                    notify_unavailable_server_owners(&bot, &settings, &updated, uid, true).await;
                 bot.send_message(chat, format!("❌ Сервер «{}» помечен нерабочим.\nПричина: {label}\n\nВыдача отключена. Владельцев: {owners}; уведомлений доставлено: {delivered}; ключей затронуто: {affected}.", updated.name))
                     .reply_markup(menu::server_retirement_menu(id, true))
                     .await?;
@@ -7905,15 +7924,25 @@ async fn callback_handler(
                 .map(|(owner, _)| owner)
                 .collect::<std::collections::BTreeSet<_>>()
                 .len();
-            let pending = settings
-                .pending_key_replacements()
-                .into_iter()
-                .filter(|replacement| {
-                    settings
-                        .client_vpn_server_including_retired(&replacement.old_client)
-                        .is_some_and(|source| source.id == id)
-                })
+            let campaign = settings.ensure_server_migration_campaign(id, uid, now_epoch());
+            let migration_items = campaign
+                .as_ref()
+                .map(|campaign| settings.server_migration_items(campaign.id))
+                .unwrap_or_default();
+            let total = migration_items.len();
+            let notified = migration_items
+                .iter()
+                .filter(|item| item.notified_at.is_some())
                 .count();
+            let pending = migration_items
+                .iter()
+                .filter(|item| item.replacement_pending)
+                .count();
+            let completed = migration_items
+                .iter()
+                .filter(|item| item.completed_at.is_some() || !item.active)
+                .count();
+            let remaining = total.saturating_sub(completed);
             let blocked_at = [
                 server.unavailable_at,
                 server.rkn_blocked_at,
@@ -7926,8 +7955,11 @@ async fn callback_handler(
                 || "запустится после отметки сервера нерабочим".to_string(),
                 |at| {
                     format!(
-                        "{} (через 30 дней после отметки)",
-                        crate::calendar::format_date(at.saturating_add(30 * 86_400))
+                        "{} (через {} дн. после отметки)",
+                        crate::calendar::format_date(
+                            at.saturating_add(settings.blocked_key_cleanup_days() * 86_400)
+                        ),
+                        settings.blocked_key_cleanup_days()
                     )
                 },
             );
@@ -7954,7 +7986,7 @@ async fn callback_handler(
                     )
                 })
                 .collect::<Vec<_>>();
-            bot.send_message(chat, format!("📦 Вывод сервера из эксплуатации\n\nСервер: {}\nСостояние: {}\nПричина: {}\nАвтоархив ключей: {cleanup}\n\nОсталось активных ключей: {keys}\nВладельцев: {owners}\nЗамен ожидает подтверждения: {pending}\n\nПорядок действий:\n1. Укажите причину отключения.\n2. Синхронизируйте ключи.\n3. Уведомите владельцев и дождитесь замен.\n4. Через 30 дней невосстановленные ключи будут скрыты автоматически.\n5. Когда активных ключей не останется, переместите сервер в архив.\n\nПоследние действия:\n{}", server.name, if server.operator_unavailable { "❌ нерабочий" } else { "✅ рабочий" }, server.unavailable_reason.as_deref().unwrap_or("не указана"), if history.is_empty() { "—".into() } else { history.join("\n") }))
+            bot.send_message(chat, format!("📦 Центр миграции сервера\n\nСервер: {}\nСостояние: {}\nПричина: {}\nАвтоархив ключей: {cleanup}\n\n📊 Кампания миграции\nЗафиксировано ключей: {total}\nУведомлено: {notified}/{total}\nЗамен ожидает подтверждения: {pending}\nПеренесено или архивировано: {completed}/{total}\nОсталось: {remaining}\n\nТекущее состояние сервера\nАктивных ключей: {keys}\nВладельцев: {owners}\n\nПорядок действий:\n1. Укажите причину отключения.\n2. Синхронизируйте ключи.\n3. Уведомите владельцев и дождитесь замен.\n4. Невосстановленные ключи будут скрыты по действующей политике очистки.\n5. Когда активных ключей не останется, переместите сервер в архив.\n\nПоследние действия:\n{}", server.name, if server.operator_unavailable { "❌ нерабочий" } else { "✅ рабочий" }, server.unavailable_reason.as_deref().unwrap_or("не указана"), if history.is_empty() { "—".into() } else { history.join("\n") }))
                 .reply_markup(menu::server_retirement_menu(id, server.operator_unavailable))
                 .await?;
         }
@@ -8392,8 +8424,10 @@ async fn callback_handler(
                         let without_owner = settings.server_unowned_client_count(server.id);
                         unowned += without_owner;
                         let notice = if server.blocked_by_rkn {
-                            let (_, delivered, affected) =
-                                notify_unavailable_server_owners(&bot, &settings, &server).await;
+                            let (_, delivered, affected) = notify_unavailable_server_owners(
+                                &bot, &settings, &server, uid, true,
+                            )
+                            .await;
                             format!(" · замена предложена: {delivered}/{affected}")
                         } else {
                             String::new()
@@ -11211,6 +11245,7 @@ async fn callback_handler(
                     // Remote/local collectors may run later; make the result
                     // immediately visible in the user's key list.
                     settings.retire_client(&old, now_epoch());
+                    settings.complete_migration_item(&old, now_epoch());
                     bot.send_message(
                         chat,
                         format!(
