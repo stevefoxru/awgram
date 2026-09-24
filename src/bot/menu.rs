@@ -594,19 +594,13 @@ pub fn server_maintenance_hub_menu(id: i64) -> InlineKeyboardMarkup {
             cb("🚫 Отметить блокировку РКН", &format!("server:rkn:on:{id}")),
             cb("✅ Снять отметку", &format!("server:rkn:off:{id}")),
         ],
-        vec![
-            cb(
-                "❌ Пометить нерабочим",
-                &format!("server:unavailable:on:{id}"),
-            ),
-            cb(
-                "✅ Пометить рабочим",
-                &format!("server:unavailable:off:{id}"),
-            ),
-        ],
         vec![cb(
-            "🗄 Убрать сервер в архив",
-            &format!("server:archive:ask:{id}"),
+            "📦 Вывод из эксплуатации",
+            &format!("server:retire:{id}"),
+        )],
+        vec![cb(
+            "✅ Пометить рабочим",
+            &format!("server:unavailable:off:{id}"),
         )],
         vec![cb(
             "🚫 Отозвать SSH-мост",
@@ -615,6 +609,60 @@ pub fn server_maintenance_hub_menu(id: i64) -> InlineKeyboardMarkup {
         vec![cb("🛡 Общая VPN-служба", "admin:vpn")],
         vec![cb("⬅️ К серверу", &format!("server:{id}"))],
     ])
+}
+
+pub fn server_unavailable_reason_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb(
+                "🚫 Блокировка",
+                &format!("server:unavailable:reason:{id}:blocked"),
+            ),
+            cb(
+                "🛠 Поломка",
+                &format!("server:unavailable:reason:{id}:broken"),
+            ),
+        ],
+        vec![
+            cb(
+                "💳 Не оплачен",
+                &format!("server:unavailable:reason:{id}:billing"),
+            ),
+            cb(
+                "📈 Перегружен",
+                &format!("server:unavailable:reason:{id}:capacity"),
+            ),
+        ],
+        vec![cb(
+            "📦 Вывод из эксплуатации",
+            &format!("server:unavailable:reason:{id}:retired"),
+        )],
+        vec![cb("⬅️ К серверу", &format!("server:{id}"))],
+    ])
+}
+
+pub fn server_retirement_menu(id: i64, unavailable: bool) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if !unavailable {
+        rows.push(vec![cb(
+            "❌ Указать причину отключения",
+            &format!("server:unavailable:on:{id}"),
+        )]);
+    }
+    rows.push(vec![cb(
+        "📣 Напомнить владельцам о замене",
+        &format!("server:rkn:notify:{id}"),
+    )]);
+    rows.push(vec![cb(
+        "🔄 Синхронизировать ключи",
+        &format!("server:panel:sync:{id}"),
+    )]);
+    rows.push(vec![cb(
+        "🗄 Убрать сервер в архив",
+        &format!("server:archive:ask:{id}"),
+    )]);
+    rows.push(vec![cb("⬅️ К серверу", &format!("server:{id}"))]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn server_passport_hub_menu(id: i64) -> InlineKeyboardMarkup {

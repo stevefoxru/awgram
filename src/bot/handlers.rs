@@ -68,6 +68,8 @@ pub enum Action {
     ServerRknSet(i64, bool),
     ServerRknNotify(i64),
     ServerUnavailableSet(i64, bool),
+    ServerUnavailableReason(i64, String),
+    ServerRetirement(i64),
     ServerArchiveList,
     ServerArchiveAsk(i64),
     ServerArchiveConfirm(i64),
@@ -715,6 +717,14 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::ServerRknNotify)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:unavailable:reason:") {
+                let mut parts = v.splitn(2, ':');
+                match (parts.next().and_then(|id| id.parse().ok()), parts.next()) {
+                    (Some(id), Some(reason)) => {
+                        Action::ServerUnavailableReason(id, reason.to_string())
+                    }
+                    _ => Action::Unknown,
+                }
             } else if let Some(v) = data.strip_prefix("server:unavailable:on:") {
                 v.parse()
                     .map(|id| Action::ServerUnavailableSet(id, true))
@@ -736,6 +746,10 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:archive:ask:") {
                 v.parse()
                     .map(Action::ServerArchiveAsk)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:retire:") {
+                v.parse()
+                    .map(Action::ServerRetirement)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
@@ -2636,8 +2650,19 @@ fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64
         "amneziawg-2" => "AWG 2.0",
         _ => "AWG 1.0",
     };
+    let manual_status = if server.operator_unavailable {
+        format!(
+            "❌ нерабочий · {}",
+            server
+                .unavailable_reason
+                .as_deref()
+                .unwrap_or("причина не указана")
+        )
+    } else {
+        "✅ рабочий".to_string()
+    };
     format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРучная отметка: {}\nДоступ из РФ: {}\nАрхив: {}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🚀 Развёртывание\nПоследняя задача: {installation}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
-        server.name,server.status,panel_health,if server.operator_unavailable{"❌ нерабочий"}else{"✅ рабочий"},if server.blocked_by_rkn{"🔴 блокировка РКН"}else{"🟢 не отмечена"},if server.archived_at.is_some(){"🗄 в архиве"}else{"актуальный"},if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,protocol,server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
+        server.name,server.status,panel_health,manual_status,if server.blocked_by_rkn{"🔴 блокировка РКН"}else{"🟢 не отмечена"},if server.archived_at.is_some(){"🗄 в архиве"}else{"актуальный"},if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,protocol,server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
 async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
@@ -3204,6 +3229,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerRknSet(_, _)
         | ServerRknNotify(_)
         | ServerUnavailableSet(_, _)
+        | ServerUnavailableReason(_, _)
+        | ServerRetirement(_)
         | ServerArchiveList
         | ServerArchiveAsk(_)
         | ServerArchiveConfirm(_)
@@ -7245,7 +7272,7 @@ async fn callback_handler(
         }
         Action::ServerArchiveConfirm(id) => {
             if let Some(server) = settings.vpn_server(id) {
-                let changed = settings.set_server_archived(id, true, now_epoch());
+                let changed = settings.set_server_archived(id, true, uid, now_epoch());
                 bot.send_message(chat, if changed {
                     format!("✅ «{}» перемещён в архив. Все данные сохранены; сервер исключён из рабочих списков и выдачи.", server.name)
                 } else {
@@ -7257,7 +7284,7 @@ async fn callback_handler(
         }
         Action::ServerArchiveRestore(id) => {
             if let Some(server) = settings.vpn_server(id) {
-                let changed = settings.set_server_archived(id, false, now_epoch());
+                let changed = settings.set_server_archived(id, false, uid, now_epoch());
                 bot.send_message(chat, if changed {
                     format!("♻️ «{}» возвращён в актуальные серверы. Он остаётся помеченным нерабочим, а выдача выключена — сначала проверьте подключение и снимите ручную отметку.", server.name)
                 } else {
@@ -7660,10 +7687,16 @@ async fn callback_handler(
             let Some(server) = settings.vpn_server(id) else {
                 return Ok(());
             };
-            if !server.blocked_by_rkn {
-                bot.send_message(chat, "Сначала отметьте сервер как заблокированный РКН.")
-                    .reply_markup(menu::server_card_menu(id))
-                    .await?;
+            if !server.blocked_by_rkn
+                && !server.operator_unavailable
+                && server.archived_at.is_none()
+            {
+                bot.send_message(
+                    chat,
+                    "Сначала отметьте сервер как заблокированный или нерабочий.",
+                )
+                .reply_markup(menu::server_card_menu(id))
+                .await?;
                 return Ok(());
             }
             let (owners, delivered, affected) =
@@ -7675,7 +7708,13 @@ async fn callback_handler(
             let Some(server) = settings.vpn_server(id) else {
                 return Ok(());
             };
-            if !settings.set_server_operator_unavailable(id, unavailable, now_epoch()) {
+            if unavailable {
+                bot.send_message(chat, format!("❌ Почему сервер «{}» больше нельзя использовать?\n\nПричина будет видна в карточке и сохранится в журнале действий.", server.name))
+                    .reply_markup(menu::server_unavailable_reason_menu(id))
+                    .await?;
+                return Ok(());
+            }
+            if !settings.set_server_operator_unavailable(id, false, None, uid, now_epoch()) {
                 bot.send_message(
                     chat,
                     if unavailable {
@@ -7686,18 +7725,87 @@ async fn callback_handler(
                 )
                 .reply_markup(menu::server_card_menu(id))
                 .await?;
-            } else if unavailable {
-                let updated = settings.vpn_server(id).unwrap_or(server);
-                let (owners, delivered, affected) =
-                    notify_unavailable_server_owners(&bot, &settings, &updated).await;
-                bot.send_message(chat, format!("❌ Сервер «{}» помечен нерабочим, выдача отключена. Пользователям предложена безопасная замена.\n\nВладельцев: {owners}\nУведомлений доставлено: {delivered}\nКлючей затронуто: {affected}\n\nПосле замены ключей сервер можно убрать в архив.", updated.name))
-                    .reply_markup(menu::server_card_menu(id))
-                    .await?;
             } else {
                 bot.send_message(chat, format!("✅ «{}» снова помечен рабочим. Выдача не включалась автоматически: сначала выполните диагностику, затем назначьте сервер для выдачи.", server.name))
                     .reply_markup(menu::server_card_menu(id))
                     .await?;
             }
+        }
+        Action::ServerUnavailableReason(id, reason) => {
+            let Some(server) = settings.vpn_server(id) else {
+                return Ok(());
+            };
+            let label = match reason.as_str() {
+                "blocked" => "заблокирован у пользователей",
+                "broken" => "неисправность VPS или VPN",
+                "billing" => "VPS не оплачен",
+                "capacity" => "перегружен",
+                "retired" => "вывод из эксплуатации",
+                _ => {
+                    bot.send_message(chat, "Неизвестная причина отключения.")
+                        .await?;
+                    return Ok(());
+                }
+            };
+            if settings.set_server_operator_unavailable(id, true, Some(label), uid, now_epoch()) {
+                let updated = settings.vpn_server(id).unwrap_or(server);
+                let (owners, delivered, affected) =
+                    notify_unavailable_server_owners(&bot, &settings, &updated).await;
+                bot.send_message(chat, format!("❌ Сервер «{}» помечен нерабочим.\nПричина: {label}\n\nВыдача отключена. Владельцев: {owners}; уведомлений доставлено: {delivered}; ключей затронуто: {affected}.", updated.name))
+                    .reply_markup(menu::server_retirement_menu(id, true))
+                    .await?;
+            } else {
+                bot.send_message(chat, "Сервер уже помечен нерабочим или находится в архиве.")
+                    .reply_markup(menu::server_retirement_menu(id, true))
+                    .await?;
+            }
+        }
+        Action::ServerRetirement(id) => {
+            let Some(server) = settings.vpn_server(id) else {
+                return Ok(());
+            };
+            let keys = settings.server_client_count(id).max(0);
+            let owners = settings
+                .server_client_owners(id)
+                .into_iter()
+                .map(|(owner, _)| owner)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            let pending = settings
+                .pending_key_replacements()
+                .into_iter()
+                .filter(|replacement| {
+                    settings
+                        .client_vpn_server_including_retired(&replacement.old_client)
+                        .is_some_and(|source| source.id == id)
+                })
+                .count();
+            let history = settings
+                .server_lifecycle_events(id, 5)
+                .into_iter()
+                .map(|(action, reason, actor, at)| {
+                    let action = match action.as_str() {
+                        "marked_unavailable" => "помечен нерабочим",
+                        "marked_available" => "возвращён в работу",
+                        "archived" => "перемещён в архив",
+                        "restored" => "восстановлен из архива",
+                        _ => action.as_str(),
+                    };
+                    format!(
+                        "• {} · {action}{} · админ {}",
+                        crate::calendar::format_date(at),
+                        reason
+                            .map(|value| format!(" ({value})"))
+                            .unwrap_or_default(),
+                        actor
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "—".into())
+                    )
+                })
+                .collect::<Vec<_>>();
+            bot.send_message(chat, format!("📦 Вывод сервера из эксплуатации\n\nСервер: {}\nСостояние: {}\nПричина: {}\n\nОсталось активных ключей: {keys}\nВладельцев: {owners}\nЗамен ожидает подтверждения: {pending}\n\nПорядок действий:\n1. Укажите причину отключения.\n2. Синхронизируйте ключи.\n3. Уведомите владельцев и дождитесь замен.\n4. Когда активных ключей не останется, переместите сервер в архив.\n\nПоследние действия:\n{}", server.name, if server.operator_unavailable { "❌ нерабочий" } else { "✅ рабочий" }, server.unavailable_reason.as_deref().unwrap_or("не указана"), if history.is_empty() { "—".into() } else { history.join("\n") }))
+                .reply_markup(menu::server_retirement_menu(id, server.operator_unavailable))
+                .await?;
         }
         Action::ServerMaintenanceAsk(id) => {
             if let Some(server) = settings.vpn_server(id) {
@@ -10886,9 +10994,12 @@ async fn callback_handler(
                 return Ok(());
             };
             let source = settings.client_vpn_server_including_retired(&old);
-            let source_unavailable = source
-                .as_ref()
-                .is_none_or(|server| server.status != "online");
+            let source_unavailable = source.as_ref().is_none_or(|server| {
+                server.status != "online"
+                    || server.blocked_by_rkn
+                    || server.operator_unavailable
+                    || server.archived_at.is_some()
+            });
             let removal = if source_unavailable {
                 // The original node is unreachable by definition. Retire its
                 // stale database record; there is no useful remote deletion
@@ -13025,6 +13136,8 @@ mod tests {
             menu::archived_servers_menu(&[]),
             menu::archived_server_menu(1),
             menu::server_archive_confirm_menu(1),
+            menu::server_unavailable_reason_menu(1),
+            menu::server_retirement_menu(1, false),
             menu::server_health_menu(1),
             menu::server_keys_hub_menu(1),
             menu::server_connection_hub_menu(1),
@@ -13196,6 +13309,8 @@ mod tests {
             ServerRknSet(1, true),
             ServerRknNotify(1),
             ServerUnavailableSet(1, true),
+            ServerUnavailableReason(1, "broken".into()),
+            ServerRetirement(1),
             ServerArchiveList,
             ServerArchiveAsk(1),
             ServerArchiveConfirm(1),
@@ -13444,6 +13559,8 @@ mod tests {
                 ServerRknSet(_, _) => {}
                 ServerRknNotify(_) => {}
                 ServerUnavailableSet(_, _) => {}
+                ServerUnavailableReason(_, _) => {}
+                ServerRetirement(_) => {}
                 ServerArchiveList => {}
                 ServerArchiveAsk(_) => {}
                 ServerArchiveConfirm(_) => {}
@@ -13858,6 +13975,12 @@ mod tests {
             (Action::ServerRknSet(1, true), true, false),
             (Action::ServerRknNotify(1), true, false),
             (Action::ServerUnavailableSet(1, true), true, false),
+            (
+                Action::ServerUnavailableReason(1, "broken".into()),
+                true,
+                false,
+            ),
+            (Action::ServerRetirement(1), true, false),
             (Action::ServerArchiveList, true, false),
             (Action::ServerArchiveAsk(1), true, false),
             (Action::ServerArchiveConfirm(1), true, false),

@@ -30,6 +30,7 @@ pub struct VpnServer {
     pub operator_unavailable: bool,
     pub unavailable_at: Option<i64>,
     pub archived_at: Option<i64>,
+    pub unavailable_reason: Option<String>,
 }
 
 pub struct NewVpnServer<'a> {
@@ -79,10 +80,11 @@ fn server_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VpnServer> {
         operator_unavailable: row.get::<_, i64>(23)? != 0,
         unavailable_at: row.get(24)?,
         archived_at: row.get(25)?,
+        unavailable_reason: row.get(26)?,
     })
 }
 
-const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local,capacity,blocked_by_rkn,rkn_blocked_at,operator_unavailable,unavailable_at,archived_at";
+const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local,capacity,blocked_by_rkn,rkn_blocked_at,operator_unavailable,unavailable_at,archived_at,unavailable_reason";
 
 impl Store {
     pub fn ensure_local_vpn_server(&self, hostname: &str, actor: i64, now: i64) -> Option<i64> {
@@ -420,24 +422,42 @@ impl Store {
 
     /// Marks an active server as unusable without deleting it or relying on a
     /// health-check status which may be overwritten by the next probe.
-    pub fn set_server_operator_unavailable(&self, id: i64, unavailable: bool, now: i64) -> bool {
+    pub fn set_server_operator_unavailable(
+        &self,
+        id: i64,
+        unavailable: bool,
+        reason: Option<&str>,
+        actor: i64,
+        now: i64,
+    ) -> bool {
         self.with_conn(|connection| {
-            connection.execute(
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "UPDATE vpn_servers
                  SET operator_unavailable=?2,
                      unavailable_at=CASE WHEN ?2=1 THEN ?3 ELSE NULL END,
+                     unavailable_reason=CASE WHEN ?2=1 THEN ?4 ELSE NULL END,
                      enabled_for_provisioning=CASE WHEN ?2=1 THEN 0 ELSE enabled_for_provisioning END,
                      updated_at=?3
                  WHERE id=?1 AND archived_at IS NULL AND operator_unavailable<>?2",
-                rusqlite::params![id, unavailable as i64, now],
-            )
+                rusqlite::params![id, unavailable as i64, now, reason],
+            )?;
+            if changed == 1 {
+                transaction.execute(
+                    "INSERT INTO server_lifecycle_events(server_id,action,reason,actor_id,created_at) VALUES(?1,?2,?3,?4,?5)",
+                    rusqlite::params![id, if unavailable { "marked_unavailable" } else { "marked_available" }, reason, actor, now],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed)
         })
         .is_ok_and(|changed| changed == 1)
     }
 
-    pub fn set_server_archived(&self, id: i64, archived: bool, now: i64) -> bool {
+    pub fn set_server_archived(&self, id: i64, archived: bool, actor: i64, now: i64) -> bool {
         self.with_conn(|connection| {
-            connection.execute(
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "UPDATE vpn_servers
                  SET archived_at=CASE WHEN ?2=1 THEN ?3 ELSE NULL END,
                      operator_unavailable=CASE WHEN ?2=1 THEN 1 ELSE operator_unavailable END,
@@ -446,9 +466,34 @@ impl Store {
                      updated_at=?3
                  WHERE id=?1 AND ((?2=1 AND archived_at IS NULL) OR (?2=0 AND archived_at IS NOT NULL))",
                 rusqlite::params![id, archived as i64, now],
-            )
+            )?;
+            if changed == 1 {
+                transaction.execute(
+                    "INSERT INTO server_lifecycle_events(server_id,action,reason,actor_id,created_at) VALUES(?1,?2,NULL,?3,?4)",
+                    rusqlite::params![id, if archived { "archived" } else { "restored" }, actor, now],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed)
         })
         .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn server_lifecycle_events(
+        &self,
+        id: i64,
+        limit: usize,
+    ) -> Vec<(String, Option<String>, Option<i64>, i64)> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT action,reason,actor_id,created_at FROM server_lifecycle_events WHERE server_id=?1 ORDER BY created_at DESC,id DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(rusqlite::params![id, limit.min(50) as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
     }
 
     pub fn user_server_client_names(&self, user_id: i64, server_id: i64) -> Vec<String> {
@@ -1072,19 +1117,20 @@ mod tests {
                 100,
             )
             .unwrap();
-        assert!(store.set_server_operator_unavailable(id, true, 200));
+        assert!(store.set_server_operator_unavailable(id, true, Some("сломался"), 1, 200));
         let server = store.vpn_server(id).unwrap();
         assert!(server.operator_unavailable);
         assert!(!server.enabled_for_provisioning);
 
-        assert!(store.set_server_archived(id, true, 300));
+        assert!(store.set_server_archived(id, true, 1, 300));
         assert!(store.vpn_servers().is_empty());
         assert_eq!(store.archived_vpn_servers()[0].id, id);
         assert!(store.vpn_server(id).is_some());
 
-        assert!(store.set_server_archived(id, false, 400));
+        assert!(store.set_server_archived(id, false, 1, 400));
         assert_eq!(store.vpn_servers()[0].id, id);
         assert!(store.vpn_server(id).unwrap().operator_unavailable);
+        assert_eq!(store.server_lifecycle_events(id, 10).len(), 3);
     }
 
     #[test]

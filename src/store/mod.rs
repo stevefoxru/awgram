@@ -749,6 +749,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE vpn_servers ADD COLUMN archived_at INTEGER;
     CREATE INDEX idx_vpn_servers_archived ON vpn_servers(archived_at,name);
     "#,
+    // v35: причина ручного отключения и неизменяемый журнал жизненного цикла.
+    r#"
+    ALTER TABLE vpn_servers ADD COLUMN unavailable_reason TEXT;
+    CREATE TABLE server_lifecycle_events(
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL REFERENCES vpn_servers(id),
+        action TEXT NOT NULL,
+        reason TEXT,
+        actor_id INTEGER,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_server_lifecycle_events ON server_lifecycle_events(server_id,created_at DESC,id DESC);
+    "#,
 ];
 
 pub struct Store {
