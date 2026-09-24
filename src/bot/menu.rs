@@ -14,15 +14,15 @@ pub fn profile_menu(portal_enabled: bool) -> InlineKeyboardMarkup {
         rows.push(vec![cb("🌐 Открыть веб-кабинет", "portal")]);
     }
     rows.push(vec![
-        cb("🔑 Мои ключи", "mykeys"),
+        cb("🔑 Мои подключения", "mykeys"),
         cb("💰 Баланс", "balance"),
     ]);
     rows.push(vec![
         cb("➕ Купить ключ", "buy"),
         cb("🎟 Промокод", "legacy:promo"),
     ]);
-    rows.push(vec![cb("🔔 Уведомления", "guide:notifications")]);
-    rows.push(vec![cb("🆘 Поддержка", "support:new:general")]);
+    rows.push(vec![cb("🆘 Помощь", "customer:help")]);
+    rows.push(vec![cb("⚙️ Ещё", "customer:more")]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -59,31 +59,48 @@ pub fn portal_link_menu(url: &str) -> InlineKeyboardMarkup {
 }
 
 pub fn customer_keyboard() -> KeyboardMarkup {
-    let mut rows = vec![
+    let rows = vec![
         vec![
-            KeyboardButton::new("🏠 Кабинет"),
-            KeyboardButton::new("🔑 Мои ключи"),
+            KeyboardButton::new("🏠 Главная"),
+            KeyboardButton::new("🔑 Подключения"),
         ],
         vec![
-            KeyboardButton::new("➕ Купить ключ"),
-            KeyboardButton::new("➕ Пополнить"),
+            KeyboardButton::new("➕ Купить VPN"),
+            KeyboardButton::new("💰 Баланс и оплата"),
         ],
         vec![
-            KeyboardButton::new("📖 Инструкция"),
-            KeyboardButton::new("🆘 Поддержка"),
+            KeyboardButton::new("🆘 Помощь"),
+            KeyboardButton::new("⚙️ Ещё"),
         ],
-        vec![KeyboardButton::new("🌐 Веб-кабинет")],
-        vec![KeyboardButton::new("🎟 Промокод")],
-        vec![KeyboardButton::new("🤝 Стать партнёром")],
     ];
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|v| v.as_secs() as i64)
-        .unwrap_or(0);
-    if crate::calendar::legacy_requests_open(now) {
-        rows.push(vec![KeyboardButton::new("♻️ Восстановить ключи")]);
-    }
     KeyboardMarkup::new(rows).resize_keyboard().persistent()
+}
+
+pub fn customer_help_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("📖 Как подключить VPN", "guide:install")],
+        vec![cb("🩺 VPN не подключается", "guide:trouble")],
+        vec![cb("📡 Настройка роутера", "guide:keenetic")],
+        vec![cb("💬 Написать в поддержку", "support:new:general")],
+        vec![cb("⬅️ Главная", "profile")],
+    ])
+}
+
+pub fn customer_more_menu(portal_enabled: bool, legacy_open: bool) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if portal_enabled {
+        rows.push(vec![cb("🌐 Веб-кабинет", "portal")]);
+    }
+    rows.push(vec![
+        cb("🎟 Промокод", "legacy:promo"),
+        cb("🔔 Уведомления", "guide:notifications"),
+    ]);
+    rows.push(vec![cb("🤝 Стать партнёром", "guide:partner")]);
+    if legacy_open {
+        rows.push(vec![cb("♻️ Восстановить старые ключи", "legacy:customer")]);
+    }
+    rows.push(vec![cb("⬅️ Главная", "profile")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn legacy_restore_menu(eligible: bool) -> InlineKeyboardMarkup {

@@ -222,6 +222,9 @@ pub enum Action {
     BuyPaid(i64),
     MyKeys,
     MyKeysPage(usize),
+    CustomerHelp,
+    CustomerMore,
+    CustomerLegacyRestore,
     Profile,
     Portal,
     Balance,
@@ -330,6 +333,9 @@ fn parse_callback(data: &str) -> Action {
         "gscope" => Action::GroupScopeAsk,
         "buy" => Action::Buy,
         "mykeys" => Action::MyKeys,
+        "customer:help" => Action::CustomerHelp,
+        "customer:more" => Action::CustomerMore,
+        "legacy:customer" => Action::CustomerLegacyRestore,
         "server:sync-all" => Action::ServerPanelSyncAll,
         "profile" => Action::Profile,
         "portal" => Action::Portal,
@@ -1042,11 +1048,17 @@ fn is_customer_navigation(text: &str) -> bool {
         || matches!(
             text,
             "🏠 Кабинет"
+                | "🏠 Главная"
                 | "🔑 Мои ключи"
+                | "🔑 Подключения"
                 | "➕ Купить ключ"
+                | "➕ Купить VPN"
                 | "➕ Пополнить"
+                | "💰 Баланс и оплата"
                 | "📖 Инструкция"
                 | "🆘 Поддержка"
+                | "🆘 Помощь"
+                | "⚙️ Ещё"
                 | "🌐 Веб-кабинет"
                 | "🎟 Промокод"
                 | "🤝 Стать партнёром"
@@ -1658,8 +1670,6 @@ async fn customer_dashboard(
             "repaired interrupted key replacements"
         );
     }
-    let me = bot.get_me().await?;
-    let username = me.username.clone().unwrap_or_default();
     let display_name = settings
         .user(uid)
         .map(|user| user.display_name)
@@ -1689,10 +1699,9 @@ async fn customer_dashboard(
     bot.send_message(
         chat,
         format!(
-            "🏠 Личный кабинет\nЗдравствуйте, {display_name}!\n\n🔐 Ваши ключи: {}\n✅ Готовы к работе: {ready}\n⚠️ Требуют внимания: {attention}\n📶 Подключены сейчас: {connected}\n⏳ Истекают за 7 дней: {expiring}{operation_line}\n\n💰 Баланс: {:.2} ₽\n👥 Приглашено друзей: {}\n\n«Готов к работе» означает, что ключ включён и сервер доступен. Устройство может быть не подключено прямо сейчас — это не поломка ключа.\n\nБыстрый старт:\n• «🔑 Мои ключи» — конфигурация, QR и состояние\n• «➕ Купить ключ» — новое устройство\n• «🆘 Поддержка» — помощь с подключением\n\n🔗 Реферальная ссылка:\nhttps://t.me/{username}?start=ref_{uid}",
+            "🏠 Главная\nЗдравствуйте, {display_name}!\n\n🔑 Подключения: {}\n✅ Работают: {ready}\n⚠️ Требуют внимания: {attention}\n📶 Сейчас подключены: {connected}\n⏳ Истекают за 7 дней: {expiring}{operation_line}\n\n💰 Баланс: {:.2} ₽\n\nОсновные действия всегда находятся на клавиатуре внизу. Если VPN не подключается, откройте «🆘 Помощь».",
             names.len(),
             settings.balance_kopecks(uid) as f64 / 100.0,
-            settings.referral_count(uid),
         ),
     )
     .reply_markup(menu::customer_keyboard())
@@ -2951,6 +2960,9 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | BuyPaid(_)
         | MyKeys
         | MyKeysPage(_)
+        | CustomerHelp
+        | CustomerMore
+        | CustomerLegacyRestore
         | Profile
         | Portal
         | Balance
@@ -5552,7 +5564,7 @@ async fn message_handler(
         return Ok(());
     }
     if role == Role::Denied && settings.user_blocked(uid) {
-        if msg.text() == Some("🆘 Поддержка") {
+        if matches!(msg.text(), Some("🆘 Поддержка" | "🆘 Помощь")) {
             customer_support_screen(&bot, msg.chat.id, uid, &settings).await?;
         } else {
             bot.send_message(msg.chat.id,"⛔ Доступ к боту приостановлен. Обратитесь в поддержку, если считаете это ошибкой.").reply_markup(menu::customer_keyboard()).await?;
@@ -5561,12 +5573,13 @@ async fn message_handler(
     }
     if role == Role::Denied {
         match msg.text().unwrap_or_default() {
-            text if text.starts_with("/start") || matches!(text, "🏠 Меню" | "🏠 Кабинет") =>
+            text if text.starts_with("/start")
+                || matches!(text, "🏠 Меню" | "🏠 Кабинет" | "🏠 Главная") =>
             {
                 maybe_issue_trial(&bot, msg.chat.id, &vpn, &settings, uid).await;
                 customer_dashboard(&bot, msg.chat.id, uid, &vpn, &settings).await?;
             }
-            "➕ Купить ключ" => {
+            "➕ Купить ключ" | "➕ Купить VPN" => {
                 let servers = settings.available_vpn_servers();
                 bot.send_message(
                     msg.chat.id,
@@ -5579,10 +5592,10 @@ async fn message_handler(
                 .reply_markup(menu::buy_servers_menu(&servers, &settings))
                 .await?;
             }
-            "🔑 Мои ключи" => {
+            "🔑 Мои ключи" | "🔑 Подключения" => {
                 send_customer_keys_page(&bot, msg.chat.id, &settings, &vpn, uid, 0).await?;
             }
-            "➕ Пополнить" => {
+            "➕ Пополнить" | "💰 Баланс и оплата" => {
                 bot.send_message(
                     msg.chat.id,
                     "Введите сумму пополнения в рублях (от 100 до 100000):",
@@ -5593,8 +5606,13 @@ async fn message_handler(
             "📖 Инструкция" => {
                 bot.send_message(msg.chat.id, "📖 Инструкции по подключению\n\nВыберите приложение или откройте диагностику, если VPN уже настроен, но не подключается.").reply_markup(menu::instructions_menu()).await?;
             }
-            "🆘 Поддержка" => {
-                customer_support_screen(&bot, msg.chat.id, uid, &settings).await?;
+            "🆘 Поддержка" | "🆘 Помощь" => {
+                bot.send_message(msg.chat.id, "🆘 Помощь\n\nВыберите, что вам нужно. Если готовая инструкция не поможет, напишите в поддержку.")
+                    .reply_markup(menu::customer_help_menu()).await?;
+            }
+            "⚙️ Ещё" => {
+                bot.send_message(msg.chat.id, "⚙️ Дополнительные возможности\n\nВеб-кабинет, промокоды, уведомления, партнёрская программа и восстановление старых подключений.")
+                    .reply_markup(menu::customer_more_menu(cfg.portal_public_url.is_some(), crate::calendar::legacy_requests_open(now_epoch()))).await?;
             }
             "🌐 Веб-кабинет" => {
                 portal_login_screen(&bot, msg.chat.id, uid, &cfg, &settings).await?;
@@ -6673,6 +6691,9 @@ async fn callback_handler(
             | Action::BuyPaid(_)
             | Action::MyKeys
             | Action::MyKeysPage(_)
+            | Action::CustomerHelp
+            | Action::CustomerMore
+            | Action::CustomerLegacyRestore
             | Action::Profile
             | Action::Portal
             | Action::Balance
@@ -9641,6 +9662,31 @@ async fn callback_handler(
         Action::MyKeysPage(page) => {
             send_customer_keys_page(&bot, chat, &settings, &vpn, uid, page).await?;
         }
+        Action::CustomerHelp => {
+            bot.send_message(chat, "🆘 Помощь\n\nВыберите подходящий раздел. Если инструкция не решит проблему, создайте обращение в поддержку.")
+                .reply_markup(menu::customer_help_menu()).await?;
+        }
+        Action::CustomerMore => {
+            bot.send_message(chat, "⚙️ Дополнительные возможности\n\nЗдесь находятся функции, которые используются реже.")
+                .reply_markup(menu::customer_more_menu(
+                    cfg.portal_public_url.is_some(),
+                    crate::calendar::legacy_requests_open(now_epoch()),
+                )).await?;
+        }
+        Action::CustomerLegacyRestore => {
+            if crate::calendar::legacy_requests_open(now_epoch()) {
+                let eligible = settings.legacy_user_eligible(uid, now_epoch());
+                bot.send_message(chat, "♻️ Восстановление ранее приобретённых подключений\n\nЕсли вы покупали подключения лично у администратора, отправьте заявку на бесплатное восстановление. Каждая заявка проверяется вручную.")
+                    .reply_markup(menu::legacy_restore_menu(eligible)).await?;
+            } else {
+                bot.send_message(chat, "Приём заявок на восстановление завершён.")
+                    .reply_markup(menu::customer_more_menu(
+                        cfg.portal_public_url.is_some(),
+                        false,
+                    ))
+                    .await?;
+            }
+        }
         Action::Balance => {
             let entries = settings.balance_history(uid, 10);
             let history = if entries.is_empty() {
@@ -12247,6 +12293,12 @@ mod tests {
             "🌐 Веб-кабинет",
             "🎟 Промокод",
             "🤝 Стать партнёром",
+            "🏠 Главная",
+            "🔑 Подключения",
+            "➕ Купить VPN",
+            "💰 Баланс и оплата",
+            "🆘 Помощь",
+            "⚙️ Ещё",
         ] {
             assert!(is_customer_navigation(text), "{text}");
         }
@@ -12753,6 +12805,8 @@ mod tests {
         let keyboards = vec![
             menu::main_menu(Lang::Ru),
             menu::profile_menu(true),
+            menu::customer_help_menu(),
+            menu::customer_more_menu(true, true),
             menu::notification_settings_menu(true, true),
             menu::portal_link_menu("https://example.com/login"),
             menu::admin_dashboard_menu(),
@@ -13089,6 +13143,9 @@ mod tests {
             BuyPaid(1),
             MyKeys,
             MyKeysPage(1),
+            CustomerHelp,
+            CustomerMore,
+            CustomerLegacyRestore,
             Profile,
             Portal,
             Balance,
@@ -13333,6 +13390,9 @@ mod tests {
                 BuyPaid(_) => {}
                 MyKeys => {}
                 MyKeysPage(_) => {}
+                CustomerHelp => {}
+                CustomerMore => {}
+                CustomerLegacyRestore => {}
                 Profile => {}
                 Portal => {}
                 Balance => {}
@@ -13499,6 +13559,9 @@ mod tests {
             (Action::BuyPaid(1), true, true),
             (Action::MyKeys, true, true),
             (Action::MyKeysPage(1), true, true),
+            (Action::CustomerHelp, true, true),
+            (Action::CustomerMore, true, true),
+            (Action::CustomerLegacyRestore, true, true),
             (Action::Profile, true, true),
             (Action::Balance, true, true),
             (Action::CustomerKey("mine".into()), true, true),
