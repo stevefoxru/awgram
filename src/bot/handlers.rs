@@ -143,6 +143,8 @@ pub enum Action {
     AdminPricesRub,
     AdminPricesStars,
     AdminReferral,
+    AdminTrial,
+    AdminTrialSet(i64),
     AdminPromoAction(String),
     ClientNoteAsk(String),
     LegacyRenew(String),
@@ -362,6 +364,7 @@ fn parse_callback(data: &str) -> Action {
         "admin:promos" => Action::AdminPromos,
         "admin:commerce" => Action::AdminCommerce,
         "admin:partners" => Action::AdminPartners,
+        "admin:trial" => Action::AdminTrial,
         "admin:partner:new" => Action::PartnerNew,
         "admin:prices:rub" => Action::AdminPricesRub,
         "admin:prices:stars" => Action::AdminPricesStars,
@@ -539,6 +542,10 @@ fn parse_callback(data: &str) -> Action {
                 Action::AdminRoleAction(v.to_string())
             } else if let Some(v) = data.strip_prefix("admin:promo:") {
                 Action::AdminPromoAction(v.to_string())
+            } else if let Some(v) = data.strip_prefix("admin:trial:set:") {
+                v.parse()
+                    .map(Action::AdminTrialSet)
+                    .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("broadcast:send:") {
                 v.parse()
                     .map(Action::BroadcastSend)
@@ -2176,7 +2183,7 @@ async fn admin_commerce_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Han
     } else {
         "не настроены — оплата выключена".to_string()
     };
-    bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy-продление: {:.2} ₽", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0))
+    bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy-продление: {:.2} ₽\nТестовый период: {}", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0, if settings.trial_enabled() { format!("{} дн.", settings.trial_days()) } else { "отключён".into() }))
         .reply_markup(menu::admin_commerce_menu())
         .await?;
     Ok(())
@@ -3069,6 +3076,20 @@ fn parse_minor(value: &str) -> Option<i64> {
 }
 
 async fn maybe_issue_trial(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store, uid: i64) {
+    if !settings.trial_enabled() {
+        let _ = bot
+            .send_message(chat, "Тестовый период сейчас временно недоступен.")
+            .reply_markup(menu::customer_keyboard())
+            .await;
+        return;
+    }
+    if !settings.trial_available(uid) {
+        let _ = bot
+            .send_message(chat, "Тестовый период предоставляется один раз новым пользователям, у которых ещё не было VPN-ключей. Если вам нужна помощь с существующим подключением, откройте поддержку.")
+            .reply_markup(menu::customer_help_menu())
+            .await;
+        return;
+    }
     let claimed_at = now_epoch();
     if !settings.claim_trial(uid, claimed_at) {
         return;
@@ -3096,12 +3117,21 @@ async fn maybe_issue_trial(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store,
         )
         .map_err(|e| crate::error::Error::Parse(e.to_string()))?
         .remove(0);
+        let trial_days = settings.trial_days();
+        let expiry = format!("{trial_days}d");
         let result = if server.is_local {
-            vpn.add(&name, Some("1d"), settings.psk_default()).await?
+            vpn.add(&name, Some(&expiry), settings.psk_default())
+                .await?
         } else {
             let result = nonlocal_add(vpn, settings, &server, &name).await?;
-            if let Err(error) =
-                nonlocal_set_expiry(vpn, settings, &server, &name, claimed_at + 86_400).await
+            if let Err(error) = nonlocal_set_expiry(
+                vpn,
+                settings,
+                &server,
+                &name,
+                claimed_at + trial_days * 86_400,
+            )
+            .await
             {
                 let _ = nonlocal_remove(vpn, settings, &server, &name).await;
                 return Err(error);
@@ -3125,8 +3155,9 @@ async fn maybe_issue_trial(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store,
     .await;
     match result {
         Ok(result) => {
+            let trial_days = settings.trial_days();
             let _ = bot
-                .send_message(chat, "🎁 Вам выдан бесплатный тестовый ключ на 24 часа.")
+                .send_message(chat, format!("🎁 Тестовый VPN активирован на {trial_days} дн.\n\nУстановите конфигурацию ниже и проверьте подключение. Ключ уже добавлен в раздел «Мои ключи». После окончания теста его можно продлить без создания нового профиля."))
                 .await;
             let _ = render::send_client_files(bot, chat, settings.lang(uid), &result).await;
         }
@@ -3568,6 +3599,8 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminPricesRub
         | AdminPricesStars
         | AdminReferral
+        | AdminTrial
+        | AdminTrialSet(_)
         | AdminPromoAction(_)
         | LegacyRestore
         | LegacyRequestApprove(_)
@@ -5982,7 +6015,6 @@ async fn message_handler(
             text if text.starts_with("/start")
                 || matches!(text, "🏠 Меню" | "🏠 Кабинет" | "🏠 Главная") =>
             {
-                maybe_issue_trial(&bot, msg.chat.id, &vpn, &settings, uid).await;
                 customer_dashboard(&bot, msg.chat.id, uid, &vpn, &settings).await?;
             }
             "➕ Купить ключ" | "➕ Купить VPN" => {
@@ -6015,6 +6047,9 @@ async fn message_handler(
             "🆘 Поддержка" | "🆘 Помощь" => {
                 bot.send_message(msg.chat.id, "🆘 Помощь\n\nВыберите, что вам нужно. Если готовая инструкция не поможет, напишите в поддержку.")
                     .reply_markup(menu::customer_help_menu()).await?;
+            }
+            "🎁 Тест VPN" => {
+                maybe_issue_trial(&bot, msg.chat.id, &vpn, &settings, uid).await;
             }
             "⚙️ Ещё" => {
                 bot.send_message(msg.chat.id, "⚙️ Дополнительные возможности\n\nВеб-кабинет, промокоды, уведомления и партнёрская программа.")
@@ -9436,6 +9471,32 @@ async fn callback_handler(
             )
             .await?;
             dialogue.update(State::AwaitingReferralPercent).await?;
+        }
+        Action::AdminTrial => {
+            let enabled = settings.trial_enabled();
+            let days = settings.trial_days();
+            bot.send_message(chat, format!("🎁 Тестовый период\n\nСтатус: {}\nСрок: {days} дн.\nОграничение: один раз на Telegram ID и только до появления первого ключа.\nСервер: текущий основной сервер выдачи.\n\nТест выдаётся только после нажатия пользователем кнопки «🎁 Тест VPN» — простой запуск бота больше не расходует попытку.", if enabled { "✅ включён" } else { "⏸ отключён" }))
+                .reply_markup(menu::admin_trial_menu(enabled, days))
+                .await?;
+        }
+        Action::AdminTrialSet(days) => {
+            let enabled = days != 0;
+            let selected_days = if enabled { days } else { settings.trial_days() };
+            if !settings.set_trial(enabled, selected_days) {
+                bot.send_message(chat, "Недопустимый срок тестового периода.")
+                    .await?;
+                return Ok(());
+            }
+            bot.send_message(
+                chat,
+                if enabled {
+                    format!("✅ Тестовый период включён на {selected_days} дн.")
+                } else {
+                    "⏸ Тестовый период отключён.".into()
+                },
+            )
+            .reply_markup(menu::admin_trial_menu(enabled, selected_days))
+            .await?;
         }
         Action::Guide(kind) => {
             if let Some(name) = kind.strip_prefix("transfer:") {
@@ -13782,6 +13843,7 @@ mod tests {
             menu::admin_roles_menu(),
             menu::admin_promos_menu(),
             menu::admin_commerce_menu(),
+            menu::admin_trial_menu(true, 3),
             menu::admin_partners_menu(&[]),
             menu::admin_partner_card_menu(1, "active"),
             menu::admin_partner_card_menu(1, "draft"),
@@ -14008,6 +14070,8 @@ mod tests {
             AdminPricesRub,
             AdminPricesStars,
             AdminReferral,
+            AdminTrial,
+            AdminTrialSet(3),
             AdminPromoAction("discount".into()),
             ClientNoteAsk("key".into()),
             LegacyRenew("key".into()),
@@ -14272,6 +14336,8 @@ mod tests {
                 AdminPricesRub => {}
                 AdminPricesStars => {}
                 AdminReferral => {}
+                AdminTrial => {}
+                AdminTrialSet(_) => {}
                 AdminPromoAction(_) => {}
                 ClientNoteAsk(_) => {}
                 LegacyRenew(_) => {}
@@ -14705,6 +14771,8 @@ mod tests {
             (Action::AdminPricesRub, true, false),
             (Action::AdminPricesStars, true, false),
             (Action::AdminReferral, true, false),
+            (Action::AdminTrial, true, false),
+            (Action::AdminTrialSet(3), true, false),
             (Action::AdminPromoAction("legacy".into()), true, false),
             (Action::ClientNoteAsk("mine".into()), true, false),
             (Action::LegacyRestore, true, false),

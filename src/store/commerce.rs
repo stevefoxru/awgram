@@ -1407,6 +1407,19 @@ impl Store {
         .unwrap_or(false)
     }
 
+    pub fn trial_available(&self, user_id: i64) -> bool {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM users u WHERE u.user_id=?1
+                  AND u.trial_claimed_at IS NULL
+                  AND NOT EXISTS(SELECT 1 FROM clients c WHERE c.owner_user_id=u.user_id))",
+                [user_id],
+                |row| row.get::<_, bool>(0),
+            )
+        })
+        .unwrap_or(false)
+    }
+
     pub fn release_trial_claim(&self, user_id: i64, claimed_at: i64) {
         let _ = self.with_conn(|c| {
             c.execute(
@@ -2086,7 +2099,9 @@ mod tests {
         s.upsert_user(1, Some("alice"), "Alice", None, 10);
         s.upsert_user(2, Some("bob"), "Bob", Some(1), 11);
         assert_eq!(s.referral_count(1), 1);
+        assert!(s.trial_available(2));
         assert!(s.claim_trial(2, 12));
+        assert!(!s.trial_available(2));
         assert!(!s.claim_trial(2, 13));
     }
 

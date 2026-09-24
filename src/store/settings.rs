@@ -268,6 +268,24 @@ impl Store {
     pub fn set_referral_percent(&self, value: u8) {
         self.set_json("referral_percent", &value.min(100));
     }
+    pub fn trial_enabled(&self) -> bool {
+        self.get_json("trial_enabled").unwrap_or(true)
+    }
+    pub fn trial_days(&self) -> i64 {
+        self.get_json::<i64>("trial_days")
+            .filter(|days| matches!(days, 1 | 3 | 7))
+            .unwrap_or(3)
+    }
+    pub fn set_trial(&self, enabled: bool, days: i64) -> bool {
+        if enabled && !matches!(days, 1 | 3 | 7) {
+            return false;
+        }
+        self.set_json("trial_enabled", &enabled);
+        if enabled {
+            self.set_json("trial_days", &days);
+        }
+        true
+    }
     pub fn legacy_renewal_price_kopecks(&self) -> i64 {
         self.get_json::<i64>("legacy_renewal_price_kopecks")
             .unwrap_or(100_000)

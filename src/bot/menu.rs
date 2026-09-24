@@ -72,7 +72,10 @@ pub fn customer_keyboard() -> KeyboardMarkup {
             KeyboardButton::new("🆘 Помощь"),
             KeyboardButton::new("⚙️ Ещё"),
         ],
-        vec![KeyboardButton::new("♻️ Восстановить ключи")],
+        vec![
+            KeyboardButton::new("🎁 Тест VPN"),
+            KeyboardButton::new("♻️ Восстановить ключи"),
+        ],
     ];
     KeyboardMarkup::new(rows).resize_keyboard().persistent()
 }
@@ -974,7 +977,52 @@ pub fn admin_commerce_menu() -> InlineKeyboardMarkup {
             cb("💳 Реквизиты", "set:payment"),
         ],
         vec![cb("🏦 Эквайринг / Т-Банк", "set:acquiring")],
+        vec![cb("🎁 Тестовый период", "admin:trial")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn admin_trial_menu(enabled: bool, days: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb(
+                if enabled && days == 1 {
+                    "✅ 1 день"
+                } else {
+                    "1 день"
+                },
+                "admin:trial:set:1",
+            ),
+            cb(
+                if enabled && days == 3 {
+                    "✅ 3 дня"
+                } else {
+                    "3 дня"
+                },
+                "admin:trial:set:3",
+            ),
+            cb(
+                if enabled && days == 7 {
+                    "✅ 7 дней"
+                } else {
+                    "7 дней"
+                },
+                "admin:trial:set:7",
+            ),
+        ],
+        vec![cb(
+            if enabled {
+                "⏸ Отключить"
+            } else {
+                "▶️ Включить на 3 дня"
+            },
+            if enabled {
+                "admin:trial:set:0"
+            } else {
+                "admin:trial:set:3"
+            },
+        )],
+        vec![cb("⬅️ Цены и промокоды", "admin:commerce")],
     ])
 }
 
