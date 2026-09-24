@@ -1779,9 +1779,11 @@ async fn customer_support_screen(
 
 struct CustomerKeyView {
     text: String,
+    list_text: String,
     title: String,
     ready: bool,
     connected: bool,
+    needs_replacement: bool,
 }
 
 fn customer_key_view(
@@ -1791,9 +1793,8 @@ fn customer_key_view(
     name: &str,
     now: i64,
 ) -> CustomerKeyView {
-    let device = settings
-        .device_label(name)
-        .unwrap_or_else(|| "устройство не указано".into());
+    let device = settings.device_label(name);
+    let display_name = device.as_deref().unwrap_or("Без названия");
     let server = settings.client_vpn_server(name);
     let runtime = settings.client_runtime_stats(name);
     let expired = vpn.client_expiry(name).is_some_and(|expiry| expiry <= now);
@@ -1855,14 +1856,16 @@ fn customer_key_view(
     );
     CustomerKeyView {
         text: format!(
-            "{icon} {device}\nКлюч: {name}\nИсправность: {health}\nПодключение: {connection}\nСервер: {server_name}\nПротокол: {protocol}\nСрок: {expiry}\nТрафик: {traffic}"
+            "{icon} {display_name}\nСтатус: {health}\nПодключение: {connection}\nЛокация: {server_name}\nПротокол: {protocol}\nСрок: {expiry}\nТрафик: {traffic}\n\nТехническое имя: {name}"
         ),
-        title: format!("{icon} {device} · {name}")
+        list_text: format!("{icon} {display_name}\n{server_name} · {expiry}"),
+        title: format!("{icon} {display_name}")
             .chars()
             .take(60)
             .collect(),
         ready,
         connected,
+        needs_replacement: server_unavailable && !expired,
     }
 }
 
@@ -1878,7 +1881,10 @@ fn customer_key_list(
         views.push((name, view));
     }
     views.sort_by_key(|(_, view)| (!view.ready, !view.connected, view.title.clone()));
-    let lines = views.iter().map(|(_, view)| view.text.clone()).collect();
+    let lines = views
+        .iter()
+        .map(|(_, view)| view.list_text.clone())
+        .collect();
     let buttons = views
         .into_iter()
         .map(|(name, view)| (name, view.title))
@@ -4431,20 +4437,21 @@ async fn message_handler(
     }
     if let State::AwaitingDeviceLabel { name } = state.clone() {
         if settings.set_device_label(&name, uid, msg.text().unwrap_or_default()) {
-            let text = format!("✅ Название устройства для ключа {name} сохранено.");
+            let label = settings.device_label(&name).unwrap_or_else(|| name.clone());
+            let text = format!("✅ Подключение теперь называется «{label}».\n\nТехническое имя ключа не изменилось: {name}");
             if role.is_owner() {
                 bot.send_message(msg.chat.id, text)
                     .reply_markup(menu::admin_keyboard())
                     .await?;
             } else {
                 bot.send_message(msg.chat.id, text)
-                    .reply_markup(menu::customer_keyboard())
+                    .reply_markup(menu::customer_key_menu(&name))
                     .await?;
             }
         } else {
             bot.send_message(
                 msg.chat.id,
-                "Название должно содержать от 1 до 40 символов, а ключ должен принадлежать вам.",
+                "Название должно содержать от 1 до 40 символов, а подключение должно принадлежать вам.",
             )
             .await?;
         }
@@ -10372,20 +10379,20 @@ async fn callback_handler(
             let expired = vpn
                 .client_expiry(&name)
                 .is_some_and(|value| value <= now_epoch());
-            if expired {
-                bot.send_message(chat, format!("❌ Подписка истекла\n\nВаша подписка для ключа «{name}» завершена. Продлите подписку, чтобы восстановить доступ к VPN."))
-                    .reply_markup(menu::expired_subscription_menu(&name)).await?;
-                return Ok(());
-            }
             let view = customer_key_view(&settings, &vpn, uid, &name, now_epoch());
             bot.send_message(
                 chat,
                 format!(
-                    "🔑 Карточка подключения\n\n{}\n\nКонфигурация и QR отправляются только по кнопке ниже.",
+                    "🔑 Управление подключением\n\n{}\n\nЗдесь можно назвать подключение, получить конфигурацию, продлить или заменить его.",
                     view.text
                 ),
             )
-            .reply_markup(menu::customer_key_menu(&name))
+            .reply_markup(menu::customer_key_actions_menu(
+                &name,
+                view.needs_replacement,
+                expired,
+                cfg.portal_public_url.is_some(),
+            ))
             .await?;
         }
         Action::CustomerMove(name) => {
@@ -10711,7 +10718,10 @@ async fn callback_handler(
         }
         Action::DeviceLabelAsk(name) => {
             if settings.client_owner(&name) == Some(uid) {
-                bot.send_message(chat, format!("Введите название устройства для ключа {name}, например «iPhone» или «Ноутбук»:" )).await?;
+                let current = settings
+                    .device_label(&name)
+                    .unwrap_or_else(|| "не задано".into());
+                bot.send_message(chat, format!("✏️ Название подключения\n\nТекущее: {current}\nТехническое имя: {name}\n\nОтправьте понятное название, например «Мой iPhone», «Ноутбук», «Роутер дома» или «Телефон мамы». До 40 символов." )).await?;
                 dialogue.update(State::AwaitingDeviceLabel { name }).await?;
             }
         }
@@ -12743,6 +12753,8 @@ mod tests {
             menu::customer_keys_menu(&[("alice".into(), "Alice".into())]),
             menu::customer_keys_page_menu(&[("alice".into(), "Alice".into())], 0, 2),
             menu::customer_key_menu("alice"),
+            menu::customer_key_actions_menu("alice", true, false, true),
+            menu::customer_key_actions_menu("alice", false, true, false),
             menu::expired_subscription_menu("alice"),
             menu::instructions_menu(),
             menu::installation_platform_menu("alice"),

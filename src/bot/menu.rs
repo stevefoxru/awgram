@@ -1318,6 +1318,42 @@ pub fn customer_key_menu(name: &str) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn customer_key_actions_menu(
+    name: &str,
+    needs_replacement: bool,
+    expired: bool,
+    portal_enabled: bool,
+) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    if expired {
+        rows.push(vec![cb("🚀 Продлить подписку", &format!("renew:{name}"))]);
+    } else if needs_replacement {
+        rows.push(vec![cb(
+            "🔁 Заменить нерабочий ключ",
+            &format!("move:choose:{name}"),
+        )]);
+    }
+    rows.push(vec![cb("📲 Конфигурация и QR", &format!("refresh:{name}"))]);
+    let mut manage = vec![cb("✏️ Изменить название", &format!("device:label:{name}"))];
+    if !expired {
+        manage.push(cb("📅 Продлить", &format!("renew:{name}")));
+    }
+    rows.push(manage);
+    rows.push(vec![
+        cb("📖 Установка", &format!("guide:install:{name}")),
+        cb("🩺 Диагностика", &format!("guide:trouble:{name}")),
+    ]);
+    rows.push(vec![cb(
+        "🎁 Передать другому",
+        &format!("guide:transfer:{name}"),
+    )]);
+    if portal_enabled {
+        rows.push(vec![cb("🌐 Открыть веб-кабинет", "portal")]);
+    }
+    rows.push(vec![cb("⬅️ Все подключения", "mykeys")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
 pub fn expired_subscription_menu(name: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![cb("🚀 ВОЗОБНОВИТЬ ТАРИФ", &format!("renew:{name}"))],
