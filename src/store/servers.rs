@@ -27,6 +27,9 @@ pub struct VpnServer {
     pub capacity: i64,
     pub blocked_by_rkn: bool,
     pub rkn_blocked_at: Option<i64>,
+    pub operator_unavailable: bool,
+    pub unavailable_at: Option<i64>,
+    pub archived_at: Option<i64>,
 }
 
 pub struct NewVpnServer<'a> {
@@ -73,10 +76,13 @@ fn server_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VpnServer> {
         capacity: row.get(20)?,
         blocked_by_rkn: row.get::<_, i64>(21)? != 0,
         rkn_blocked_at: row.get(22)?,
+        operator_unavailable: row.get::<_, i64>(23)? != 0,
+        unavailable_at: row.get(24)?,
+        archived_at: row.get(25)?,
     })
 }
 
-const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local,capacity,blocked_by_rkn,rkn_blocked_at";
+const SERVER_COLUMNS: &str = "id,name,hostname,public_ip,provider,location,protocol,status,enabled_for_provisioning,opened_at,added_at,paid_until,billing_period_months,cost_minor,currency,auto_renew,panel_url,order_ref,note,is_local,capacity,blocked_by_rkn,rkn_blocked_at,operator_unavailable,unavailable_at,archived_at";
 
 impl Store {
     pub fn ensure_local_vpn_server(&self, hostname: &str, actor: i64, now: i64) -> Option<i64> {
@@ -209,7 +215,18 @@ impl Store {
     pub fn vpn_servers(&self) -> Vec<VpnServer> {
         self.with_conn(|c| {
             let mut statement = c.prepare(&format!(
-                "SELECT {SERVER_COLUMNS} FROM vpn_servers ORDER BY name COLLATE NOCASE"
+                "SELECT {SERVER_COLUMNS} FROM vpn_servers WHERE archived_at IS NULL ORDER BY name COLLATE NOCASE"
+            ))?;
+            let rows = statement.query_map([], server_from_row)?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn archived_vpn_servers(&self) -> Vec<VpnServer> {
+        self.with_conn(|c| {
+            let mut statement = c.prepare(&format!(
+                "SELECT {SERVER_COLUMNS} FROM vpn_servers WHERE archived_at IS NOT NULL ORDER BY archived_at DESC,name COLLATE NOCASE"
             ))?;
             let rows = statement.query_map([], server_from_row)?;
             rows.collect()
@@ -377,7 +394,7 @@ impl Store {
         self.with_conn(|c| {
             c.execute(
                 "UPDATE vpn_servers SET enabled_for_provisioning=?2,updated_at=?3
-                 WHERE id=?1 AND (?2=0 OR blocked_by_rkn=0)",
+                 WHERE id=?1 AND (?2=0 OR (blocked_by_rkn=0 AND operator_unavailable=0 AND archived_at IS NULL))",
                 rusqlite::params![id, enabled as i64, now],
             )
         })
@@ -396,6 +413,39 @@ impl Store {
                      updated_at=?3
                  WHERE id=?1 AND blocked_by_rkn<>?2",
                 rusqlite::params![id, blocked as i64, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    /// Marks an active server as unusable without deleting it or relying on a
+    /// health-check status which may be overwritten by the next probe.
+    pub fn set_server_operator_unavailable(&self, id: i64, unavailable: bool, now: i64) -> bool {
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE vpn_servers
+                 SET operator_unavailable=?2,
+                     unavailable_at=CASE WHEN ?2=1 THEN ?3 ELSE NULL END,
+                     enabled_for_provisioning=CASE WHEN ?2=1 THEN 0 ELSE enabled_for_provisioning END,
+                     updated_at=?3
+                 WHERE id=?1 AND archived_at IS NULL AND operator_unavailable<>?2",
+                rusqlite::params![id, unavailable as i64, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn set_server_archived(&self, id: i64, archived: bool, now: i64) -> bool {
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE vpn_servers
+                 SET archived_at=CASE WHEN ?2=1 THEN ?3 ELSE NULL END,
+                     operator_unavailable=CASE WHEN ?2=1 THEN 1 ELSE operator_unavailable END,
+                     unavailable_at=CASE WHEN ?2=1 THEN COALESCE(unavailable_at,?3) ELSE unavailable_at END,
+                     enabled_for_provisioning=CASE WHEN ?2=1 THEN 0 ELSE enabled_for_provisioning END,
+                     updated_at=?3
+                 WHERE id=?1 AND ((?2=1 AND archived_at IS NULL) OR (?2=0 AND archived_at IS NOT NULL))",
+                rusqlite::params![id, archived as i64, now],
             )
         })
         .is_ok_and(|changed| changed == 1)
@@ -823,6 +873,8 @@ impl Store {
             .filter(|server| {
                 server.enabled_for_provisioning
                     && !server.blocked_by_rkn
+                    && !server.operator_unavailable
+                    && server.archived_at.is_none()
                     && valid_protocol(&server.protocol)
                     && server.status != "offline"
                     && self.server_client_count(server.id) < server.capacity
@@ -999,6 +1051,40 @@ mod tests {
         assert_eq!(store.vpn_server(id).unwrap().provider, "Hoster");
         assert!(store.set_local_server_status("online", 400));
         assert_eq!(store.vpn_server(id).unwrap().status, "online");
+    }
+
+    #[test]
+    fn unavailable_and_archived_servers_are_kept_but_excluded_from_active_lists() {
+        let store = Store::open_in_memory();
+        let id = store
+            .add_vpn_server(
+                &NewVpnServer {
+                    name: "Retired Netherlands",
+                    hostname: "retired.example.com",
+                    public_ip: "192.0.2.44",
+                    provider: "Hoster",
+                    location: "Amsterdam",
+                    protocol: "amneziawg-panel",
+                    opened_at: None,
+                    is_local: false,
+                },
+                1,
+                100,
+            )
+            .unwrap();
+        assert!(store.set_server_operator_unavailable(id, true, 200));
+        let server = store.vpn_server(id).unwrap();
+        assert!(server.operator_unavailable);
+        assert!(!server.enabled_for_provisioning);
+
+        assert!(store.set_server_archived(id, true, 300));
+        assert!(store.vpn_servers().is_empty());
+        assert_eq!(store.archived_vpn_servers()[0].id, id);
+        assert!(store.vpn_server(id).is_some());
+
+        assert!(store.set_server_archived(id, false, 400));
+        assert_eq!(store.vpn_servers()[0].id, id);
+        assert!(store.vpn_server(id).unwrap().operator_unavailable);
     }
 
     #[test]

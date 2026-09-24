@@ -304,7 +304,11 @@ impl Store {
             let mut statement = connection.prepare(
                 "SELECT c.name,COALESCE(c.device_label,'Не указано'),
                         COALESCE(s.location,'Не определён'),c.protocol,
-                        CASE WHEN COALESCE(s.blocked_by_rkn,0)=1 THEN 'blocked' ELSE COALESCE(s.status,'unknown') END,
+                        CASE
+                          WHEN s.archived_at IS NOT NULL THEN 'archived'
+                          WHEN COALESCE(s.blocked_by_rkn,0)=1 OR COALESCE(s.operator_unavailable,0)=1 THEN 'blocked'
+                          ELSE COALESCE(s.status,'unknown')
+                        END,
                         COALESCE((SELECT rx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY ts DESC LIMIT 1),0),
                         COALESCE((SELECT tx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY ts DESC LIMIT 1),0),
                         (SELECT ts FROM traffic_samples t WHERE t.client_id=c.id AND t.online=1 ORDER BY ts DESC LIMIT 1)

@@ -740,6 +740,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE vpn_servers ADD COLUMN blocked_by_rkn INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE vpn_servers ADD COLUMN rkn_blocked_at INTEGER;
     "#,
+    // v34: ручная отметка недоступного сервера и безопасный архив. Архив не
+    // удаляет сервер и его связи с клиентами, а только исключает его из
+    // рабочих списков и сценариев выдачи.
+    r#"
+    ALTER TABLE vpn_servers ADD COLUMN operator_unavailable INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE vpn_servers ADD COLUMN unavailable_at INTEGER;
+    ALTER TABLE vpn_servers ADD COLUMN archived_at INTEGER;
+    CREATE INDEX idx_vpn_servers_archived ON vpn_servers(archived_at,name);
+    "#,
 ];
 
 pub struct Store {

@@ -409,12 +409,16 @@ pub fn servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup
     let mut rows = servers
         .iter()
         .map(|server| {
-            let icon = match server.status.as_str() {
-                "online" => "🟢",
-                "warning" => "🟠",
-                "offline" => "🔴",
-                "maintenance" => "🚧",
-                _ => "⚪",
+            let icon = if server.operator_unavailable {
+                "❌"
+            } else {
+                match server.status.as_str() {
+                    "online" => "🟢",
+                    "warning" => "🟠",
+                    "offline" => "🔴",
+                    "maintenance" => "🚧",
+                    _ => "⚪",
+                }
             };
             let access = if server.blocked_by_rkn {
                 " · 🚫 РКН"
@@ -439,6 +443,7 @@ pub fn servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup
         cb("💳 Календарь оплаты", "server:billing"),
     ]);
     rows.push(vec![cb("🔄 Синхронизировать все ключи", "server:sync-all")]);
+    rows.push(vec![cb("🗄 Архив серверов", "server:archive:list")]);
     rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
     InlineKeyboardMarkup::new(rows)
 }
@@ -490,6 +495,41 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("⬅️ Все серверы", "admin:servers"),
             cb("🏠 Админ-панель", "admin:dashboard"),
         ],
+    ])
+}
+
+pub fn archived_servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup {
+    let mut rows = servers
+        .iter()
+        .map(|server| {
+            vec![cb(
+                &format!("🗄 {} · {}", server.name, server.location),
+                &format!("server:{}", server.id),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![cb("⬅️ Актуальные серверы", "admin:servers")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn archived_server_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "♻️ Вернуть из архива",
+            &format!("server:archive:restore:{id}"),
+        )],
+        vec![cb("🗄 К архиву", "server:archive:list")],
+        vec![cb("⬅️ Актуальные серверы", "admin:servers")],
+    ])
+}
+
+pub fn server_archive_confirm_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "🗄 Да, убрать в архив",
+            &format!("server:archive:confirm:{id}"),
+        )],
+        vec![cb("Отмена", &format!("server:{id}"))],
     ])
 }
 
@@ -554,6 +594,20 @@ pub fn server_maintenance_hub_menu(id: i64) -> InlineKeyboardMarkup {
             cb("🚫 Отметить блокировку РКН", &format!("server:rkn:on:{id}")),
             cb("✅ Снять отметку", &format!("server:rkn:off:{id}")),
         ],
+        vec![
+            cb(
+                "❌ Пометить нерабочим",
+                &format!("server:unavailable:on:{id}"),
+            ),
+            cb(
+                "✅ Пометить рабочим",
+                &format!("server:unavailable:off:{id}"),
+            ),
+        ],
+        vec![cb(
+            "🗄 Убрать сервер в архив",
+            &format!("server:archive:ask:{id}"),
+        )],
         vec![cb(
             "🚫 Отозвать SSH-мост",
             &format!("server:enroll:revoke:{id}"),
