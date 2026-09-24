@@ -70,6 +70,10 @@ pub enum Action {
     ServerUnavailableSet(i64, bool),
     ServerUnavailableReason(i64, String),
     ServerRetirement(i64),
+    ServerCleanup(i64),
+    ServerCleanupEnabled(i64, bool),
+    ServerCleanupDays(i64, i64),
+    ServerCleanupExempt(i64, String, bool),
     ServerArchiveList,
     ServerArchiveAsk(i64),
     ServerArchiveConfirm(i64),
@@ -750,6 +754,44 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:retire:") {
                 v.parse()
                     .map(Action::ServerRetirement)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:cleanup:enabled:") {
+                let mut parts = v.split(':');
+                match (
+                    parts.next().and_then(|value| value.parse().ok()),
+                    parts.next(),
+                ) {
+                    (Some(id), Some("1")) => Action::ServerCleanupEnabled(id, true),
+                    (Some(id), Some("0")) => Action::ServerCleanupEnabled(id, false),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("server:cleanup:days:") {
+                let mut parts = v.split(':');
+                match (
+                    parts.next().and_then(|value| value.parse().ok()),
+                    parts.next().and_then(|value| value.parse().ok()),
+                ) {
+                    (Some(id), Some(days)) => Action::ServerCleanupDays(id, days),
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("server:cleanup:exempt:") {
+                let mut parts = v.splitn(3, ':');
+                match (
+                    parts.next().and_then(|value| value.parse().ok()),
+                    parts.next(),
+                    parts.next(),
+                ) {
+                    (Some(id), Some("1"), Some(name)) => {
+                        Action::ServerCleanupExempt(id, name.to_string(), true)
+                    }
+                    (Some(id), Some("0"), Some(name)) => {
+                        Action::ServerCleanupExempt(id, name.to_string(), false)
+                    }
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("server:cleanup:") {
+                v.parse()
+                    .map(Action::ServerCleanup)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
@@ -2704,6 +2746,84 @@ async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
     Ok(())
 }
 
+async fn server_cleanup_screen(
+    bot: &Bot,
+    chat: ChatId,
+    settings: &Store,
+    vpn: &Vpn,
+    id: i64,
+) -> HandlerResult {
+    let Some(server) = settings.vpn_server(id) else {
+        return Ok(());
+    };
+    let now = now_epoch();
+    let enabled = settings.blocked_key_cleanup_enabled();
+    let retention = settings.blocked_key_cleanup_days();
+    let warning = settings.blocked_key_warning_days();
+    let pending = settings
+        .pending_key_replacements()
+        .into_iter()
+        .map(|replacement| replacement.old_client)
+        .collect::<std::collections::HashSet<_>>();
+    let names = settings.server_client_names(id);
+    let mut due = 0usize;
+    let mut protected = 0usize;
+    let mut lines = Vec::new();
+    let buttons = names
+        .iter()
+        .map(|name| (name.clone(), settings.client_cleanup_exempt(name)))
+        .collect::<Vec<_>>();
+    let blocked_at = [
+        server.unavailable_at,
+        server.rkn_blocked_at,
+        server.archived_at,
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    for name in &names {
+        let exempt = settings.client_cleanup_exempt(name);
+        let owner = settings.client_owner(name);
+        let paid = vpn.client_expiry(name).is_some_and(|expiry| expiry > now);
+        let support = owner.is_some_and(|user| settings.user_has_open_support(user));
+        let replacement = pending.contains(name);
+        let status = if exempt {
+            protected += 1;
+            "🛡 исключён администратором".to_string()
+        } else if replacement {
+            protected += 1;
+            "🔄 выполняется замена".to_string()
+        } else if paid {
+            protected += 1;
+            "💳 оплаченный срок не завершён".to_string()
+        } else if support {
+            protected += 1;
+            "🆘 открыто обращение".to_string()
+        } else if let Some(at) = blocked_at {
+            let remaining = at
+                .saturating_add(retention * 86_400)
+                .saturating_sub(now)
+                .div_euclid(86_400)
+                .max(0);
+            if remaining == 0 {
+                due += 1;
+                "🗑 готов к архивированию".to_string()
+            } else {
+                format!("⏳ осталось {remaining} дн.")
+            }
+        } else {
+            "⚪ отсчёт ещё не начат".to_string()
+        };
+        if lines.len() < 30 {
+            lines.push(format!("• {name} — {status}"));
+        }
+    }
+    bot.send_message(chat, format!("🧹 Политика очистки · {}\n\nАвтоочистка: {}\nСрок: {retention} дн.\nПредупреждение: за {warning} дн.\nАктивных ключей: {}\nЗащищено: {protected}\nГотово к архивированию: {due}\n\nЗащита применяется к оплаченным ключам, открытым обращениям, незавершённым заменам и ручным исключениям. Нажатие на ключ ниже переключает исключение «не удалять».\n\n{}{}", server.name, if enabled { "✅ включена" } else { "⏸ выключена" }, names.len(), if lines.is_empty() { "—".into() } else { lines.join("\n") }, if names.len() > 30 { format!("\n…и ещё {}", names.len() - 30) } else { String::new() }))
+        .reply_markup(menu::server_cleanup_menu(id, enabled, retention, &buttons))
+        .await?;
+    Ok(())
+}
+
 async fn notify_unavailable_server_owners(
     bot: &Bot,
     settings: &Store,
@@ -3241,6 +3361,10 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerUnavailableSet(_, _)
         | ServerUnavailableReason(_, _)
         | ServerRetirement(_)
+        | ServerCleanup(_)
+        | ServerCleanupEnabled(_, _)
+        | ServerCleanupDays(_, _)
+        | ServerCleanupExempt(_, _, _)
         | ServerArchiveList
         | ServerArchiveAsk(_)
         | ServerArchiveConfirm(_)
@@ -7833,6 +7957,46 @@ async fn callback_handler(
             bot.send_message(chat, format!("📦 Вывод сервера из эксплуатации\n\nСервер: {}\nСостояние: {}\nПричина: {}\nАвтоархив ключей: {cleanup}\n\nОсталось активных ключей: {keys}\nВладельцев: {owners}\nЗамен ожидает подтверждения: {pending}\n\nПорядок действий:\n1. Укажите причину отключения.\n2. Синхронизируйте ключи.\n3. Уведомите владельцев и дождитесь замен.\n4. Через 30 дней невосстановленные ключи будут скрыты автоматически.\n5. Когда активных ключей не останется, переместите сервер в архив.\n\nПоследние действия:\n{}", server.name, if server.operator_unavailable { "❌ нерабочий" } else { "✅ рабочий" }, server.unavailable_reason.as_deref().unwrap_or("не указана"), if history.is_empty() { "—".into() } else { history.join("\n") }))
                 .reply_markup(menu::server_retirement_menu(id, server.operator_unavailable))
                 .await?;
+        }
+        Action::ServerCleanup(id) => {
+            server_cleanup_screen(&bot, chat, &settings, &vpn, id).await?;
+        }
+        Action::ServerCleanupEnabled(id, enabled) => {
+            settings.set_blocked_key_cleanup_enabled(enabled);
+            bot.send_message(
+                chat,
+                if enabled {
+                    "✅ Автоматическая очистка невосстановленных ключей включена."
+                } else {
+                    "⏸ Автоматическая очистка выключена. Предупреждения и архивирование выполняться не будут."
+                },
+            )
+            .await?;
+            server_cleanup_screen(&bot, chat, &settings, &vpn, id).await?;
+        }
+        Action::ServerCleanupDays(id, days) => {
+            if settings.set_blocked_key_cleanup_days(days) {
+                bot.send_message(chat, format!("✅ Срок хранения изменён: {days} дн."))
+                    .await?;
+            } else {
+                bot.send_message(chat, "Недопустимый срок хранения.")
+                    .await?;
+            }
+            server_cleanup_screen(&bot, chat, &settings, &vpn, id).await?;
+        }
+        Action::ServerCleanupExempt(id, name, exempt) => {
+            if settings.set_client_cleanup_exempt(&name, exempt, uid, now_epoch()) {
+                bot.send_message(
+                    chat,
+                    if exempt {
+                        format!("🛡 Ключ «{name}» исключён из автоматической очистки.")
+                    } else {
+                        format!("🗑 Для ключа «{name}» снова применяется общая политика очистки.")
+                    },
+                )
+                .await?;
+            }
+            server_cleanup_screen(&bot, chat, &settings, &vpn, id).await?;
         }
         Action::ServerMaintenanceAsk(id) => {
             if let Some(server) = settings.vpn_server(id) {
@@ -13165,6 +13329,7 @@ mod tests {
             menu::server_archive_confirm_menu(1),
             menu::server_unavailable_reason_menu(1),
             menu::server_retirement_menu(1, false),
+            menu::server_cleanup_menu(1, true, 30, &[("old-key".into(), false)]),
             menu::server_health_menu(1),
             menu::server_keys_hub_menu(1),
             menu::server_connection_hub_menu(1),
@@ -13338,6 +13503,10 @@ mod tests {
             ServerUnavailableSet(1, true),
             ServerUnavailableReason(1, "broken".into()),
             ServerRetirement(1),
+            ServerCleanup(1),
+            ServerCleanupEnabled(1, true),
+            ServerCleanupDays(1, 30),
+            ServerCleanupExempt(1, "old-key".into(), true),
             ServerArchiveList,
             ServerArchiveAsk(1),
             ServerArchiveConfirm(1),
@@ -13588,6 +13757,10 @@ mod tests {
                 ServerUnavailableSet(_, _) => {}
                 ServerUnavailableReason(_, _) => {}
                 ServerRetirement(_) => {}
+                ServerCleanup(_) => {}
+                ServerCleanupEnabled(_, _) => {}
+                ServerCleanupDays(_, _) => {}
+                ServerCleanupExempt(_, _, _) => {}
                 ServerArchiveList => {}
                 ServerArchiveAsk(_) => {}
                 ServerArchiveConfirm(_) => {}
@@ -14008,6 +14181,14 @@ mod tests {
                 false,
             ),
             (Action::ServerRetirement(1), true, false),
+            (Action::ServerCleanup(1), true, false),
+            (Action::ServerCleanupEnabled(1, true), true, false),
+            (Action::ServerCleanupDays(1, 30), true, false),
+            (
+                Action::ServerCleanupExempt(1, "old-key".into(), true),
+                true,
+                false,
+            ),
             (Action::ServerArchiveList, true, false),
             (Action::ServerArchiveAsk(1), true, false),
             (Action::ServerArchiveConfirm(1), true, false),

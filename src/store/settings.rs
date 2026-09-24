@@ -142,6 +142,30 @@ impl Store {
     pub fn set_default_vpn_server(&self, server_id: i64) {
         self.set_json("default_vpn_server", &server_id);
     }
+    pub fn blocked_key_cleanup_enabled(&self) -> bool {
+        self.get_json("blocked_key_cleanup_enabled").unwrap_or(true)
+    }
+    pub fn set_blocked_key_cleanup_enabled(&self, enabled: bool) {
+        self.set_json("blocked_key_cleanup_enabled", &enabled);
+    }
+    pub fn blocked_key_cleanup_days(&self) -> i64 {
+        self.get_json::<i64>("blocked_key_cleanup_days")
+            .filter(|days| matches!(days, 7 | 14 | 30 | 60 | 90))
+            .unwrap_or(30)
+    }
+    pub fn set_blocked_key_cleanup_days(&self, days: i64) -> bool {
+        if !matches!(days, 7 | 14 | 30 | 60 | 90) {
+            return false;
+        }
+        self.set_json("blocked_key_cleanup_days", &days);
+        true
+    }
+    pub fn blocked_key_warning_days(&self) -> i64 {
+        let retention = self.blocked_key_cleanup_days();
+        self.get_json::<i64>("blocked_key_warning_days")
+            .filter(|days| *days > 0 && *days < retention)
+            .unwrap_or(7.min(retention.saturating_sub(1)))
+    }
     pub fn server_billing_snoozed_until(&self, server_id: i64) -> i64 {
         self.get_json(&format!("server_billing_snooze:{server_id}"))
             .unwrap_or_default()

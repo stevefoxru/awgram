@@ -773,6 +773,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(client_name,blocked_at,threshold_days)
     );
     "#,
+    // v37: индивидуальная защита ключа от автоматической очистки.
+    r#"
+    ALTER TABLE clients ADD COLUMN cleanup_exempt INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE clients ADD COLUMN cleanup_exempt_at INTEGER;
+    ALTER TABLE clients ADD COLUMN cleanup_exempt_by INTEGER;
+    "#,
 ];
 
 pub struct Store {

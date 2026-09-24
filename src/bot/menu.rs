@@ -658,10 +658,56 @@ pub fn server_retirement_menu(id: i64, unavailable: bool) -> InlineKeyboardMarku
         &format!("server:panel:sync:{id}"),
     )]);
     rows.push(vec![cb(
+        "🧹 Политика и список очистки",
+        &format!("server:cleanup:{id}"),
+    )]);
+    rows.push(vec![cb(
         "🗄 Убрать сервер в архив",
         &format!("server:archive:ask:{id}"),
     )]);
     rows.push(vec![cb("⬅️ К серверу", &format!("server:{id}"))]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn server_cleanup_menu(
+    id: i64,
+    enabled: bool,
+    retention_days: i64,
+    clients: &[(String, bool)],
+) -> InlineKeyboardMarkup {
+    let mut rows = vec![vec![cb(
+        if enabled {
+            "⏸ Отключить автоочистку"
+        } else {
+            "▶️ Включить автоочистку"
+        },
+        &format!("server:cleanup:enabled:{id}:{}", (!enabled) as u8),
+    )]];
+    rows.push(
+        [7, 14, 30, 60, 90]
+            .into_iter()
+            .map(|days| {
+                cb(
+                    &if days == retention_days {
+                        format!("✅ {days} дн.")
+                    } else {
+                        format!("{days} дн.")
+                    },
+                    &format!("server:cleanup:days:{id}:{days}"),
+                )
+            })
+            .collect(),
+    );
+    for (name, exempt) in clients.iter().take(20) {
+        rows.push(vec![cb(
+            &format!("{} {}", if *exempt { "🛡" } else { "🗑" }, name),
+            &format!("server:cleanup:exempt:{id}:{}:{name}", (!*exempt) as u8),
+        )]);
+    }
+    rows.push(vec![cb(
+        "⬅️ К выводу сервера",
+        &format!("server:retire:{id}"),
+    )]);
     InlineKeyboardMarkup::new(rows)
 }
 

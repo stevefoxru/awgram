@@ -1521,6 +1521,18 @@ impl Store {
         .unwrap_or(0)
     }
 
+    pub fn user_has_open_support(&self, user_id: i64) -> bool {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE user_id=?1 AND status!='closed')",
+                [user_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap_or(0)
+            != 0
+    }
+
     pub fn recent_payments(&self, limit: usize) -> Vec<PaymentRequest> {
         self.with_conn(|c| {
             let mut stmt = c.prepare(

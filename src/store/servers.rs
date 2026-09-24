@@ -1023,6 +1023,7 @@ impl Store {
                         MIN(COALESCE(s.unavailable_at,9223372036854775807),COALESCE(s.rkn_blocked_at,9223372036854775807),COALESCE(s.archived_at,9223372036854775807))
                    FROM clients c JOIN vpn_servers s ON s.id=c.server_id
                   WHERE c.removed_at IS NULL
+                    AND c.cleanup_exempt=0
                     AND (s.operator_unavailable=1 OR s.blocked_by_rkn=1 OR s.archived_at IS NOT NULL)
                     AND MIN(COALESCE(s.unavailable_at,9223372036854775807),COALESCE(s.rkn_blocked_at,9223372036854775807),COALESCE(s.archived_at,9223372036854775807))<=?1
                     AND NOT EXISTS(SELECT 1 FROM key_replacements kr WHERE kr.old_client=c.name AND kr.status='pending')
@@ -1070,6 +1071,34 @@ impl Store {
                 rusqlite::params![name, blocked_at, threshold_days],
             )
         });
+    }
+
+    pub fn client_cleanup_exempt(&self, name: &str) -> bool {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT cleanup_exempt FROM clients WHERE name=?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap_or(0)
+            != 0
+    }
+
+    pub fn set_client_cleanup_exempt(
+        &self,
+        name: &str,
+        exempt: bool,
+        actor: i64,
+        now: i64,
+    ) -> bool {
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE clients SET cleanup_exempt=?2,cleanup_exempt_at=CASE WHEN ?2=1 THEN ?3 ELSE NULL END,cleanup_exempt_by=CASE WHEN ?2=1 THEN ?4 ELSE NULL END WHERE name=?1 AND removed_at IS NULL",
+                rusqlite::params![name, exempt as i64, now, actor],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
     }
 
     pub fn revive_client(&self, name: &str) -> bool {

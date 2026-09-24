@@ -126,13 +126,19 @@ async fn notify_admins(bot: &Bot, cfg: &Config, text: String) -> bool {
     delivered
 }
 
-async fn cleanup_blocked_clients(bot: &Bot, cfg: &Config, store: &Store, now: i64) {
-    const RETENTION_DAYS: i64 = 30;
-    const WARNING_DAYS: i64 = 7;
+async fn cleanup_blocked_clients(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
+    if !store.blocked_key_cleanup_enabled() {
+        return;
+    }
+    let retention_days = store.blocked_key_cleanup_days();
+    let warning_days = store.blocked_key_warning_days();
 
-    let due = store.blocked_clients_for_cleanup(now, RETENTION_DAYS);
+    let due = store.blocked_clients_for_cleanup(now, retention_days);
     let mut removed = Vec::new();
     for client in due {
+        if vpn_key_is_protected(vpn, store, &client, now) {
+            continue;
+        }
         if !store.retire_client(&client.name, now) {
             continue;
         }
@@ -141,7 +147,7 @@ async fn cleanup_blocked_clients(bot: &Bot, cfg: &Config, store: &Store, now: i6
             let _ = bot
                 .send_message(
                     ChatId(owner),
-                    format!("🗄 Старое подключение «{}» удалено из личного кабинета\n\nСервер «{}» был отмечен нерабочим более 30 дней назад. Вы не запускали или не завершили замену, поэтому устаревший ключ архивирован. Он больше не отображается среди активных подключений. Если VPN всё ещё нужен, приобретите новый ключ или обратитесь в поддержку.", client.name, client.server_name),
+                    format!("🗄 Старое подключение «{}» удалено из личного кабинета\n\nСервер «{}» был отмечен нерабочим более {retention_days} дней назад. Вы не запускали или не завершили замену, поэтому устаревший ключ архивирован. Он больше не отображается среди активных подключений. Если VPN всё ещё нужен, приобретите новый ключ или обратитесь в поддержку.", client.name, client.server_name),
                 )
                 .reply_markup(crate::bot::menu::customer_keyboard())
                 .await;
@@ -160,11 +166,14 @@ async fn cleanup_blocked_clients(bot: &Bot, cfg: &Config, store: &Store, now: i6
         .await;
     }
 
-    for client in store.blocked_clients_for_cleanup(now, RETENTION_DAYS - WARNING_DAYS) {
+    for client in store.blocked_clients_for_cleanup(now, retention_days - warning_days) {
+        if vpn_key_is_protected(vpn, store, &client, now) {
+            continue;
+        }
         if !store.mark_blocked_cleanup_notification(
             &client.name,
             client.blocked_at,
-            WARNING_DAYS,
+            warning_days,
             now,
         ) {
             continue;
@@ -175,7 +184,7 @@ async fn cleanup_blocked_clients(bot: &Bot, cfg: &Config, store: &Store, now: i6
         if bot
             .send_message(
                 ChatId(owner),
-                format!("⚠️ Старый VPN-ключ будет удалён через 7 дней\n\nПодключение: {}\nСервер: {}\n\nСервер отмечен нерабочим. Замените ключ в разделе «🔑 Подключения» до окончания 30-дневного срока. Ключ с незавершённой безопасной заменой автоматически не удаляется.", client.name, client.server_name),
+                format!("⚠️ Старый VPN-ключ будет удалён через {warning_days} дн.\n\nПодключение: {}\nСервер: {}\n\nСервер отмечен нерабочим. Замените ключ в разделе «🔑 Подключения» до окончания {retention_days}-дневного срока. Оплаченные ключи, открытые обращения и незавершённые безопасные замены автоматически не удаляются.", client.name, client.server_name),
             )
             .reply_markup(crate::bot::menu::customer_keyboard())
             .await
@@ -184,10 +193,23 @@ async fn cleanup_blocked_clients(bot: &Bot, cfg: &Config, store: &Store, now: i6
             store.unmark_blocked_cleanup_notification(
                 &client.name,
                 client.blocked_at,
-                WARNING_DAYS,
+                warning_days,
             );
         }
     }
+}
+
+fn vpn_key_is_protected(
+    vpn: &Vpn,
+    store: &Store,
+    client: &crate::store::BlockedClientCleanup,
+    now: i64,
+) -> bool {
+    vpn.client_expiry(&client.name)
+        .is_some_and(|expires_at| expires_at > now)
+        || client
+            .owner_user_id
+            .is_some_and(|owner| store.user_has_open_support(owner))
 }
 
 fn vpn_problem(report: &crate::vpn::wire::CheckReport) -> Option<String> {
@@ -231,7 +253,7 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
     if removed_sessions > 0 {
         tracing::info!(removed_sessions, "устаревшие сессии ЛК удалены");
     }
-    cleanup_blocked_clients(bot, cfg, store, now).await;
+    cleanup_blocked_clients(bot, cfg, vpn, store, now).await;
 
     for server in store.vpn_servers() {
         let assigned = store.server_client_count(server.id);
