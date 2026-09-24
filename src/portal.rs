@@ -451,7 +451,9 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         .store
         .vpn_servers()
         .into_iter()
+        .chain(state.store.archived_vpn_servers())
         .map(|server| {
+            let runtime = state.store.server_runtime_summary(server.id, now);
             serde_json::json!({
                 "id": server.id,
                 "name": server.name,
@@ -461,6 +463,14 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
                 "provisioning": server.enabled_for_provisioning,
                 "clients": state.store.server_client_count(server.id),
                 "capacity": server.capacity,
+                "archived": server.archived_at.is_some(),
+                "blocked_by_rkn": server.blocked_by_rkn,
+                "operator_unavailable": server.operator_unavailable,
+                "unavailable_reason": server.unavailable_reason,
+                "telemetry_at": runtime.observed_at,
+                "online": runtime.online,
+                "rx": runtime.rx,
+                "tx": runtime.tx,
             })
         })
         .collect::<Vec<_>>();
@@ -471,8 +481,104 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "payments_pending": state.store.pending_payments().len(),
         "revenue_kopecks": state.store.approved_revenue_kopecks(),
         "support_open": state.store.open_support_count(),
+        "cleanup": {"enabled": state.store.blocked_key_cleanup_enabled(), "days": state.store.blocked_key_cleanup_days()},
     }))
     .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct AdminServerAction {
+    action: String,
+    reason: Option<String>,
+    days: Option<i64>,
+}
+
+async fn admin_server_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(input): Json<AdminServerAction>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&user_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let now = now_epoch();
+    if input.action == "cleanup" {
+        return if input
+            .days
+            .is_some_and(|days| state.store.set_blocked_key_cleanup_days(days))
+        {
+            Json(serde_json::json!({"ok":true})).into_response()
+        } else {
+            (
+                StatusCode::BAD_REQUEST,
+                "Допустимые сроки: 7, 14, 30, 60 или 90 дней",
+            )
+                .into_response()
+        };
+    }
+    let Some(server) = state.store.vpn_server(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let result = match input.action.as_str() {
+        "unavailable" => {
+            let reason = input
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            if reason.is_none() {
+                return (StatusCode::BAD_REQUEST, "Укажите причину отключения").into_response();
+            }
+            state
+                .store
+                .set_server_operator_unavailable(id, true, reason, user_id, now)
+        }
+        "available" => state
+            .store
+            .set_server_operator_unavailable(id, false, None, user_id, now),
+        "archive" => state.store.set_server_archived(id, true, user_id, now),
+        "restore" => state.store.set_server_archived(id, false, user_id, now),
+        "provision_on" => state.store.set_server_provisioning(id, true, now),
+        "provision_off" => state.store.set_server_provisioning(id, false, now),
+        "snapshot" => {
+            let Some(campaign) = state
+                .store
+                .ensure_server_migration_campaign(id, user_id, now)
+            else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            let items = state.store.server_migration_items(campaign.id);
+            return Json(serde_json::json!({
+                "ok": true,
+                "server": server.name,
+                "campaign_id": campaign.id,
+                "total": items.len(),
+                "notified": items.iter().filter(|item| item.notified_at.is_some()).count(),
+                "pending": items.iter().filter(|item| item.replacement_pending).count(),
+                "completed": items.iter().filter(|item| item.completed_at.is_some() || !item.active).count(),
+            }))
+            .into_response();
+        }
+        _ => return (StatusCode::BAD_REQUEST, "Неизвестное действие").into_response(),
+    };
+    if result {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            "Состояние уже установлено или действие недоступно",
+        )
+            .into_response()
+    }
 }
 
 async fn logout(State(state): State<PortalState>, headers: HeaderMap) -> Response {
@@ -872,6 +978,7 @@ pub async fn run(
         .route("/api/email/login/confirm", post(confirm_email_login))
         .route("/api/me", get(me))
         .route("/api/admin/overview", get(admin_overview))
+        .route("/api/admin/servers/{id}/action", post(admin_server_action))
         .route("/api/logout", post(logout))
         .route("/api/keys/{name}/config", get(download_config))
         .route("/api/keys/{name}/qr", get(download_qr))
