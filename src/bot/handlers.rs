@@ -8094,7 +8094,7 @@ async fn callback_handler(
                         unowned += without_owner;
                         let notice = if server.blocked_by_rkn {
                             let (_, delivered, affected) =
-                                notify_rkn_server_owners(&bot, &settings, &server).await;
+                                notify_unavailable_server_owners(&bot, &settings, &server).await;
                             format!(" · замена предложена: {delivered}/{affected}")
                         } else {
                             String::new()
