@@ -428,6 +428,19 @@ impl Store {
         .unwrap_or_default()
     }
 
+    pub fn server_unowned_client_count(&self, server_id: i64) -> usize {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM clients
+                 WHERE server_id=?1 AND owner_user_id IS NULL AND removed_at IS NULL",
+                [server_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .unwrap_or(0)
+        .max(0) as usize
+    }
+
     pub fn begin_server_maintenance(&self, id: i64, actor_id: i64, now: i64) -> bool {
         self.with_conn(|c| {
             let tx = c.unchecked_transaction()?;
@@ -731,9 +744,17 @@ impl Store {
                     "INSERT INTO clients(name,ip,first_seen,last_seen,server_id,protocol,instance_id,removed_at)
                      VALUES(?1,?2,?3,?3,?4,'amneziawg-panel',
                        (SELECT id FROM vpn_instances WHERE server_id=?4 AND is_default=1),NULL)
-                     ON CONFLICT(name) DO UPDATE SET
-                       ip=excluded.ip,last_seen=excluded.last_seen,server_id=excluded.server_id,
-                       protocol='amneziawg-panel',instance_id=excluded.instance_id,removed_at=NULL",
+                 ON CONFLICT(name) DO UPDATE SET
+                       ip=excluded.ip,last_seen=excluded.last_seen,
+                       server_id=CASE
+                         WHEN clients.removed_at IS NULL AND clients.server_id IS NULL THEN excluded.server_id
+                         ELSE clients.server_id END,
+                       protocol=CASE
+                         WHEN clients.removed_at IS NULL AND clients.server_id IS NULL THEN 'amneziawg-panel'
+                         ELSE clients.protocol END,
+                       instance_id=CASE
+                         WHEN clients.removed_at IS NULL AND clients.server_id IS NULL THEN excluded.instance_id
+                         ELSE clients.instance_id END",
                     rusqlite::params![name, address, now, server_id],
                 )?;
             }
@@ -1266,5 +1287,17 @@ mod tests {
         assert_eq!(server.panel_url.as_deref(), Some("http://panel:1240"));
         assert_eq!(store.client_owner("old"), Some(7));
         assert_eq!(store.client_owner("new"), None);
+
+        assert!(store.retire_client("old", 103));
+        assert_eq!(
+            store.sync_panel_clients(id, &[("old".into(), "10.8.0.2".into())], 104),
+            1
+        );
+        assert_eq!(store.client_owner("old"), None);
+        assert!(!store.user_client_names(7).contains(&"old".to_string()));
+        assert_eq!(
+            store.client_vpn_server_including_retired("old").unwrap().id,
+            id
+        );
     }
 }

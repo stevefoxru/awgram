@@ -65,6 +65,7 @@ pub enum Action {
     ServerEnrollRevoke(i64),
     ServerSetDefault(i64),
     ServerRknSet(i64, bool),
+    ServerRknNotify(i64),
     ServerMaintenanceAsk(i64),
     ServerMaintenanceStart(i64),
     ServerMaintenanceStartNotify(i64),
@@ -75,6 +76,7 @@ pub enum Action {
     ServerProvisioningProbe(i64),
     ServerPanelConnect(i64),
     ServerAmneziaConnect(i64),
+    ServerPanelSyncAll,
     ServerPanelSync(i64),
     ServerPanelAudit(i64),
     ServerPanelArchiveMissingAsk(i64),
@@ -218,6 +220,7 @@ pub enum Action {
     BuyMethod(i64, String),
     BuyPaid(i64),
     MyKeys,
+    MyKeysPage(usize),
     Profile,
     Portal,
     Balance,
@@ -326,6 +329,7 @@ fn parse_callback(data: &str) -> Action {
         "gscope" => Action::GroupScopeAsk,
         "buy" => Action::Buy,
         "mykeys" => Action::MyKeys,
+        "server:sync-all" => Action::ServerPanelSyncAll,
         "profile" => Action::Profile,
         "portal" => Action::Portal,
         "balance" => Action::Balance,
@@ -420,6 +424,8 @@ fn parse_callback(data: &str) -> Action {
                 Action::SetClientEnabled(v.to_string(), true)
             } else if let Some(v) = data.strip_prefix("owner:disable:") {
                 Action::SetClientEnabled(v.to_string(), false)
+            } else if let Some(v) = data.strip_prefix("mykeys:page:") {
+                v.parse().map(Action::MyKeysPage).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("mykey:") {
                 Action::CustomerKey(v.to_string())
             } else if let Some(v) = data.strip_prefix("move:choose:") {
@@ -686,6 +692,10 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:rkn:off:") {
                 v.parse()
                     .map(|id| Action::ServerRknSet(id, false))
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:rkn:notify:") {
+                v.parse()
+                    .map(Action::ServerRknNotify)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:enroll:") {
                 v.parse()
@@ -1876,6 +1886,49 @@ fn customer_key_list(
     (lines, buttons)
 }
 
+async fn send_customer_keys_page(
+    bot: &Bot,
+    chat: ChatId,
+    settings: &Store,
+    vpn: &Vpn,
+    uid: i64,
+    requested_page: usize,
+) -> HandlerResult {
+    settings.repair_user_key_replacements(uid, now_epoch());
+    let (lines, buttons) = customer_key_list(settings, vpn, uid);
+    if lines.is_empty() {
+        bot.send_message(
+            chat,
+            "🔑 У вас пока нет ключей. Вы можете приобрести ключ или обратиться в поддержку.",
+        )
+        .reply_markup(menu::customer_keyboard())
+        .await?;
+        send_pending_replacements(bot, chat, uid, settings).await?;
+        return Ok(());
+    }
+    const PAGE_SIZE: usize = 6;
+    let pages = lines.len().div_ceil(PAGE_SIZE);
+    let page = requested_page.min(pages.saturating_sub(1));
+    let start = page * PAGE_SIZE;
+    let end = (start + PAGE_SIZE).min(lines.len());
+    let page_lines = &lines[start..end];
+    let page_buttons = &buttons[start..end];
+    bot.send_message(
+        chat,
+        format!(
+            "🔑 Ваши подключения · страница {}/{}\nВсего ключей: {}\n\n{}\n\nОткройте карточку нужного подключения. Архивные и заменённые ключи здесь не показываются.",
+            page + 1,
+            pages,
+            lines.len(),
+            page_lines.join("\n\n")
+        ),
+    )
+    .reply_markup(menu::customer_keys_page_menu(page_buttons, page, pages))
+    .await?;
+    send_pending_replacements(bot, chat, uid, settings).await?;
+    Ok(())
+}
+
 async fn admin_dashboard(bot: &Bot, chat: ChatId, vpn: &Vpn, settings: &Store) -> HandlerResult {
     let now = now_epoch();
     let clients = vpn.list().await.unwrap_or_default();
@@ -2501,6 +2554,87 @@ async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
     Ok(())
 }
 
+async fn notify_rkn_server_owners(
+    bot: &Bot,
+    settings: &Store,
+    server: &crate::store::VpnServer,
+) -> (usize, usize, usize) {
+    let mut owners = std::collections::BTreeMap::<i64, Vec<String>>::new();
+    for (owner, name) in settings.server_client_owners(server.id) {
+        owners.entry(owner).or_default().push(name);
+    }
+    let affected = owners.values().map(Vec::len).sum();
+    let mut delivered = 0usize;
+    for (owner, names) in &owners {
+        let keys = names
+            .iter()
+            .map(|name| {
+                let label = settings.device_label(name).unwrap_or_else(|| name.clone());
+                (name.clone(), format!("🔁 {label}"))
+            })
+            .collect::<Vec<_>>();
+        let text = if names.len() == 1 {
+            format!("🚨 Необходимо заменить VPN-ключ\n\nСервер «{}» заблокирован и старое подключение больше не считается рабочим. Нажмите кнопку ниже — бот создаст замену на доступном сервере и сохранит срок подписки. Старый ключ удалится только после проверки нового.", server.name)
+        } else {
+            format!("🚨 Необходимо заменить VPN-ключи\n\nСервер «{}» заблокирован. На нём найдено ваших ключей: {}. Одной кнопкой можно запустить безопасную замену всех подключений с сохранением сроков.", server.name, names.len())
+        };
+        if bot
+            .send_message(ChatId(*owner), text)
+            .reply_markup(menu::rkn_replacement_menu(server.id, &keys))
+            .await
+            .is_ok()
+        {
+            delivered += 1;
+        }
+    }
+    (owners.len(), delivered, affected)
+}
+
+async fn sync_one_panel_server(
+    vpn: &Vpn,
+    settings: &Store,
+    server: &crate::store::VpnServer,
+) -> crate::error::Result<(Vec<crate::vpn::panel::PanelClient>, usize)> {
+    let secret = settings
+        .panel_password(server.id)
+        .ok_or_else(|| crate::error::Error::Parse("пароль панели не настроен".into()))?;
+    let clients = vpn.panel_clients(server, &secret).await?;
+    let now = now_epoch();
+    let synced = settings.sync_panel_clients(
+        server.id,
+        &clients
+            .iter()
+            .map(|client| (client.name.clone(), client.address.clone()))
+            .collect::<Vec<_>>(),
+        now,
+    );
+    settings.ingest_panel(
+        server.id,
+        now,
+        &clients
+            .iter()
+            .map(|client| crate::store::Sample {
+                name: client.name.clone(),
+                ip: client.address.clone(),
+                rx: client.transfer_rx,
+                tx: client.transfer_tx,
+                last_handshake: client.last_handshake_epoch(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    for client in &clients {
+        let expiry = client
+            .expired_at
+            .as_deref()
+            .and_then(|value| value.get(..10))
+            .and_then(crate::calendar::parse_date);
+        if let Err(error) = vpn.cache_client_expiry(&client.name, expiry) {
+            tracing::warn!(%error, client = %client.name, "не удалось сохранить срок ключа панели");
+        }
+    }
+    Ok((clients, synced))
+}
+
 fn parse_minor(value: &str) -> Option<i64> {
     let normalized = value.trim().replace(',', ".");
     let mut parts = normalized.split('.');
@@ -2798,6 +2932,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | BuyMethod(_, _)
         | BuyPaid(_)
         | MyKeys
+        | MyKeysPage(_)
         | Profile
         | Portal
         | Balance
@@ -2933,6 +3068,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerEnrollRevoke(_)
         | ServerSetDefault(_)
         | ServerRknSet(_, _)
+        | ServerRknNotify(_)
         | ServerMaintenanceAsk(_)
         | ServerMaintenanceStart(_)
         | ServerMaintenanceStartNotify(_)
@@ -2943,6 +3079,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerProvisioningProbe(_)
         | ServerPanelConnect(_)
         | ServerAmneziaConnect(_)
+        | ServerPanelSyncAll
         | ServerPanelSync(_)
         | ServerPanelAudit(_)
         | ServerPanelArchiveMissingAsk(_)
@@ -5423,22 +5560,7 @@ async fn message_handler(
                 .await?;
             }
             "🔑 Мои ключи" => {
-                settings.repair_user_key_replacements(uid, now_epoch());
-                let (lines, buttons) = customer_key_list(&settings, &vpn, uid);
-                let text = if lines.is_empty() {
-                    "🔑 У вас пока нет ключей. Вы можете приобрести ключ или обратиться в поддержку.".to_string()
-                } else {
-                    format!(
-                        "🔑 Ваши подключения\n\n{}\n\nИсправность ключа и подключение устройства показаны отдельно. Откройте нужную карточку для QR, конфигурации и инструкции.",
-                        lines.join("\n\n")
-                    )
-                };
-                let mut request = bot.send_message(msg.chat.id, text);
-                if !buttons.is_empty() {
-                    request = request.reply_markup(menu::customer_keys_menu(&buttons));
-                }
-                request.await?;
-                send_pending_replacements(&bot, msg.chat.id, uid, &settings).await?;
+                send_customer_keys_page(&bot, msg.chat.id, &settings, &vpn, uid, 0).await?;
             }
             "➕ Пополнить" => {
                 bot.send_message(
@@ -6530,6 +6652,7 @@ async fn callback_handler(
             | Action::BuyMethod(_, _)
             | Action::BuyPaid(_)
             | Action::MyKeys
+            | Action::MyKeysPage(_)
             | Action::Profile
             | Action::Portal
             | Action::Balance
@@ -7275,34 +7398,24 @@ async fn callback_handler(
                     .reply_markup(menu::server_card_menu(id)).await?;
                 return Ok(());
             }
-            let mut owners = std::collections::BTreeMap::<i64, Vec<String>>::new();
-            for (owner, name) in settings.server_client_owners(id) {
-                owners.entry(owner).or_default().push(name);
+            let (owners, delivered, affected) =
+                notify_rkn_server_owners(&bot, &settings, &server).await;
+            bot.send_message(chat, format!("🚫 «{}» отмечен как заблокированный РКН. Выдача на нём отключена.\n\nВладельцев: {owners}\nУведомлений доставлено: {delivered}\nКлючей затронуто: {affected}", server.name))
+                .reply_markup(menu::server_card_menu(id)).await?;
+        }
+        Action::ServerRknNotify(id) => {
+            let Some(server) = settings.vpn_server(id) else {
+                return Ok(());
+            };
+            if !server.blocked_by_rkn {
+                bot.send_message(chat, "Сначала отметьте сервер как заблокированный РКН.")
+                    .reply_markup(menu::server_card_menu(id))
+                    .await?;
+                return Ok(());
             }
-            let mut delivered = 0usize;
-            for (owner, names) in &owners {
-                let keys = names
-                    .iter()
-                    .map(|name| {
-                        let label = settings.device_label(name).unwrap_or_else(|| name.clone());
-                        (name.clone(), format!("🔁 {label}"))
-                    })
-                    .collect::<Vec<_>>();
-                let text = if names.len() > 2 {
-                    format!("🚨 Сервер VPN заблокирован\n\nСервер «{}» отмечен как недоступный из российских сетей. У вас на нём {} ключа(ей). Нажмите кнопку ниже: бот безопасно создаст новые подключения на рабочем сервере, сохранив сроки подписок. Старые ключи будут скрыты, но окончательно удалятся только после подтверждения.", server.name, names.len())
-                } else {
-                    format!("🚨 Сервер VPN заблокирован\n\nСервер «{}» отмечен как недоступный из российских сетей. Выберите ключ для безопасной замены на рабочем сервере.", server.name)
-                };
-                if bot
-                    .send_message(ChatId(*owner), text)
-                    .reply_markup(menu::rkn_replacement_menu(id, &keys))
-                    .await
-                    .is_ok()
-                {
-                    delivered += 1;
-                }
-            }
-            bot.send_message(chat, format!("🚫 «{}» отмечен как заблокированный РКН. Выдача на нём отключена.\n\nВладельцев: {}\nУведомлений доставлено: {}\nКлючей затронуто: {}", server.name, owners.len(), delivered, owners.values().map(Vec::len).sum::<usize>()))
+            let (owners, delivered, affected) =
+                notify_rkn_server_owners(&bot, &settings, &server).await;
+            bot.send_message(chat, format!("📣 Предложение заменить нерабочие ключи отправлено.\n\nВладельцев: {owners}\nДоставлено: {delivered}\nКлючей: {affected}\n\nЭту кнопку можно использовать после синхронизации и ручной привязки новых ключей."))
                 .reply_markup(menu::server_card_menu(id)).await?;
         }
         Action::ServerMaintenanceAsk(id) => {
@@ -7672,19 +7785,59 @@ async fn callback_handler(
                 }
             }
         }
+        Action::ServerPanelSyncAll => {
+            let servers = settings
+                .vpn_servers()
+                .into_iter()
+                .filter(|server| server.protocol == "amneziawg-panel")
+                .collect::<Vec<_>>();
+            if servers.is_empty() {
+                bot.send_message(chat, "Нет подключённых AWG-панелей для синхронизации.")
+                    .reply_markup(menu::servers_menu(&settings.vpn_servers()))
+                    .await?;
+                return Ok(());
+            }
+            bot.send_message(
+                chat,
+                format!("⏳ Синхронизирую ключи со всех панелей: {}…", servers.len()),
+            )
+            .await?;
+            let mut lines = Vec::new();
+            let mut total = 0usize;
+            let mut unowned = 0usize;
+            for server in servers {
+                match sync_one_panel_server(&vpn, &settings, &server).await {
+                    Ok((clients, _)) => {
+                        total += clients.len();
+                        let without_owner = settings.server_unowned_client_count(server.id);
+                        unowned += without_owner;
+                        let notice = if server.blocked_by_rkn {
+                            let (_, delivered, affected) =
+                                notify_rkn_server_owners(&bot, &settings, &server).await;
+                            format!(" · замена предложена: {delivered}/{affected}")
+                        } else {
+                            String::new()
+                        };
+                        lines.push(format!(
+                            "✅ {}: {} ключей · без владельца: {without_owner}{notice}",
+                            server.name,
+                            clients.len()
+                        ));
+                    }
+                    Err(error) => lines.push(format!("❌ {}: {error}", server.name)),
+                }
+            }
+            bot.send_message(chat, format!("🔄 Полная синхронизация завершена\n\n{}\n\nВсего найдено: {total}\nБез владельца: {unowned}\n\nАрхивные и заменённые ключи не были возвращены в кабинеты. Ключи без владельца необходимо один раз привязать к пользователю в разделе «Ключи».", lines.join("\n")))
+                .reply_markup(menu::servers_menu(&settings.vpn_servers())).await?;
+        }
         Action::ServerPanelSync(id) => {
             if let Some(server) = settings
                 .vpn_server(id)
                 .filter(|server| server.protocol == "amneziawg-panel")
             {
-                let result = match settings.panel_password(id) {
-                    Some(secret) => vpn.panel_clients(&server, &secret).await,
-                    None => Err(crate::error::Error::Parse(
-                        "пароль панели не настроен".into(),
-                    )),
-                };
+                let result = sync_one_panel_server(&vpn, &settings, &server).await;
                 match result {
-                    Ok(clients) => {
+                    Ok((clients, synced)) => {
                         let now = now_epoch();
                         let enabled = clients.iter().filter(|client| client.enabled).count();
                         let connected = clients
@@ -7704,39 +7857,8 @@ async fn callback_handler(
                                     && client.last_handshake_epoch().is_none()
                             })
                             .count();
-                        let synced = settings.sync_panel_clients(
-                            id,
-                            &clients
-                                .iter()
-                                .map(|client| (client.name.clone(), client.address.clone()))
-                                .collect::<Vec<_>>(),
-                            now,
-                        );
-                        settings.ingest_panel(
-                            id,
-                            now,
-                            &clients
-                                .iter()
-                                .map(|client| crate::store::Sample {
-                                    name: client.name.clone(),
-                                    ip: client.address.clone(),
-                                    rx: client.transfer_rx,
-                                    tx: client.transfer_tx,
-                                    last_handshake: client.last_handshake_epoch(),
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                        for client in &clients {
-                            let expiry = client
-                                .expired_at
-                                .as_deref()
-                                .and_then(|value| value.get(..10))
-                                .and_then(crate::calendar::parse_date);
-                            if let Err(error) = vpn.cache_client_expiry(&client.name, expiry) {
-                                tracing::warn!(%error, client = %client.name, "не удалось сохранить срок ключа панели");
-                            }
-                        }
-                        bot.send_message(chat, format!("✅ Синхронизация завершена.\n\nВ панели: {}\nВключено: {enabled}\nСейчас подключено: {connected}\nHandshake не распознан: {unreadable}\nОбновлено в боте: {synced}.\n\n«Сейчас подключено» означает handshake за последние 5 минут. Отключённое устройство не означает, что его ключ неисправен. Новые импортированные ключи не получают владельца автоматически — назначьте его в карточке ключа.", clients.len()))
+                        let unowned = settings.server_unowned_client_count(id);
+                        bot.send_message(chat, format!("✅ Синхронизация завершена.\n\nВ панели: {}\nВключено: {enabled}\nСейчас подключено: {connected}\nHandshake не распознан: {unreadable}\nОбновлено в боте: {synced}\nБез владельца: {unowned}\n\nАрхивные и заменённые ключи не возвращаются в личные кабинеты. Новые импортированные ключи нужно один раз привязать к пользователю в разделе «Ключи».", clients.len()))
                             .reply_markup(menu::server_card_menu(id))
                             .await?;
                     }
@@ -9452,19 +9574,10 @@ async fn callback_handler(
             }
         }
         Action::MyKeys => {
-            settings.repair_user_key_replacements(uid, now_epoch());
-            let (lines, buttons) = customer_key_list(&settings, &vpn, uid);
-            let text = if lines.is_empty() {
-                "У вас пока нет ключей.".to_string()
-            } else {
-                format!("🔑 Ваши подключения\n\n{}\n\nИсправность ключа и подключение устройства показаны отдельно. Откройте нужную карточку для QR, конфигурации и инструкции.", lines.join("\n\n"))
-            };
-            let mut request = bot.send_message(chat, text);
-            if !buttons.is_empty() {
-                request = request.reply_markup(menu::customer_keys_menu(&buttons));
-            }
-            request.await?;
-            send_pending_replacements(&bot, chat, uid, &settings).await?;
+            send_customer_keys_page(&bot, chat, &settings, &vpn, uid, 0).await?;
+        }
+        Action::MyKeysPage(page) => {
+            send_customer_keys_page(&bot, chat, &settings, &vpn, uid, page).await?;
         }
         Action::Balance => {
             let entries = settings.balance_history(uid, 10);
@@ -10360,13 +10473,10 @@ async fn callback_handler(
                     .reply_markup(menu::customer_keyboard()).await?;
                 return Ok(());
             }
-            if names.len() < 3 {
-                bot.send_message(
-                    chat,
-                    "Для одного или двух ключей используйте отдельные кнопки замены.",
-                )
-                .reply_markup(menu::customer_keyboard())
-                .await?;
+            if names.is_empty() {
+                bot.send_message(chat, "На этом сервере больше нет ваших активных ключей.")
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
                 return Ok(());
             }
             let target = settings.default_vpn_server().and_then(|target_id| {
@@ -10395,12 +10505,9 @@ async fn callback_handler(
                 return Ok(());
             };
             let names = settings.user_server_client_names(uid, source_id);
-            if names.len() < 3 {
-                bot.send_message(
-                    chat,
-                    "Подходящих ключей для массовой замены уже меньше трёх.",
-                )
-                .await?;
+            if names.is_empty() {
+                bot.send_message(chat, "Подходящих ключей для замены уже нет.")
+                    .await?;
                 return Ok(());
             }
             if !settings
@@ -12634,6 +12741,7 @@ mod tests {
             menu::support_ticket_menu(1),
             menu::support_rating_menu(1),
             menu::customer_keys_menu(&[("alice".into(), "Alice".into())]),
+            menu::customer_keys_page_menu(&[("alice".into(), "Alice".into())], 0, 2),
             menu::customer_key_menu("alice"),
             menu::expired_subscription_menu("alice"),
             menu::instructions_menu(),
@@ -12761,6 +12869,7 @@ mod tests {
             ServerEnrollRevoke(1),
             ServerSetDefault(1),
             ServerRknSet(1, true),
+            ServerRknNotify(1),
             ServerMaintenanceAsk(1),
             ServerMaintenanceStart(1),
             ServerMaintenanceStartNotify(1),
@@ -12771,6 +12880,7 @@ mod tests {
             ServerProvisioningProbe(1),
             ServerPanelConnect(1),
             ServerAmneziaConnect(1),
+            ServerPanelSyncAll,
             ServerPanelSync(1),
             ServerPanelAudit(1),
             ServerPanelArchiveMissingAsk(1),
@@ -12905,6 +13015,7 @@ mod tests {
             BuyMethod(1, "manual".into()),
             BuyPaid(1),
             MyKeys,
+            MyKeysPage(1),
             Profile,
             Portal,
             Balance,
@@ -12997,6 +13108,7 @@ mod tests {
                 ServerEnrollRevoke(_) => {}
                 ServerSetDefault(_) => {}
                 ServerRknSet(_, _) => {}
+                ServerRknNotify(_) => {}
                 ServerMaintenanceAsk(_) => {}
                 ServerMaintenanceStart(_) => {}
                 ServerMaintenanceStartNotify(_) => {}
@@ -13007,6 +13119,7 @@ mod tests {
                 ServerProvisioningProbe(_) => {}
                 ServerPanelConnect(_) => {}
                 ServerAmneziaConnect(_) => {}
+                ServerPanelSyncAll => {}
                 ServerPanelSync(_) => {}
                 ServerPanelAudit(_) => {}
                 ServerPanelArchiveMissingAsk(_) => {}
@@ -13145,6 +13258,7 @@ mod tests {
                 BuyMethod(_, _) => {}
                 BuyPaid(_) => {}
                 MyKeys => {}
+                MyKeysPage(_) => {}
                 Profile => {}
                 Portal => {}
                 Balance => {}
@@ -13310,6 +13424,7 @@ mod tests {
             (Action::BuyMethod(1, "manual".into()), true, true),
             (Action::BuyPaid(1), true, true),
             (Action::MyKeys, true, true),
+            (Action::MyKeysPage(1), true, true),
             (Action::Profile, true, true),
             (Action::Balance, true, true),
             (Action::CustomerKey("mine".into()), true, true),
@@ -13395,6 +13510,7 @@ mod tests {
             (Action::ServerEnrollRevoke(1), true, false),
             (Action::ServerSetDefault(1), true, false),
             (Action::ServerRknSet(1, true), true, false),
+            (Action::ServerRknNotify(1), true, false),
             (Action::ServerMaintenanceAsk(1), true, false),
             (Action::ServerMaintenanceStart(1), true, false),
             (Action::ServerMaintenanceStartNotify(1), true, false),
@@ -13405,6 +13521,7 @@ mod tests {
             (Action::ServerProvisioningProbe(1), true, false),
             (Action::ServerPanelConnect(1), true, false),
             (Action::ServerAmneziaConnect(1), true, false),
+            (Action::ServerPanelSyncAll, true, false),
             (Action::ServerPanelSync(1), true, false),
             (Action::ServerPanelAudit(1), true, false),
             (Action::ServerPanelArchiveMissingAsk(1), true, false),

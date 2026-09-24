@@ -416,6 +416,7 @@ pub fn servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup
         cb("➕ Подключить новый сервер", "server:add"),
         cb("💳 Календарь оплаты", "server:billing"),
     ]);
+    rows.push(vec![cb("🔄 Синхронизировать все ключи", "server:sync-all")]);
     rows.push(vec![cb("⬅️ Админ-панель", "admin:dashboard")]);
     InlineKeyboardMarkup::new(rows)
 }
@@ -473,6 +474,10 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
             cb("🚫 Блокировка РКН", &format!("server:rkn:on:{id}")),
             cb("✅ Снять отметку РКН", &format!("server:rkn:off:{id}")),
         ],
+        vec![cb(
+            "📣 Предложить владельцам замену",
+            &format!("server:rkn:notify:{id}"),
+        )],
         vec![cb("🧪 Тестовая выдача", &format!("server:probe:{id}"))],
         vec![
             cb("✏️ Данные VPS", &format!("server:edit:{id}")),
@@ -506,15 +511,13 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
 
 pub fn rkn_replacement_menu(server_id: i64, keys: &[(String, String)]) -> InlineKeyboardMarkup {
     let mut rows = Vec::new();
-    if keys.len() > 2 {
-        rows.push(vec![cb(
-            &format!("🔁 Заменить все ключи ({})", keys.len()),
-            &format!("move:bulk:{server_id}"),
-        )]);
-    } else {
-        for (name, title) in keys {
-            rows.push(vec![cb(title, &format!("move:choose:{name}"))]);
-        }
+    if !keys.is_empty() {
+        let label = if keys.len() == 1 {
+            "🔁 Заменить нерабочий ключ".to_string()
+        } else {
+            format!("🔁 Заменить все ключи ({})", keys.len())
+        };
+        rows.push(vec![cb(&label, &format!("move:bulk:{server_id}"))]);
     }
     rows.push(vec![cb("🔑 Мои ключи", "mykeys")]);
     InlineKeyboardMarkup::new(rows)
@@ -1264,6 +1267,31 @@ pub fn customer_keys_menu(items: &[(String, String)]) -> InlineKeyboardMarkup {
         .iter()
         .map(|(name, title)| vec![cb(title, &format!("mykey:{name}"))])
         .collect::<Vec<_>>();
+    rows.push(vec![cb("➕ Купить новый ключ", "buy")]);
+    rows.push(vec![cb("⬅️ Кабинет", "profile")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn customer_keys_page_menu(
+    items: &[(String, String)],
+    page: usize,
+    pages: usize,
+) -> InlineKeyboardMarkup {
+    let mut rows = items
+        .iter()
+        .map(|(name, title)| vec![cb(title, &format!("mykey:{name}"))])
+        .collect::<Vec<_>>();
+    if pages > 1 {
+        let mut navigation = Vec::new();
+        if page > 0 {
+            navigation.push(cb("⬅️", &format!("mykeys:page:{}", page - 1)));
+        }
+        navigation.push(cb(&format!("{}/{}", page + 1, pages), "mykeys"));
+        if page + 1 < pages {
+            navigation.push(cb("➡️", &format!("mykeys:page:{}", page + 1)));
+        }
+        rows.push(navigation);
+    }
     rows.push(vec![cb("➕ Купить новый ключ", "buy")]);
     rows.push(vec![cb("⬅️ Кабинет", "profile")]);
     InlineKeyboardMarkup::new(rows)
