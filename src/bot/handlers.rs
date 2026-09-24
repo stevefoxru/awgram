@@ -3809,6 +3809,20 @@ async fn message_handler(
             referrer,
             now_epoch(),
         );
+        if let Some(source) = msg
+            .text()
+            .and_then(|text| text.strip_prefix("/start "))
+            .map(str::trim)
+            .filter(|source| matches!(*source, "channel" | "friends" | "oldkey"))
+        {
+            settings.log_event(
+                now_epoch(),
+                EventKind::Acquisition,
+                None,
+                Some(uid),
+                Some(&format!("source={source}")),
+            );
+        }
     }
 
     if let Some(payment) = msg.successful_payment() {
@@ -6013,6 +6027,22 @@ async fn message_handler(
     }
     if role == Role::Denied {
         match msg.text().unwrap_or_default() {
+            "/start channel" | "/start friends" => {
+                bot.send_message(msg.chat.id, "🚀 Добро пожаловать в ZuevVPN\n\nБыстрое подключение на базе AmneziaWG для телефона и компьютера. Настройка займёт несколько минут: выберите устройство, установите приложение и получите готовый тестовый ключ.\n\n🎁 Для новых пользователей доступен один бесплатный тестовый период. Оплата для запуска теста не требуется.")
+                    .reply_markup(menu::trial_welcome_menu())
+                    .await?;
+            }
+            "/start oldkey" => {
+                let eligible = settings.activate_legacy_promo(uid, "OLDKEY", now_epoch())
+                    || settings.has_pending_legacy_entitlement(uid, "OLDKEY", now_epoch());
+                bot.send_message(msg.chat.id, if eligible {
+                    "♻️ Восстановление старого подключения\n\nПраво на восстановление подтверждено. Нажмите кнопку ниже и отправьте заявку на каждый ключ, который ранее был выдан вам лично."
+                } else {
+                    "♻️ Восстановление старого подключения\n\nОткройте раздел восстановления. Если доступ не подтвердится автоматически, введите технический промокод из личного сообщения."
+                })
+                    .reply_markup(menu::legacy_restore_menu(eligible))
+                    .await?;
+            }
             text if text.starts_with("/start")
                 || matches!(text, "🏠 Меню" | "🏠 Кабинет" | "🏠 Главная") =>
             {
@@ -9500,6 +9530,29 @@ async fn callback_handler(
             .await?;
         }
         Action::Guide(kind) => {
+            if kind == "onboarding" {
+                bot.send_message(chat, "📲 Шаг 1 из 2 · Выберите устройство\n\nБот покажет официальную ссылку на AmneziaWG. После установки вернитесь сюда — на следующем шаге получите тестовый ключ.")
+                    .reply_markup(menu::trial_platform_menu())
+                    .await?;
+                return Ok(());
+            }
+            if let Some(platform) = kind.strip_prefix("onboard-") {
+                let device = match platform {
+                    "android" => "Android",
+                    "ios" => "iPhone/iPad",
+                    "windows" => "Windows",
+                    "macos" => "macOS",
+                    _ => return Ok(()),
+                };
+                bot.send_message(chat, format!("📥 Шаг 2 из 2 · Установите AmneziaWG\n\nУстройство: {device}\n\n1. Скачайте официальное приложение по кнопке ниже.\n2. После установки вернитесь в этот чат.\n3. Нажмите «Установил — получить тест».\n4. Импортируйте полученный файл .conf в приложение и включите туннель."))
+                    .reply_markup(menu::trial_install_menu(platform))
+                    .await?;
+                return Ok(());
+            }
+            if kind == "trial-ready" {
+                maybe_issue_trial(&bot, chat, &vpn, &settings, uid).await;
+                return Ok(());
+            }
             if let Some(name) = kind.strip_prefix("transfer:") {
                 if settings.client_owner(name) == Some(uid) {
                     bot.send_message(chat,format!("🎁 Передача ключа «{name}»\n\nВведите Telegram ID или @username получателя. Он должен заранее запустить этого бота. Ключ останется у вас, пока получатель явно не подтвердит передачу.")).await?;
@@ -13804,6 +13857,12 @@ mod tests {
             menu::customer_more_menu(true),
             menu::notification_settings_menu(true, true),
             menu::portal_link_menu("https://example.com/login"),
+            menu::trial_welcome_menu(),
+            menu::trial_platform_menu(),
+            menu::trial_install_menu("android"),
+            menu::trial_install_menu("ios"),
+            menu::trial_install_menu("windows"),
+            menu::trial_install_menu("macos"),
             menu::admin_dashboard_menu(),
             menu::admin_operations_menu(&[1, 2], true),
             menu::admin_keys_hub(),

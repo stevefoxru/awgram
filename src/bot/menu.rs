@@ -8,6 +8,13 @@ fn cb(text: &str, data: &str) -> InlineKeyboardButton {
     InlineKeyboardButton::callback(text.to_string(), data.to_string())
 }
 
+fn url(text: &str, value: &str) -> InlineKeyboardButton {
+    InlineKeyboardButton::url(
+        text.to_string(),
+        reqwest::Url::parse(value).expect("static URL"),
+    )
+}
+
 pub fn profile_menu(portal_enabled: bool) -> InlineKeyboardMarkup {
     let mut rows = Vec::new();
     if portal_enabled {
@@ -1680,6 +1687,51 @@ pub fn instructions_menu() -> InlineKeyboardMarkup {
         vec![cb("🩺 Не подключается", "guide:trouble")],
         vec![cb("🆘 Поддержка", "support:new:connection")],
         vec![cb("⬅️ Кабинет", "profile")],
+    ])
+}
+
+pub fn trial_welcome_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("🎁 Попробовать бесплатно", "guide:onboarding")],
+        vec![cb("🔑 У меня уже есть ключ", "mykeys")],
+        vec![cb("🆘 Задать вопрос", "support:new:general")],
+    ])
+}
+
+pub fn trial_platform_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("🤖 Android", "guide:onboard-android"),
+            cb("🍎 iPhone/iPad", "guide:onboard-ios"),
+        ],
+        vec![
+            cb("🪟 Windows", "guide:onboard-windows"),
+            cb("💻 macOS", "guide:onboard-macos"),
+        ],
+        vec![cb("⬅️ Главная", "profile")],
+    ])
+}
+
+pub fn trial_install_menu(platform: &str) -> InlineKeyboardMarkup {
+    let download = match platform {
+        "android" => url(
+            "📥 Скачать AmneziaWG",
+            "https://play.google.com/store/apps/details?id=org.amnezia.awg",
+        ),
+        "ios" | "macos" => url(
+            "📥 Скачать AmneziaWG",
+            "https://apps.apple.com/app/amneziawg/id6478942365",
+        ),
+        "windows" => url(
+            "📥 Скачать AmneziaWG",
+            "https://github.com/amnezia-vpn/amneziawg-windows-client/releases/latest",
+        ),
+        _ => url("📥 Скачать AmneziaWG", "https://amnezia.org/downloads"),
+    };
+    InlineKeyboardMarkup::new(vec![
+        vec![download],
+        vec![cb("✅ Установил — получить тест", "guide:trial-ready")],
+        vec![cb("⬅️ Другое устройство", "guide:onboarding")],
     ])
 }
 
