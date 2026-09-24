@@ -52,6 +52,15 @@ pub struct ServerBillingUpdate<'a> {
     pub auto_renew: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedClientCleanup {
+    pub name: String,
+    pub owner_user_id: Option<i64>,
+    pub server_id: i64,
+    pub server_name: String,
+    pub blocked_at: i64,
+}
+
 fn server_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VpnServer> {
     Ok(VpnServer {
         id: row.get(0)?,
@@ -1002,6 +1011,67 @@ impl Store {
         .is_ok_and(|changed| changed == 1)
     }
 
+    pub fn blocked_clients_for_cleanup(
+        &self,
+        now: i64,
+        minimum_days: i64,
+    ) -> Vec<BlockedClientCleanup> {
+        let cutoff = now.saturating_sub(minimum_days.max(0).saturating_mul(86_400));
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT c.name,c.owner_user_id,s.id,s.name,
+                        MIN(COALESCE(s.unavailable_at,9223372036854775807),COALESCE(s.rkn_blocked_at,9223372036854775807),COALESCE(s.archived_at,9223372036854775807))
+                   FROM clients c JOIN vpn_servers s ON s.id=c.server_id
+                  WHERE c.removed_at IS NULL
+                    AND (s.operator_unavailable=1 OR s.blocked_by_rkn=1 OR s.archived_at IS NOT NULL)
+                    AND MIN(COALESCE(s.unavailable_at,9223372036854775807),COALESCE(s.rkn_blocked_at,9223372036854775807),COALESCE(s.archived_at,9223372036854775807))<=?1
+                    AND NOT EXISTS(SELECT 1 FROM key_replacements kr WHERE kr.old_client=c.name AND kr.status='pending')
+                  ORDER BY s.id,c.name COLLATE NOCASE",
+            )?;
+            let rows = statement.query_map([cutoff], |row| {
+                Ok(BlockedClientCleanup {
+                    name: row.get(0)?,
+                    owner_user_id: row.get(1)?,
+                    server_id: row.get(2)?,
+                    server_name: row.get(3)?,
+                    blocked_at: row.get(4)?,
+                })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn mark_blocked_cleanup_notification(
+        &self,
+        name: &str,
+        blocked_at: i64,
+        threshold_days: i64,
+        now: i64,
+    ) -> bool {
+        self.with_conn(|connection| {
+            connection.execute(
+                "INSERT OR IGNORE INTO blocked_client_cleanup_notifications(client_name,blocked_at,threshold_days,sent_at) VALUES(?1,?2,?3,?4)",
+                rusqlite::params![name, blocked_at, threshold_days, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn unmark_blocked_cleanup_notification(
+        &self,
+        name: &str,
+        blocked_at: i64,
+        threshold_days: i64,
+    ) {
+        let _ = self.with_conn(|connection| {
+            connection.execute(
+                "DELETE FROM blocked_client_cleanup_notifications WHERE client_name=?1 AND blocked_at=?2 AND threshold_days=?3",
+                rusqlite::params![name, blocked_at, threshold_days],
+            )
+        });
+    }
+
     pub fn revive_client(&self, name: &str) -> bool {
         self.with_conn(|connection| {
             connection.execute(
@@ -1121,6 +1191,23 @@ mod tests {
         let server = store.vpn_server(id).unwrap();
         assert!(server.operator_unavailable);
         assert!(!server.enabled_for_provisioning);
+        store.upsert_user(7, None, "Owner", None, 100);
+        store.assign_client_group("old-key", None, 100);
+        assert!(store.assign_client_owner("old-key", Some(7)));
+        assert!(store.assign_client_server("old-key", id, "amneziawg-1"));
+        assert!(store
+            .blocked_clients_for_cleanup(200 + 23 * 86_400, 30)
+            .is_empty());
+        assert_eq!(
+            store.blocked_clients_for_cleanup(200 + 23 * 86_400, 23)[0].name,
+            "old-key"
+        );
+        assert_eq!(
+            store.blocked_clients_for_cleanup(200 + 30 * 86_400, 30)[0].owner_user_id,
+            Some(7)
+        );
+        assert!(store.mark_blocked_cleanup_notification("old-key", 200, 7, 300));
+        assert!(!store.mark_blocked_cleanup_notification("old-key", 200, 7, 301));
 
         assert!(store.set_server_archived(id, true, 1, 300));
         assert!(store.vpn_servers().is_empty());

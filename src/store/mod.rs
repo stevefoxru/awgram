@@ -36,7 +36,7 @@ pub use nodes::{InstallationJob, VpnInstance, VpnNode};
 pub use partners::{Partner, PartnerOrder, PartnerSalesSummary, PartnerWithdrawal};
 pub use portal::{PortalBalanceEntry, PortalKey, PortalOverview, PortalPayment, PortalTicket};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
-pub use servers::{NewVpnServer, ServerBillingUpdate, VpnServer};
+pub use servers::{BlockedClientCleanup, NewVpnServer, ServerBillingUpdate, VpnServer};
 pub use stars::{NewStarOrder, StarOrder, StarPaymentClaim};
 pub use stats::{PeriodTotals, Sample, TrafficSummary};
 
@@ -761,6 +761,17 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL
     );
     CREATE INDEX idx_server_lifecycle_events ON server_lifecycle_events(server_id,created_at DESC,id DESC);
+    "#,
+    // v36: идемпотентные предупреждения перед 30-дневным архивированием
+    // невосстановленных ключей заблокированных серверов.
+    r#"
+    CREATE TABLE blocked_client_cleanup_notifications(
+        client_name TEXT NOT NULL,
+        blocked_at INTEGER NOT NULL,
+        threshold_days INTEGER NOT NULL,
+        sent_at INTEGER NOT NULL,
+        PRIMARY KEY(client_name,blocked_at,threshold_days)
+    );
     "#,
 ];
 

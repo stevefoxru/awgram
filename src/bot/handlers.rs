@@ -2728,10 +2728,20 @@ async fn notify_unavailable_server_owners(
         } else {
             "помечен администратором как нерабочий"
         };
+        let cleanup_date = [
+            server.unavailable_at,
+            server.rkn_blocked_at,
+            server.archived_at,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|at| crate::calendar::format_date(at.saturating_add(30 * 86_400)))
+        .unwrap_or_else(|| "через 30 дней".into());
         let text = if names.len() == 1 {
-            format!("🚨 Необходимо заменить VPN-ключ\n\nСервер «{}» {reason}, и старое подключение больше не считается рабочим. Нажмите кнопку ниже — бот создаст замену на доступном сервере и сохранит срок подписки. Старый ключ удалится только после проверки нового.", server.name)
+            format!("🚨 Необходимо заменить VPN-ключ\n\nСервер «{}» {reason}, и старое подключение больше не считается рабочим. Нажмите кнопку ниже — бот создаст замену на доступном сервере и сохранит срок подписки. Старый ключ удалится только после проверки нового.\n\nЕсли не выполнить замену, устаревший ключ будет автоматически скрыт {cleanup_date}.", server.name)
         } else {
-            format!("🚨 Необходимо заменить VPN-ключи\n\nСервер «{}» {reason}. На нём найдено ваших ключей: {}. Одной кнопкой можно запустить безопасную замену всех подключений с сохранением сроков.", server.name, names.len())
+            format!("🚨 Необходимо заменить VPN-ключи\n\nСервер «{}» {reason}. На нём найдено ваших ключей: {}. Одной кнопкой можно запустить безопасную замену всех подключений с сохранением сроков.\n\nНевосстановленные ключи будут автоматически скрыты {cleanup_date}.", server.name, names.len())
         };
         if bot
             .send_message(ChatId(*owner), text)
@@ -7780,6 +7790,23 @@ async fn callback_handler(
                         .is_some_and(|source| source.id == id)
                 })
                 .count();
+            let blocked_at = [
+                server.unavailable_at,
+                server.rkn_blocked_at,
+                server.archived_at,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            let cleanup = blocked_at.map_or_else(
+                || "запустится после отметки сервера нерабочим".to_string(),
+                |at| {
+                    format!(
+                        "{} (через 30 дней после отметки)",
+                        crate::calendar::format_date(at.saturating_add(30 * 86_400))
+                    )
+                },
+            );
             let history = settings
                 .server_lifecycle_events(id, 5)
                 .into_iter()
@@ -7803,7 +7830,7 @@ async fn callback_handler(
                     )
                 })
                 .collect::<Vec<_>>();
-            bot.send_message(chat, format!("📦 Вывод сервера из эксплуатации\n\nСервер: {}\nСостояние: {}\nПричина: {}\n\nОсталось активных ключей: {keys}\nВладельцев: {owners}\nЗамен ожидает подтверждения: {pending}\n\nПорядок действий:\n1. Укажите причину отключения.\n2. Синхронизируйте ключи.\n3. Уведомите владельцев и дождитесь замен.\n4. Когда активных ключей не останется, переместите сервер в архив.\n\nПоследние действия:\n{}", server.name, if server.operator_unavailable { "❌ нерабочий" } else { "✅ рабочий" }, server.unavailable_reason.as_deref().unwrap_or("не указана"), if history.is_empty() { "—".into() } else { history.join("\n") }))
+            bot.send_message(chat, format!("📦 Вывод сервера из эксплуатации\n\nСервер: {}\nСостояние: {}\nПричина: {}\nАвтоархив ключей: {cleanup}\n\nОсталось активных ключей: {keys}\nВладельцев: {owners}\nЗамен ожидает подтверждения: {pending}\n\nПорядок действий:\n1. Укажите причину отключения.\n2. Синхронизируйте ключи.\n3. Уведомите владельцев и дождитесь замен.\n4. Через 30 дней невосстановленные ключи будут скрыты автоматически.\n5. Когда активных ключей не останется, переместите сервер в архив.\n\nПоследние действия:\n{}", server.name, if server.operator_unavailable { "❌ нерабочий" } else { "✅ рабочий" }, server.unavailable_reason.as_deref().unwrap_or("не указана"), if history.is_empty() { "—".into() } else { history.join("\n") }))
                 .reply_markup(menu::server_retirement_menu(id, server.operator_unavailable))
                 .await?;
         }
