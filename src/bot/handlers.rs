@@ -46,6 +46,7 @@ pub enum Action {
     AdminUpdateRollback,
     ServerAdd,
     ServerCard(i64),
+    ServerSection(i64, String),
     RemoteMigration(i64),
     RemoteMigrationPreflight(i64),
     RemoteMigrationStatus(i64),
@@ -396,6 +397,12 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::RemoteMigration)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:section:") {
+                let mut parts = v.splitn(2, ':');
+                match (parts.next(), parts.next().and_then(|id| id.parse().ok())) {
+                    (Some(section), Some(id)) => Action::ServerSection(id, section.to_string()),
+                    _ => Action::Unknown,
+                }
             } else if let Some(v) = data.strip_prefix("buy:term:") {
                 v.parse().map(Action::BuyTerm).unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("buy:method:") {
@@ -2540,6 +2547,11 @@ async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
         .count();
     let local = servers.iter().filter(|s| s.is_local).count();
     let online = servers.iter().filter(|s| s.status == "online").count();
+    let blocked = servers.iter().filter(|s| s.blocked_by_rkn).count();
+    let provisioning = servers
+        .iter()
+        .filter(|s| s.enabled_for_provisioning && !s.blocked_by_rkn)
+        .count();
     let assigned = servers
         .iter()
         .map(|server| settings.server_client_count(server.id).max(0))
@@ -2556,7 +2568,7 @@ async fn servers_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
                 .online
         })
         .sum::<usize>();
-    bot.send_message(chat,format!("🖥 Серверы\n\n🟢 Онлайн: {online}/{}\n🏠 Локальных: {local}\n⚠️ Требуют внимания: {attention}\n🔑 Загрузка: {assigned}/{capacity}\n📶 Сейчас подключено: {panel_online}\n\nВыберите сервер: в карточке отображаются свежесть телеметрии, online, трафик и доступные действия.",servers.len())).reply_markup(menu::servers_menu(&servers)).await?;
+    bot.send_message(chat,format!("🖥 Управление серверами\n\n🟢 Онлайн: {online}/{}\n🎯 Выдают новые ключи: {provisioning}\n🚫 Заблокированы РКН: {blocked}\n⚠️ Требуют внимания: {attention}\n🔑 Ключи: {assigned}/{capacity}\n📶 Подключено сейчас: {panel_online}\n🏠 Локальных серверов: {local}\n\nВыберите сервер. В карточке действия разделены по назначению: состояние, ключи, подключение, обслуживание и данные VPS.",servers.len())).reply_markup(menu::servers_menu(&servers)).await?;
     Ok(())
 }
 
@@ -3055,6 +3067,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminUpdateRollback
         | ServerAdd
         | ServerCard(_)
+        | ServerSection(_, _)
         | RemoteMigration(_)
         | RemoteMigrationPreflight(_)
         | RemoteMigrationStatus(_)
@@ -7069,6 +7082,48 @@ async fn callback_handler(
                     .reply_markup(menu::server_card_menu(id))
                     .await?;
             }
+        }
+        Action::ServerSection(id, section) => {
+            let Some(server) = settings.vpn_server(id) else {
+                return Ok(());
+            };
+            let (title, description, keyboard) = match section.as_str() {
+                "health" => (
+                    "📡 Состояние и выдача",
+                    "Проверка доступности, диагностика API и выбор сервера для новых ключей. Тестовая выдача создаёт временный ключ и сразу удаляет его.",
+                    menu::server_health_menu(id),
+                ),
+                "keys" => (
+                    "🔑 Ключи и владельцы",
+                    "Синхронизация получает актуальный список из панели. Сверка ничего не удаляет и показывает расхождения. Здесь же можно уведомить владельцев.",
+                    menu::server_keys_hub_menu(id),
+                ),
+                "connect" => (
+                    "🔌 Подключение и установка",
+                    "Подключите существующую панель или SSH-мост, импортируйте полный доступ AmneziaVPN либо запустите установку AWG.",
+                    menu::server_connection_hub_menu(id),
+                ),
+                "maintenance" => (
+                    "🛠 Обслуживание и блокировки",
+                    "Обслуживание временно останавливает новую выдачу. Отметка РКН предназначена для сервера, который доступен боту, но заблокирован у пользователей.",
+                    menu::server_maintenance_hub_menu(id),
+                ),
+                "passport" => (
+                    "📝 Данные и оплата VPS",
+                    "Изменение названия, адреса, провайдера, вместимости и календаря оплаты сервера.",
+                    menu::server_passport_hub_menu(id),
+                ),
+                _ => return Ok(()),
+            };
+            bot.send_message(
+                chat,
+                format!(
+                    "{title}\n{} · {}\n\n{description}",
+                    server.name, server.location
+                ),
+            )
+            .reply_markup(keyboard)
+            .await?;
         }
         Action::RemoteMigration(id) => {
             if let Some(server) = settings.vpn_server(id).filter(|server| !server.is_local) {
@@ -12718,6 +12773,11 @@ mod tests {
             menu::servers_menu(&[]),
             menu::server_setup_method_menu(1),
             menu::server_card_menu(1),
+            menu::server_health_menu(1),
+            menu::server_keys_hub_menu(1),
+            menu::server_connection_hub_menu(1),
+            menu::server_maintenance_hub_menu(1),
+            menu::server_passport_hub_menu(1),
             menu::server_inventory_confirm_menu(1, "archive"),
             menu::server_inventory_confirm_menu(1, "rebind"),
             menu::server_maintenance_confirm_menu(1),
@@ -12862,6 +12922,7 @@ mod tests {
             AdminUpdateRollback,
             ServerAdd,
             ServerCard(1),
+            ServerSection(1, "health".into()),
             RemoteMigration(1),
             RemoteMigrationPreflight(1),
             RemoteMigrationStatus(1),
@@ -13101,6 +13162,7 @@ mod tests {
                 AdminUpdateRollback => {}
                 ServerAdd => {}
                 ServerCard(_) => {}
+                ServerSection(_, _) => {}
                 RemoteMigration(_) => {}
                 RemoteMigrationPreflight(_) => {}
                 RemoteMigrationStatus(_) => {}
@@ -13503,6 +13565,7 @@ mod tests {
             (Action::AdminUpdateRollback, true, false),
             (Action::ServerAdd, true, false),
             (Action::ServerCard(1), true, false),
+            (Action::ServerSection(1, "health".into()), true, false),
             (Action::RemoteMigration(1), true, false),
             (Action::RemoteMigrationPreflight(1), true, false),
             (Action::RemoteMigrationStatus(1), true, false),

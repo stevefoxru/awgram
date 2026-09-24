@@ -401,9 +401,16 @@ pub fn servers_menu(servers: &[crate::store::VpnServer]) -> InlineKeyboardMarkup
                 "maintenance" => "🚧",
                 _ => "⚪",
             };
+            let access = if server.blocked_by_rkn {
+                " · 🚫 РКН"
+            } else if server.enabled_for_provisioning {
+                " · 🎯 выдача"
+            } else {
+                ""
+            };
             vec![cb(
                 &format!(
-                    "{icon} {}{} · {}",
+                    "{icon} {}{} · {}{access}",
                     if server.is_local { "🏠 " } else { "" },
                     server.name,
                     server.location
@@ -447,65 +454,105 @@ pub fn server_card_menu(id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
             cb(
-                "🎯 Использовать для выдачи",
-                &format!("server:default:{id}"),
+                "📡 Состояние и выдача",
+                &format!("server:section:health:{id}"),
             ),
-            cb("🔄 Синхронизация", &format!("server:panel:sync:{id}")),
+            cb("🔑 Ключи и владельцы", &format!("server:section:keys:{id}")),
         ],
         vec![
-            cb("🧾 Сверка с базой", &format!("server:panel:audit:{id}")),
+            cb("🔌 Подключение", &format!("server:section:connect:{id}")),
             cb(
-                "📣 Рассылка владельцам",
-                &format!("broadcast:audience:server:{id}"),
+                "🛠 Обслуживание",
+                &format!("server:section:maintenance:{id}"),
             ),
         ],
         vec![
-            cb("🩺 Проверить ключи", &format!("server:check:{id}")),
-            cb("🔬 Панель и API", &format!("server:diagnose:{id}")),
+            cb("📝 Данные VPS", &format!("server:section:passport:{id}")),
+            cb("💳 Оплата", &format!("server:bill:{id}")),
         ],
-        vec![
-            cb("🚧 Обслуживание", &format!("server:maintenance:{id}")),
-            cb(
-                "✅ Вернуть online",
-                &format!("server:maintenance:finish:{id}"),
-            ),
-        ],
-        vec![
-            cb("🚫 Блокировка РКН", &format!("server:rkn:on:{id}")),
-            cb("✅ Снять отметку РКН", &format!("server:rkn:off:{id}")),
-        ],
-        vec![cb(
-            "📣 Предложить владельцам замену",
-            &format!("server:rkn:notify:{id}"),
-        )],
-        vec![cb("🧪 Тестовая выдача", &format!("server:probe:{id}"))],
-        vec![
-            cb("✏️ Данные VPS", &format!("server:edit:{id}")),
-            cb("💳 Оплата VPS", &format!("server:bill:{id}")),
-        ],
-        vec![
-            cb("🔗 SSH-мост", &format!("server:enroll:{id}")),
-            cb("🔐 VPN-панель", &format!("server:panel:{id}")),
-        ],
-        vec![cb(
-            "🔑 Доступ AmneziaVPN · AWG 3.1",
-            &format!("server:amnezia:{id}"),
-        )],
-        vec![
-            cb("🚀 Установить AWG", &format!("server:deploy:{id}")),
-            cb("🔀 Миграция AWG", &format!("server:migrate:{id}")),
-        ],
-        vec![
-            cb(
-                "🚫 Отозвать SSH-мост",
-                &format!("server:enroll:revoke:{id}"),
-            ),
-            cb("🛡 VPN-служба", "admin:vpn"),
-        ],
+        vec![cb("🔄 Обновить карточку", &format!("server:{id}"))],
         vec![
             cb("⬅️ Все серверы", "admin:servers"),
             cb("🏠 Админ-панель", "admin:dashboard"),
         ],
+    ])
+}
+
+pub fn server_health_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "🎯 Назначить для выдачи",
+            &format!("server:default:{id}"),
+        )],
+        vec![
+            cb("🩺 Проверить ключи", &format!("server:check:{id}")),
+            cb("🔬 Панель и API", &format!("server:diagnose:{id}")),
+        ],
+        vec![cb("🧪 Тестовая выдача", &format!("server:probe:{id}"))],
+        vec![cb("⬅️ К серверу", &format!("server:{id}"))],
+    ])
+}
+
+pub fn server_keys_hub_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("🔄 Синхронизировать", &format!("server:panel:sync:{id}")),
+            cb("🧾 Сверить с базой", &format!("server:panel:audit:{id}")),
+        ],
+        vec![cb(
+            "📣 Рассылка владельцам",
+            &format!("broadcast:audience:server:{id}"),
+        )],
+        vec![cb(
+            "🚨 Предложить замену",
+            &format!("server:rkn:notify:{id}"),
+        )],
+        vec![cb("⬅️ К серверу", &format!("server:{id}"))],
+    ])
+}
+
+pub fn server_connection_hub_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb("🔐 VPN-панель", &format!("server:panel:{id}")),
+            cb("🔗 SSH-мост", &format!("server:enroll:{id}")),
+        ],
+        vec![cb("🔑 Импорт AWG 3.1", &format!("server:amnezia:{id}"))],
+        vec![
+            cb("🚀 Установить AWG", &format!("server:deploy:{id}")),
+            cb("🔀 Миграция AWG", &format!("server:migrate:{id}")),
+        ],
+        vec![cb("⬅️ К серверу", &format!("server:{id}"))],
+    ])
+}
+
+pub fn server_maintenance_hub_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            cb(
+                "🚧 Начать обслуживание",
+                &format!("server:maintenance:{id}"),
+            ),
+            cb("✅ Завершить", &format!("server:maintenance:finish:{id}")),
+        ],
+        vec![
+            cb("🚫 Отметить блокировку РКН", &format!("server:rkn:on:{id}")),
+            cb("✅ Снять отметку", &format!("server:rkn:off:{id}")),
+        ],
+        vec![cb(
+            "🚫 Отозвать SSH-мост",
+            &format!("server:enroll:revoke:{id}"),
+        )],
+        vec![cb("🛡 Общая VPN-служба", "admin:vpn")],
+        vec![cb("⬅️ К серверу", &format!("server:{id}"))],
+    ])
+}
+
+pub fn server_passport_hub_menu(id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("✏️ Изменить данные VPS", &format!("server:edit:{id}"))],
+        vec![cb("💳 Настроить оплату", &format!("server:bill:{id}"))],
+        vec![cb("⬅️ К серверу", &format!("server:{id}"))],
     ])
 }
 
@@ -3047,7 +3094,15 @@ mod tests {
 
     #[test]
     fn server_card_exposes_remote_install_and_health_actions() {
-        let data = all_callback_data(&server_card_menu(42));
+        let menus = [
+            server_card_menu(42),
+            server_health_menu(42),
+            server_keys_hub_menu(42),
+            server_connection_hub_menu(42),
+            server_maintenance_hub_menu(42),
+            server_passport_hub_menu(42),
+        ];
+        let data = menus.iter().flat_map(all_callback_data).collect::<Vec<_>>();
         for expected in [
             "server:deploy:42",
             "server:check:42",
