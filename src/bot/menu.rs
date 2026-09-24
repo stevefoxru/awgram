@@ -72,6 +72,7 @@ pub fn customer_keyboard() -> KeyboardMarkup {
             KeyboardButton::new("🆘 Помощь"),
             KeyboardButton::new("⚙️ Ещё"),
         ],
+        vec![KeyboardButton::new("♻️ Восстановить ключи")],
     ];
     KeyboardMarkup::new(rows).resize_keyboard().persistent()
 }
@@ -86,7 +87,7 @@ pub fn customer_help_menu() -> InlineKeyboardMarkup {
     ])
 }
 
-pub fn customer_more_menu(portal_enabled: bool, legacy_open: bool) -> InlineKeyboardMarkup {
+pub fn customer_more_menu(portal_enabled: bool) -> InlineKeyboardMarkup {
     let mut rows = Vec::new();
     if portal_enabled {
         rows.push(vec![cb("🌐 Веб-кабинет", "portal")]);
@@ -96,9 +97,6 @@ pub fn customer_more_menu(portal_enabled: bool, legacy_open: bool) -> InlineKeyb
         cb("🔔 Уведомления", "guide:notifications"),
     ]);
     rows.push(vec![cb("🤝 Стать партнёром", "guide:partner")]);
-    if legacy_open {
-        rows.push(vec![cb("♻️ Восстановить старые ключи", "legacy:customer")]);
-    }
     rows.push(vec![cb("⬅️ Главная", "profile")]);
     InlineKeyboardMarkup::new(rows)
 }

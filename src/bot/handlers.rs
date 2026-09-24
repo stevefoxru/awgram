@@ -1800,6 +1800,33 @@ struct CustomerKeyView {
     ready: bool,
     connected: bool,
     needs_replacement: bool,
+    group: CustomerKeyGroup,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CustomerKeyGroup {
+    Replacement,
+    Working,
+    Renewal,
+    Disabled,
+}
+
+impl CustomerKeyGroup {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Replacement => "🚨 НЕ РАБОТАЮТ — НУЖНА ЗАМЕНА",
+            Self::Working => "✅ РАБОТАЮТ",
+            Self::Renewal => "⌛ НУЖНО ПРОДЛИТЬ",
+            Self::Disabled => "⏸ ОТКЛЮЧЕНЫ ИЛИ ТРЕБУЮТ ПРОВЕРКИ",
+        }
+    }
+}
+
+struct CustomerKeyListItem {
+    line: String,
+    button: (String, String),
+    group: CustomerKeyGroup,
+    connected: bool,
 }
 
 fn customer_key_view(
@@ -1814,6 +1841,7 @@ fn customer_key_view(
     let server = settings.client_vpn_server(name);
     let runtime = settings.client_runtime_stats(name);
     let expired = vpn.client_expiry(name).is_some_and(|expiry| expiry <= now);
+    let blocked_by_rkn = server.as_ref().is_some_and(|server| server.blocked_by_rkn);
     let server_unavailable = server
         .as_ref()
         .is_none_or(|server| server.status != "online" || server.blocked_by_rkn);
@@ -1824,6 +1852,8 @@ fn customer_key_view(
         || vpn.client_disabled(name);
     let (icon, health, ready) = if expired {
         ("⌛", "подписка истекла", false)
+    } else if blocked_by_rkn {
+        ("🚫", "сервер заблокирован — нужна замена", false)
     } else if server_unavailable {
         ("❌", "сервер недоступен — нужна замена", false)
     } else if disabled {
@@ -1860,6 +1890,15 @@ fn customer_key_view(
             _ => "AWG 1.0",
         });
     let expiry = crate::vpn::model::format_expiry(settings.lang(uid), now, vpn.client_expiry(name));
+    let group = if server_unavailable && !expired {
+        CustomerKeyGroup::Replacement
+    } else if ready {
+        CustomerKeyGroup::Working
+    } else if expired {
+        CustomerKeyGroup::Renewal
+    } else {
+        CustomerKeyGroup::Disabled
+    };
     let traffic = runtime.as_ref().map_or_else(
         || "пока нет данных".to_string(),
         |value| {
@@ -1882,30 +1921,25 @@ fn customer_key_view(
         ready,
         connected,
         needs_replacement: server_unavailable && !expired,
+        group,
     }
 }
 
-fn customer_key_list(
-    settings: &Store,
-    vpn: &Vpn,
-    uid: i64,
-) -> (Vec<String>, Vec<(String, String)>) {
+fn customer_key_list(settings: &Store, vpn: &Vpn, uid: i64) -> Vec<CustomerKeyListItem> {
     let names = settings.user_client_names(uid);
-    let mut views = Vec::with_capacity(names.len());
+    let mut items = Vec::with_capacity(names.len());
+    let now = now_epoch();
     for name in names {
-        let view = customer_key_view(settings, vpn, uid, &name, now_epoch());
-        views.push((name, view));
+        let view = customer_key_view(settings, vpn, uid, &name, now);
+        items.push(CustomerKeyListItem {
+            line: view.list_text,
+            button: (name, view.title),
+            group: view.group,
+            connected: view.connected,
+        });
     }
-    views.sort_by_key(|(_, view)| (!view.ready, !view.connected, view.title.clone()));
-    let lines = views
-        .iter()
-        .map(|(_, view)| view.list_text.clone())
-        .collect();
-    let buttons = views
-        .into_iter()
-        .map(|(name, view)| (name, view.title))
-        .collect();
-    (lines, buttons)
+    items.sort_by_key(|item| (item.group, !item.connected, item.button.1.clone()));
+    items
 }
 
 async fn send_customer_keys_page(
@@ -1917,8 +1951,8 @@ async fn send_customer_keys_page(
     requested_page: usize,
 ) -> HandlerResult {
     settings.repair_user_key_replacements(uid, now_epoch());
-    let (lines, buttons) = customer_key_list(settings, vpn, uid);
-    if lines.is_empty() {
+    let items = customer_key_list(settings, vpn, uid);
+    if items.is_empty() {
         bot.send_message(
             chat,
             "🔑 У вас пока нет ключей. Вы можете приобрести ключ или обратиться в поддержку.",
@@ -1929,23 +1963,50 @@ async fn send_customer_keys_page(
         return Ok(());
     }
     const PAGE_SIZE: usize = 6;
-    let pages = lines.len().div_ceil(PAGE_SIZE);
+    let pages = items.len().div_ceil(PAGE_SIZE);
     let page = requested_page.min(pages.saturating_sub(1));
     let start = page * PAGE_SIZE;
-    let end = (start + PAGE_SIZE).min(lines.len());
-    let page_lines = &lines[start..end];
-    let page_buttons = &buttons[start..end];
+    let end = (start + PAGE_SIZE).min(items.len());
+    let visible_items = &items[start..end];
+    let mut page_lines = Vec::new();
+    let mut previous_group = None;
+    for item in visible_items {
+        if previous_group != Some(item.group) {
+            page_lines.push(item.group.heading().to_string());
+            previous_group = Some(item.group);
+        }
+        page_lines.push(item.line.clone());
+    }
+    let page_buttons = visible_items
+        .iter()
+        .map(|item| item.button.clone())
+        .collect::<Vec<_>>();
+    let replacement = items
+        .iter()
+        .filter(|item| item.group == CustomerKeyGroup::Replacement)
+        .count();
+    let working = items
+        .iter()
+        .filter(|item| item.group == CustomerKeyGroup::Working)
+        .count();
+    let renewal = items
+        .iter()
+        .filter(|item| item.group == CustomerKeyGroup::Renewal)
+        .count();
     bot.send_message(
         chat,
         format!(
-            "🔑 Ваши подключения · страница {}/{}\nВсего ключей: {}\n\n{}\n\nОткройте карточку нужного подключения. Архивные и заменённые ключи здесь не показываются.",
+            "🔑 Ваши подключения · страница {}/{}\n\n🚨 Нужна замена: {} · ✅ Работают: {} · ⌛ Продлить: {}\nВсего подключений: {}\n\n{}\n\nОткройте карточку нужного подключения. Проблемные подключения показываются первыми; архивные и заменённые скрыты.",
             page + 1,
             pages,
-            lines.len(),
+            replacement,
+            working,
+            renewal,
+            items.len(),
             page_lines.join("\n\n")
         ),
     )
-    .reply_markup(menu::customer_keys_page_menu(page_buttons, page, pages))
+    .reply_markup(menu::customer_keys_page_menu(&page_buttons, page, pages))
     .await?;
     send_pending_replacements(bot, chat, uid, settings).await?;
     Ok(())
@@ -5611,8 +5672,8 @@ async fn message_handler(
                     .reply_markup(menu::customer_help_menu()).await?;
             }
             "⚙️ Ещё" => {
-                bot.send_message(msg.chat.id, "⚙️ Дополнительные возможности\n\nВеб-кабинет, промокоды, уведомления, партнёрская программа и восстановление старых подключений.")
-                    .reply_markup(menu::customer_more_menu(cfg.portal_public_url.is_some(), crate::calendar::legacy_requests_open(now_epoch()))).await?;
+                bot.send_message(msg.chat.id, "⚙️ Дополнительные возможности\n\nВеб-кабинет, промокоды, уведомления и партнёрская программа.")
+                    .reply_markup(menu::customer_more_menu(cfg.portal_public_url.is_some())).await?;
             }
             "🌐 Веб-кабинет" => {
                 portal_login_screen(&bot, msg.chat.id, uid, &cfg, &settings).await?;
@@ -5624,10 +5685,15 @@ async fn message_handler(
             "🤝 Стать партнёром" => {
                 bot.send_message(msg.chat.id,"🤝 Партнёрская программа\n\nВы привлекаете покупателей, а платежи и VPN-инфраструктуру обслуживает ZuevVPN. Комиссия: 20%; после 10 оплаченных продаж за 30 дней — 25%, после 30 — 30%. Начисление после выдачи ключа, холд 7 дней, вывод от 1000 ₽. Стоимость эквайринга оплачивает сервис.\n\nЕсли условия подходят, оставьте заявку и расскажите, где планируете привлекать клиентов.").reply_markup(menu::partner_application_menu()).await?;
             }
-            "♻️ Восстановить ключи" if crate::calendar::legacy_requests_open(now_epoch()) =>
-            {
-                let eligible = settings.legacy_user_eligible(uid, now_epoch());
-                bot.send_message(msg.chat.id,"♻️ Восстановление ранее приобретённых ключей\n\nЕсли вы покупали ключи лично у администратора, здесь можно запросить создание такого же количества новых ключей. Восстановление бесплатно, но каждая заявка проверяется вручную. Администратор видит ваш @username и Telegram ID.\n\nЗаявки принимаются до 30.11.2026 включительно. Новый ключ действует до конца 2026 года; дальнейшее ежегодное продление оплачивается по отдельному техническому тарифу.").reply_markup(menu::legacy_restore_menu(eligible)).await?;
+            "♻️ Восстановить ключи" => {
+                if crate::calendar::legacy_requests_open(now_epoch()) {
+                    let eligible = settings.legacy_user_eligible(uid, now_epoch());
+                    bot.send_message(msg.chat.id,"♻️ Восстановление ранее приобретённых ключей\n\nЕсли вы покупали ключи лично у администратора, здесь можно запросить создание такого же количества новых ключей. Восстановление бесплатно, но каждая заявка проверяется вручную. Администратор видит ваш @username и Telegram ID.\n\nЗаявки принимаются до 30.11.2026 включительно. Новый ключ действует до конца 2026 года; дальнейшее ежегодное продление оплачивается по отдельному техническому тарифу.").reply_markup(menu::legacy_restore_menu(eligible)).await?;
+                } else {
+                    bot.send_message(msg.chat.id, "Приём заявок на восстановление завершён.")
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                }
             }
             _ => {
                 bot.send_message(msg.chat.id, "Используйте кнопки меню ниже.")
@@ -9668,10 +9734,7 @@ async fn callback_handler(
         }
         Action::CustomerMore => {
             bot.send_message(chat, "⚙️ Дополнительные возможности\n\nЗдесь находятся функции, которые используются реже.")
-                .reply_markup(menu::customer_more_menu(
-                    cfg.portal_public_url.is_some(),
-                    crate::calendar::legacy_requests_open(now_epoch()),
-                )).await?;
+                .reply_markup(menu::customer_more_menu(cfg.portal_public_url.is_some())).await?;
         }
         Action::CustomerLegacyRestore => {
             if crate::calendar::legacy_requests_open(now_epoch()) {
@@ -9680,10 +9743,7 @@ async fn callback_handler(
                     .reply_markup(menu::legacy_restore_menu(eligible)).await?;
             } else {
                 bot.send_message(chat, "Приём заявок на восстановление завершён.")
-                    .reply_markup(menu::customer_more_menu(
-                        cfg.portal_public_url.is_some(),
-                        false,
-                    ))
+                    .reply_markup(menu::customer_keyboard())
                     .await?;
             }
         }
@@ -12299,6 +12359,7 @@ mod tests {
             "💰 Баланс и оплата",
             "🆘 Помощь",
             "⚙️ Ещё",
+            "♻️ Восстановить ключи",
         ] {
             assert!(is_customer_navigation(text), "{text}");
         }
@@ -12806,7 +12867,7 @@ mod tests {
             menu::main_menu(Lang::Ru),
             menu::profile_menu(true),
             menu::customer_help_menu(),
-            menu::customer_more_menu(true, true),
+            menu::customer_more_menu(true),
             menu::notification_settings_menu(true, true),
             menu::portal_link_menu("https://example.com/login"),
             menu::admin_dashboard_menu(),
