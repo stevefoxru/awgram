@@ -117,6 +117,7 @@ fn driver_args(command: &NodeCommand) -> Option<Vec<String>> {
             vec!["restore".into(), backup_ref.clone()]
         }
         NodeCommand::Capabilities => return None,
+        NodeCommand::EgressProbe { .. } => return None,
         _ => return Some(Vec::new()),
     };
     Some(args)
@@ -175,6 +176,48 @@ fn run() -> NodeResponse {
             code: "ok".into(),
             message: "capabilities".into(),
             data: serde_json::to_value(NodeCapabilities::for_protocol(protocol)).ok(),
+        };
+    }
+    if let NodeCommand::EgressProbe { expected_ip } = &request.payload {
+        if expected_ip.parse::<std::net::IpAddr>().is_err() {
+            return response(false, "invalid_arguments", "expected_ip is invalid");
+        }
+        let output = match std::process::Command::new("curl")
+            .args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "15",
+                "https://api.ipify.org",
+            ])
+            .output()
+        {
+            Ok(value) => value,
+            Err(error) => return response(false, "probe_start", error.to_string()),
+        };
+        let observed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || observed.parse::<std::net::IpAddr>().is_err() {
+            return response(
+                false,
+                "probe_failed",
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        return NodeResponse {
+            ok: observed == *expected_ip,
+            code: if observed == *expected_ip {
+                "ok"
+            } else {
+                "egress_mismatch"
+            }
+            .into(),
+            message: if observed == *expected_ip {
+                "egress matches".into()
+            } else {
+                format!("observed {observed}, expected {expected_ip}")
+            },
+            data: Some(serde_json::json!({"observed_ip":observed,"expected_ip":expected_ip})),
         };
     }
     let Some(args) = driver_args(&request.payload) else {

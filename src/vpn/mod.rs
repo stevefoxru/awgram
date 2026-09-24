@@ -142,6 +142,35 @@ impl Vpn {
             .unwrap_or(true))
     }
 
+    pub async fn agent_egress_probe(
+        &self,
+        control_server: &crate::store::VpnServer,
+        node: &crate::store::VpnNode,
+        secret: &str,
+        expected_ip: &str,
+    ) -> Result<String> {
+        expected_ip
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| crate::error::Error::Parse("некорректный ожидаемый IP".into()))?;
+        let response = self
+            .agent_command(
+                control_server,
+                node,
+                secret,
+                NodeCommand::EgressProbe {
+                    expected_ip: expected_ip.into(),
+                },
+            )
+            .await?;
+        Ok(response
+            .data
+            .as_ref()
+            .and_then(|value| value.get("observed_ip"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(expected_ip)
+            .to_string())
+    }
+
     pub async fn agent_diagnose(
         &self,
         server: &crate::store::VpnServer,

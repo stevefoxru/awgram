@@ -14,6 +14,11 @@ pub enum NodeCommand {
     Health,
     Diagnose,
     Capabilities,
+    /// Verifies the public egress address from this node. The URL is fixed in
+    /// the agent, so this cannot be used as an arbitrary network request.
+    EgressProbe {
+        expected_ip: String,
+    },
     Install {
         protocol: String,
     },

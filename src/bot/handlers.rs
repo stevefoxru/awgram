@@ -65,6 +65,7 @@ pub enum Action {
     ServerEnroll(i64),
     ServerEnrollRevoke(i64),
     ServerSetDefault(i64),
+    ServerReachabilityControl(i64),
     ServerRknSet(i64, bool),
     ServerRknNotify(i64),
     ServerUnavailableSet(i64, bool),
@@ -652,6 +653,10 @@ fn parse_callback(data: &str) -> Action {
             } else if let Some(v) = data.strip_prefix("server:default:") {
                 v.parse()
                     .map(Action::ServerSetDefault)
+                    .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("server:control-ru:") {
+                v.parse()
+                    .map(Action::ServerReachabilityControl)
                     .unwrap_or(Action::Unknown)
             } else if let Some(v) = data.strip_prefix("server:maintenance:start:") {
                 v.parse()
@@ -2728,7 +2733,24 @@ fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64
     } else {
         "✅ рабочий".to_string()
     };
-    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРучная отметка: {}\nДоступ из РФ: {}\nАрхив: {}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🚀 Развёртывание\nПоследняя задача: {installation}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
+    let ru_control = if settings.reachability_control_server() == Some(server.id) {
+        "🇷🇺 контрольный узел".to_string()
+    } else {
+        settings
+            .monitor_state(&format!("vpn-server-{}-ru-egress", server.id))
+            .map(|(status, details, checked)| {
+                format!(
+                    "{} проверен {}{}",
+                    if status == "ok" { "🟢" } else { "🔴" },
+                    crate::vpn::model::format_handshake(Lang::Ru, now, checked),
+                    details
+                        .map(|value| format!(" · {value}"))
+                        .unwrap_or_default()
+                )
+            })
+            .unwrap_or_else(|| "⚪ не настроен".into())
+    };
+    format!("🖥 {}\n\n📡 Состояние\nСтатус: {}{}\nРучная отметка: {}\nДоступ из РФ: {}\nКонтроль маршрута: {ru_control}\nАрхив: {}\nРоль: {}\nВыдача ключей: {}\nПротокол: {}\nЗагрузка: {assigned}/{} ({fill}%) · {capacity_health}\nСвободно мест: {free}\nТелеметрия: {telemetry}\n\n🚀 Развёртывание\nПоследняя задача: {installation}\n\n🌍 Подключение\nЛокация: {}\nIP: {}\nHostname: {}\nПровайдер: {}\n\n💳 Оплата VPS\nОплачен до: {} ({})\nСтоимость: {} / {} мес.\nАвтопродление: {}\n\n🗂 Учёт\nОткрыт: {}\nДобавлен в бот: {}",
         server.name,server.status,panel_health,manual_status,if server.blocked_by_rkn{"🔴 блокировка РКН"}else{"🟢 не отмечена"},if server.archived_at.is_some(){"🗄 в архиве"}else{"актуальный"},if server.is_local{"🏠 локальный сервер бота"}else{"☁️ удалённый VPN-сервер"},provisioning_status,protocol,server.capacity,server.location,server.public_ip,server.hostname,server.provider,paid,days,cost,server.billing_period_months.map(|v|v.to_string()).unwrap_or_else(||"—".into()),if server.auto_renew{"да"}else{"нет"},opened,crate::calendar::format_date(server.added_at))
 }
 
@@ -3468,6 +3490,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ServerEnroll(_)
         | ServerEnrollRevoke(_)
         | ServerSetDefault(_)
+        | ServerReachabilityControl(_)
         | ServerRknSet(_, _)
         | ServerRknNotify(_)
         | ServerUnavailableSet(_, _)
@@ -7909,6 +7932,24 @@ async fn callback_handler(
                         .await?;
                 }
             }
+        }
+        Action::ServerReachabilityControl(id) => {
+            let Some(server) = settings.vpn_server(id) else {
+                return Ok(());
+            };
+            if settings.vpn_node_for_server(id).is_none() || settings.node_secret(id).is_none() {
+                bot.send_message(chat, "Для российского контрольного узла сначала подключите SSH-мост/агент в разделе «Подключение». После обновления агента повторите выбор.")
+                    .reply_markup(menu::server_connection_hub_menu(id))
+                    .await?;
+                return Ok(());
+            }
+            settings.set_reachability_control_server(Some(id));
+            let target = settings
+                .default_vpn_server()
+                .and_then(|target_id| settings.vpn_server(target_id));
+            bot.send_message(chat, format!("🇷🇺 «{}» назначен контрольным узлом доступности из России.\n\nКаждый цикл мониторинга проверит, что его VPN-маршрут выходит через основной сервер{}. Ошибка создаст инцидент и уведомление администратору, но не удалит ключи и не запустит замену автоматически.\n\nНа контрольном VPS должен быть установлен агент v1.60.0 и активен туннель через проверяемый сервер.", server.name, target.as_ref().map(|value| format!(" «{}»", value.name)).unwrap_or_else(|| "".into())))
+                .reply_markup(menu::server_health_menu(id))
+                .await?;
         }
         Action::ServerRknSet(id, blocked) => {
             let Some(server) = settings.vpn_server(id) else {
@@ -13433,6 +13474,10 @@ mod tests {
         );
         assert_eq!(parse_callback("move:all"), Action::CustomerReplaceAll);
         assert_eq!(
+            parse_callback("server:control-ru:7"),
+            Action::ServerReachabilityControl(7)
+        );
+        assert_eq!(
             parse_callback("move:bulk-run:7:9"),
             Action::CustomerBulkMoveRun(7, 9)
         );
@@ -13890,6 +13935,7 @@ mod tests {
             ServerEnroll(1),
             ServerEnrollRevoke(1),
             ServerSetDefault(1),
+            ServerReachabilityControl(1),
             ServerRknSet(1, true),
             ServerRknNotify(1),
             ServerUnavailableSet(1, true),
@@ -14148,6 +14194,7 @@ mod tests {
                 ServerEnroll(_) => {}
                 ServerEnrollRevoke(_) => {}
                 ServerSetDefault(_) => {}
+                ServerReachabilityControl(_) => {}
                 ServerRknSet(_, _) => {}
                 ServerRknNotify(_) => {}
                 ServerUnavailableSet(_, _) => {}
@@ -14572,6 +14619,7 @@ mod tests {
             (Action::ServerEnroll(1), true, false),
             (Action::ServerEnrollRevoke(1), true, false),
             (Action::ServerSetDefault(1), true, false),
+            (Action::ServerReachabilityControl(1), true, false),
             (Action::ServerRknSet(1, true), true, false),
             (Action::ServerRknNotify(1), true, false),
             (Action::ServerUnavailableSet(1, true), true, false),

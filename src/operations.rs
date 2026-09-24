@@ -545,6 +545,49 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
         }
     }
 
+    // A controller can see a foreign VPS while Russian users cannot. An
+    // explicitly selected Russian control node therefore verifies the public
+    // egress of the default replacement server through its already configured
+    // tunnel. This signal is advisory: it never deletes keys or automatically
+    // marks a server unavailable.
+    if let (Some(control_id), Some(target_id)) = (
+        store.reachability_control_server(),
+        store.default_vpn_server(),
+    ) {
+        if control_id != target_id {
+            if let (Some(control), Some(target), Some(node), Some(secret)) = (
+                store.vpn_server(control_id),
+                store.vpn_server(target_id),
+                store.vpn_node_for_server(control_id),
+                store.node_secret(control_id),
+            ) {
+                let component = format!("vpn-server-{target_id}-ru-egress");
+                match vpn
+                    .agent_egress_probe(&control, &node, &secret, &target.public_ip)
+                    .await
+                {
+                    Ok(observed) => {
+                        let recovered = store.update_monitor_state(
+                            &component,
+                            "ok",
+                            Some(&format!("control={} observed={observed}", control.name)),
+                            now,
+                        );
+                        if recovered {
+                            notify_admins(bot, cfg, format!("✅ Проверка из России восстановилась\n\nКонтрольный узел: {}\nVPN-сервер: {}\nВыходной IP: {observed}", control.name, target.name)).await;
+                        }
+                    }
+                    Err(error) => {
+                        let details = format!("control={} error={error}", control.name);
+                        if store.update_monitor_state(&component, "error", Some(&details), now) {
+                            notify_admins(bot, cfg, format!("🚨 VPN не прошёл проверку из России\n\nКонтрольный узел: {}\nПроверяемый сервер: {}\nОжидался выходной IP: {}\nОшибка: {error}\n\nКлючи не изменены. Проверьте маршрут на российском узле; при подтверждённой блокировке отметьте сервер нерабочим вручную.", control.name, target.name, target.public_ip)).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Remote panel samples are collected by this monitor even when the controller
     // has no local VPN. Keep daily analytics current in controller-only mode too.
     store.rollup(now);

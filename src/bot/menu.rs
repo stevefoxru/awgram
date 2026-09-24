@@ -544,6 +544,10 @@ pub fn server_health_menu(id: i64) -> InlineKeyboardMarkup {
             cb("🔬 Панель и API", &format!("server:diagnose:{id}")),
         ],
         vec![cb("🧪 Тестовая выдача", &format!("server:probe:{id}"))],
+        vec![cb(
+            "🇷🇺 Контроль доступности из РФ",
+            &format!("server:control-ru:{id}"),
+        )],
         vec![cb("⬅️ К серверу", &format!("server:{id}"))],
     ])
 }

@@ -142,6 +142,16 @@ impl Store {
     pub fn set_default_vpn_server(&self, server_id: i64) {
         self.set_json("default_vpn_server", &server_id);
     }
+    pub fn reachability_control_server(&self) -> Option<i64> {
+        self.get_json::<i64>("reachability_control_server")
+            .filter(|id| *id > 0)
+    }
+    pub fn set_reachability_control_server(&self, server_id: Option<i64>) {
+        self.set_json(
+            "reachability_control_server",
+            &server_id.unwrap_or_default(),
+        );
+    }
     pub fn blocked_key_cleanup_enabled(&self) -> bool {
         self.get_json("blocked_key_cleanup_enabled").unwrap_or(true)
     }
