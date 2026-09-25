@@ -257,6 +257,83 @@ struct PurchaseRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct RenewalRequest {
+    months: Option<i64>,
+}
+
+async fn create_web_renewal(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+    Json(input): Json<RenewalRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if state.store.client_owner(&name) != Some(user_id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let now = now_epoch();
+    let (months, amount, legacy) = if state.store.is_legacy_client(&name, user_id) {
+        let year = crate::calendar::year_at(now);
+        if now < crate::calendar::start_of_december(year)
+            || now > crate::calendar::end_of_year(year)
+        {
+            return (
+                StatusCode::CONFLICT,
+                "Льготное продление Legacy-ключей доступно только в декабре",
+            )
+                .into_response();
+        }
+        (
+            12,
+            state
+                .store
+                .legacy_renewal_price_for_user(user_id, state.store.legacy_renewal_price_kopecks()),
+            true,
+        )
+    } else {
+        let months = input.months.unwrap_or(12);
+        let Some(amount) = state.store.tariff_price_kopecks(months).filter(|v| *v > 0) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        (months, amount, false)
+    };
+    let id = if legacy {
+        state
+            .store
+            .create_legacy_renewal_request(user_id, &name, amount, now)
+    } else {
+        state
+            .store
+            .create_renewal_request(user_id, &name, months, amount, now)
+    };
+    let Some(id) = id else {
+        return (
+            StatusCode::CONFLICT,
+            "По этому ключу уже есть заявка на продление",
+        )
+            .into_response();
+    };
+    state.store.add_portal_notification(
+        user_id,
+        "renewal",
+        "Заявка на продление создана",
+        &format!("Ключ «{name}», сумма {:.2} ₽.", amount as f64 / 100.0),
+        Some("/?view=finance"),
+        now,
+    );
+    for admin in state.admin_ids.iter() {
+        let _=state.bot.send_message(ChatId(*admin),format!("📅 Веб-заявка на продление #{id}\nКлюч: {name}\nПользователь: {user_id}\nСумма: {:.2} ₽",amount as f64/100.0)).await;
+    }
+    Json(serde_json::json!({"ok":true,"payment_id":id,"amount_kopecks":amount,"months":months,"legacy":legacy,"instructions":state.store.payment_instructions()})).into_response()
+}
+
+#[derive(serde::Deserialize)]
 struct PromoRequest {
     code: String,
 }
@@ -1834,6 +1911,7 @@ pub async fn run(
         .route("/api/keys/{name}/traffic", get(key_traffic))
         .route("/api/keys/{name}/label", patch(rename_key))
         .route("/api/keys/{name}/folder", patch(set_key_folder))
+        .route("/api/keys/{name}/renew", post(create_web_renewal))
         .route("/api/notifications/feed", get(notifications))
         .route("/api/notifications/read", post(read_notifications))
         .route("/api/support", post(support))
