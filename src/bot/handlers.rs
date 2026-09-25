@@ -1706,7 +1706,7 @@ async fn stage_customer_replacement(
     Ok((replacement_id, new_name, replacement))
 }
 
-async fn provision_customer_key(
+pub(crate) async fn provision_customer_key(
     vpn: &Vpn,
     settings: &Store,
     user_id: i64,

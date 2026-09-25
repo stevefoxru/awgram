@@ -687,6 +687,24 @@ impl Store {
         .is_ok_and(|changed| changed == 1)
     }
 
+    pub fn claim_payment_processing(&self, id: i64) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE payment_requests SET status='processing' WHERE id=?1 AND status='pending'",
+                [id],
+            )
+        })
+        .is_ok_and(|n| n == 1)
+    }
+    pub fn release_payment_processing(&self, id: i64) {
+        let _ = self.with_conn(|c| {
+            c.execute(
+                "UPDATE payment_requests SET status='pending' WHERE id=?1 AND status='processing'",
+                [id],
+            )
+        });
+    }
+
     pub fn release_legacy_request_claim(&self, id: i64) {
         let _ = self.with_conn(|connection| {
             connection.execute(
@@ -1890,7 +1908,7 @@ impl Store {
             c.execute(
                 "UPDATE payment_requests
                  SET status=?2,decided_at=?3,decided_by=?4,client_name=?5
-                 WHERE id=?1 AND status='pending'",
+                 WHERE id=?1 AND status IN ('pending','processing')",
                 rusqlite::params![id, status.as_str(), now, admin_id, client_name],
             )
         })

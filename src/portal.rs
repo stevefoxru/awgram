@@ -1320,11 +1320,37 @@ async fn admin_payment_action(
                 )
         }
         "approve" => {
-            return (
-                StatusCode::CONFLICT,
-                "Покупка требует выдачи ключа; подтвердите её в Telegram-админке",
+            let Some(server_id) = payment.server_id else {
+                return (StatusCode::CONFLICT, "В заявке не указана локация").into_response();
+            };
+            if !state.store.claim_payment_processing(id) {
+                return (StatusCode::CONFLICT, "Заявка уже обрабатывается").into_response();
+            }
+            match crate::bot::handlers::provision_customer_key(
+                &state.vpn,
+                &state.store,
+                payment.user_id,
+                payment.months,
+                server_id,
             )
-                .into_response()
+            .await
+            {
+                Ok(key) => state.store.decide_payment(
+                    id,
+                    crate::store::PaymentStatus::Approved,
+                    admin_id,
+                    Some(&key.name),
+                    now,
+                ),
+                Err(error) => {
+                    state.store.release_payment_processing(id);
+                    return (
+                        StatusCode::CONFLICT,
+                        format!("Выдача ключа не выполнена: {error}"),
+                    )
+                        .into_response();
+                }
+            }
         }
         "reject" => state.store.reject_payment(
             id,
@@ -1341,13 +1367,20 @@ async fn admin_payment_action(
         return StatusCode::CONFLICT.into_response();
     }
     let (title, body) = if input.action == "approve" {
-        (
-            "Пополнение подтверждено",
-            format!(
-                "Баланс пополнен на {:.2} ₽.",
-                payment.amount_kopecks as f64 / 100.0
-            ),
-        )
+        if payment.method == "topup" {
+            (
+                "Пополнение подтверждено",
+                format!(
+                    "Баланс пополнен на {:.2} ₽.",
+                    payment.amount_kopecks as f64 / 100.0
+                ),
+            )
+        } else {
+            (
+                "Покупка подтверждена",
+                "Новый VPN-ключ создан и появился в личном кабинете.".into(),
+            )
+        }
     } else {
         (
             "Платёж отклонён",
