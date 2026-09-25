@@ -47,6 +47,7 @@ async fn main() {
         let portal_bot = bot.clone();
         let portal_admins = cfg.admin_ids.clone();
         let portal_smtp = cfg.smtp.clone();
+        let portal_public_url = cfg.portal_public_url.clone();
         let secure_cookie = cfg
             .portal_public_url
             .as_deref()
@@ -62,6 +63,7 @@ async fn main() {
                     admin_ids: portal_admins,
                     secure_cookie,
                     smtp: portal_smtp,
+                    public_url: portal_public_url,
                 },
             )
             .await

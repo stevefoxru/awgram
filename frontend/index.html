@@ -3,13 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#07111f">
-  <meta name="color-scheme" content="dark">
-  <title>ZuevVPN</title>
+  <meta name="theme-color" content="#ffffff">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="VPN на базе AmneziaWG для телефона, компьютера и роутера. Покупка, управление подключениями, трафиком и поддержкой в одном личном кабинете.">
+  <meta name="robots" content="index,follow,max-image-preview:large">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="ru_RU">
+  <meta property="og:title" content="ZPNet — VPN для всех ваших устройств">
+  <meta property="og:description" content="Стабильные AWG-подключения и удобный личный кабинет с резервным входом по почте.">
+  <meta property="og:url" content="https://zpnet.pro/">
+  <meta name="twitter:card" content="summary">
+  <link rel="canonical" href="https://zpnet.pro/">
+  <title>ZPNet — VPN для телефона, компьютера и роутера</title>
   <link rel="stylesheet" href="/assets/app.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Service","name":"ZPNet VPN","url":"https://zpnet.pro/","serviceType":"VPN на базе AmneziaWG","areaServed":"RU","description":"VPN для телефона, компьютера и роутера с личным кабинетом и поддержкой."}</script>
 </head>
 <body>
-  <div id="app" class="boot"><div class="loader"></div><p>Загружаем кабинет…</p></div>
+  <div id="app" class="public seo-fallback">
+    <header class="public-nav"><div class="brand"><span class="logo">Z</span>ZPNet</div><a class="button" href="#access">Личный кабинет</a></header>
+    <main>
+      <section class="public-hero">
+        <div><div class="eyebrow">VPN без лишней сложности</div><h1>Привычный интернет<br><span>на всех устройствах</span></h1><p>Подключайте телефон, компьютер, планшет или роутер через AmneziaWG. Управляйте ключами, сроками, трафиком и обращениями в одном кабинете.</p><div class="actions"><a class="button primary" href="#plans">Выбрать тариф</a><a class="button ghost" href="#access">Войти в кабинет</a></div></div>
+        <article class="card public-stat"><span class="badge">AWG 1.0</span><h2>Управление в одном месте</h2><div class="list-row"><span>Устройства</span><strong>телефон, ПК, роутер</strong></div><div class="list-row"><span>Доступ</span><strong>Telegram и почта</strong></div><div class="list-row"><span>Поддержка</span><strong>в личном кабинете</strong></div></article>
+      </section>
+      <section class="public-section feature-grid"><article class="card"><h2>Быстрый старт</h2><p class="muted">Получите ключ, импортируйте его в приложение и подключайтесь.</p></article><article class="card"><h2>Понятный кабинет</h2><p class="muted">Статус, срок действия, трафик, QR-код и оплата всегда под рукой.</p></article><article class="card"><h2>Резервный доступ</h2><p class="muted">Привяжите почту и входите в кабинет, даже если Telegram недоступен.</p></article></section>
+      <section id="access" class="public-section seo-copy"><div><div class="eyebrow">Личный кабинет</div><h2>Один аккаунт на любом экране</h2><p class="muted">Интерфейс адаптирован для смартфона, планшета и компьютера. После первого входа через Telegram можно подтвердить почту и использовать её как независимый способ доступа.</p></div></section>
+    </main>
+    <footer>© ZPNet · VPN на базе AmneziaWG</footer>
+  </div>
+  <noscript><p class="noscript">Для покупки и входа в личный кабинет включите JavaScript.</p></noscript>
   <div id="toast" role="status" aria-live="polite"></div>
   <script type="module" src="/assets/app.js"></script>
 </body>

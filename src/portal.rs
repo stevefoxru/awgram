@@ -27,6 +27,7 @@ struct PortalState {
     admin_ids: Arc<Vec<i64>>,
     secure_cookie: bool,
     smtp: Option<crate::config::SmtpConfig>,
+    public_url: String,
 }
 
 pub struct PortalOptions {
@@ -34,6 +35,7 @@ pub struct PortalOptions {
     pub admin_ids: Vec<i64>,
     pub secure_cookie: bool,
     pub smtp: Option<crate::config::SmtpConfig>,
+    pub public_url: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -88,10 +90,30 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn robots(State(state): State<PortalState>) -> Response {
+    let body = format!(
+        "User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /login\nSitemap: {}/sitemap.xml\n",
+        state.public_url.trim_end_matches('/')
+    );
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+async fn sitemap(State(state): State<PortalState>) -> Response {
+    let url = state.public_url.trim_end_matches('/');
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>{url}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url></urlset>"
+    );
+    (
+        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
 async fn catalog(State(state): State<PortalState>) -> Response {
-    let brand = state
-        .store
-        .mirror_bot_config()
+    let mirror = state.store.mirror_bot_config();
+    let bot_username = mirror.as_ref().map(|(username, _, _, _)| username.clone());
+    let brand = mirror
         .map(|(username, _, _, _)| {
             username
                 .trim_start_matches('@')
@@ -113,7 +135,7 @@ async fn catalog(State(state): State<PortalState>) -> Response {
         "id":server.id,"name":server.name,"location":server.location,"protocol":match server.protocol.as_str(){"amneziawg-3"=>"AWG 3.1","amneziawg-2"=>"AWG 2.0",_=>"AWG 1.0"},
         "available":server.capacity.saturating_sub(state.store.server_client_count(server.id)).max(0)
     })).collect::<Vec<_>>();
-    Json(serde_json::json!({"brand":brand,"tariffs":tariffs,"servers":servers})).into_response()
+    Json(serde_json::json!({"brand":brand,"bot_username":bot_username,"email_login_enabled":state.smtp.is_some(),"tariffs":tariffs,"servers":servers})).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -183,11 +205,19 @@ async fn frontend_js() -> ([(&'static str, &'static str); 1], &'static str) {
 }
 
 async fn security_headers(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_string();
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    let private = path.starts_with("/api/") || path == "/login";
+    let cache = if private {
+        "no-store, max-age=0"
+    } else if path.starts_with("/assets/") {
+        "public, max-age=3600"
+    } else {
+        "public, max-age=300"
+    };
     let values = [
-        ("cache-control", "no-store, max-age=0"),
-        ("pragma", "no-cache"),
+        ("cache-control", cache),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
         ("referrer-policy", "no-referrer"),
@@ -200,6 +230,18 @@ async fn security_headers(request: Request, next: Next) -> Response {
         if let Ok(value) = value.parse() {
             headers.insert(name, value);
         }
+    }
+    if private {
+        headers.insert(
+            "pragma",
+            "no-cache".parse().expect("static header is valid"),
+        );
+        headers.insert(
+            "x-robots-tag",
+            "noindex, nofollow, noarchive"
+                .parse()
+                .expect("static header is valid"),
+        );
     }
     headers.insert(
         "permissions-policy",
@@ -978,6 +1020,8 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let app = Router::new()
         .route("/", get(index))
+        .route("/robots.txt", get(robots))
+        .route("/sitemap.xml", get(sitemap))
         .route("/assets/app.css", get(frontend_css))
         .route("/assets/app.js", get(frontend_js))
         .route("/login", get(login))
@@ -1009,6 +1053,11 @@ pub async fn run(
             admin_ids: Arc::new(options.admin_ids),
             secure_cookie: options.secure_cookie,
             smtp,
+            public_url: options
+                .public_url
+                .unwrap_or_else(|| "https://zpnet.pro".to_string())
+                .trim_end_matches('/')
+                .to_string(),
         });
     tracing::info!(bind, "внутренний личный кабинет запущен");
     axum::serve(listener, app).await
