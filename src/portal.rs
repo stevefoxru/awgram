@@ -933,6 +933,18 @@ struct AdminCrmAction {
     action: String,
 }
 
+#[derive(serde::Deserialize)]
+struct AdminPaymentAction {
+    action: String,
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct AdminBalanceAction {
+    amount_rubles: f64,
+    reason: String,
+}
+
 async fn admin_user_action(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -989,6 +1001,159 @@ async fn admin_ticket_action(
     } else {
         StatusCode::CONFLICT.into_response()
     }
+}
+
+async fn admin_payment_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(input): Json<AdminPaymentAction>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(admin_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(payment) = state.store.payment_request(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let now = now_epoch();
+    let result = match input.action.as_str() {
+        "approve" if payment.method == "topup" => {
+            let decided = state.store.decide_payment(
+                id,
+                crate::store::PaymentStatus::Approved,
+                admin_id,
+                None,
+                now,
+            );
+            decided
+                && state.store.add_ledger_entry(
+                    payment.user_id,
+                    payment.amount_kopecks,
+                    "topup",
+                    &format!("payment:{id}"),
+                    Some("Одобрено в веб-админке"),
+                    now,
+                )
+        }
+        "approve" => {
+            return (
+                StatusCode::CONFLICT,
+                "Покупка требует выдачи ключа; подтвердите её в Telegram-админке",
+            )
+                .into_response()
+        }
+        "reject" => state.store.reject_payment(
+            id,
+            admin_id,
+            input
+                .reason
+                .as_deref()
+                .unwrap_or("Отклонено администратором"),
+            now,
+        ),
+        _ => false,
+    };
+    if !result {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let (title, body) = if input.action == "approve" {
+        (
+            "Пополнение подтверждено",
+            format!(
+                "Баланс пополнен на {:.2} ₽.",
+                payment.amount_kopecks as f64 / 100.0
+            ),
+        )
+    } else {
+        (
+            "Платёж отклонён",
+            input
+                .reason
+                .unwrap_or_else(|| "Обратитесь в поддержку за подробностями.".into()),
+        )
+    };
+    state.store.add_portal_notification(
+        payment.user_id,
+        "payment",
+        title,
+        &body,
+        Some("/?view=finance"),
+        now,
+    );
+    if payment.user_id > 0 {
+        let _ = state
+            .bot
+            .send_message(ChatId(payment.user_id), format!("{title}\n\n{body}"))
+            .await;
+    }
+    Json(serde_json::json!({"ok":true})).into_response()
+}
+
+async fn admin_balance_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(input): Json<AdminBalanceAction>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(admin_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let amount = (input.amount_rubles * 100.0).round() as i64;
+    let reason = input.reason.trim();
+    if amount == 0 || amount.abs() > 10_000_000 || reason.is_empty() || reason.chars().count() > 300
+    {
+        return (StatusCode::BAD_REQUEST, "Укажите ненулевую сумму и причину").into_response();
+    }
+    let now = now_epoch();
+    if !state.store.add_ledger_entry(
+        id,
+        amount,
+        "admin_adjustment",
+        &format!("admin:{admin_id}:user:{id}:{now}"),
+        Some(reason),
+        now,
+    ) {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let body = format!(
+        "Баланс {} на {:.2} ₽. Причина: {reason}",
+        if amount > 0 {
+            "пополнен"
+        } else {
+            "уменьшен"
+        },
+        amount.abs() as f64 / 100.0
+    );
+    state.store.add_portal_notification(
+        id,
+        "balance",
+        "Изменение баланса",
+        &body,
+        Some("/?view=finance"),
+        now,
+    );
+    if id > 0 {
+        let _ = state
+            .bot
+            .send_message(ChatId(id), format!("💰 {body}"))
+            .await;
+    }
+    Json(serde_json::json!({"ok":true,"balance_kopecks":state.store.balance_kopecks(id)}))
+        .into_response()
 }
 
 async fn admin_server_action(
@@ -1634,7 +1799,12 @@ pub async fn run(
         .route("/api/me", get(me))
         .route("/api/admin/overview", get(admin_overview))
         .route("/api/admin/users/{id}/action", post(admin_user_action))
+        .route("/api/admin/users/{id}/balance", post(admin_balance_action))
         .route("/api/admin/tickets/{id}/action", post(admin_ticket_action))
+        .route(
+            "/api/admin/payments/{id}/action",
+            post(admin_payment_action),
+        )
         .route("/api/admin/servers/{id}/action", post(admin_server_action))
         .route("/api/logout", post(logout))
         .route("/api/keys/{name}/config", get(download_config))
