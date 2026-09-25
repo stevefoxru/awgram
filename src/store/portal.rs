@@ -6,6 +6,7 @@ use crate::store::Store;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PortalKey {
+    pub id: i64,
     pub name: String,
     pub device: String,
     pub location: String,
@@ -16,6 +17,8 @@ pub struct PortalKey {
     pub last_handshake: Option<i64>,
     pub enabled: Option<bool>,
     pub expires_at: Option<i64>,
+    pub created_at: i64,
+    pub legacy: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -453,7 +456,7 @@ impl Store {
         let user = self.user(user_id)?;
         let mut keys = self.with_conn(|connection| {
             let mut statement = connection.prepare(
-                "SELECT c.name,COALESCE(c.device_label,'Не указано'),
+                "SELECT c.id,c.name,COALESCE(c.device_label,'Не указано'),
                         COALESCE(s.location,'Не определён'),c.protocol,
                         CASE
                           WHEN s.archived_at IS NOT NULL THEN 'archived'
@@ -462,18 +465,21 @@ impl Store {
                         END,
                         COALESCE((SELECT rx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY ts DESC LIMIT 1),0),
                         COALESCE((SELECT tx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY ts DESC LIMIT 1),0),
-                        (SELECT ts FROM traffic_samples t WHERE t.client_id=c.id AND t.online=1 ORDER BY ts DESC LIMIT 1)
+                        (SELECT ts FROM traffic_samples t WHERE t.client_id=c.id AND t.online=1 ORDER BY ts DESC LIMIT 1),
+                        c.first_seen,COALESCE((SELECT legacy FROM client_subscriptions sub WHERE sub.client_name=c.name),0)
                  FROM clients c LEFT JOIN vpn_servers s ON s.id=c.server_id
                  WHERE c.owner_user_id=?1 AND c.removed_at IS NULL ORDER BY c.name",
             )?;
             let rows = statement.query_map([user_id], |row| Ok(PortalKey {
-                name: row.get(0)?, device: row.get(1)?, location: row.get(2)?,
-                protocol: row.get(3)?, server_status: row.get(4)?,
-                rx: row.get::<_, i64>(5)?.max(0) as u64,
-                tx: row.get::<_, i64>(6)?.max(0) as u64,
-                last_handshake: row.get(7)?,
+                id: row.get(0)?, name: row.get(1)?, device: row.get(2)?, location: row.get(3)?,
+                protocol: row.get(4)?, server_status: row.get(5)?,
+                rx: row.get::<_, i64>(6)?.max(0) as u64,
+                tx: row.get::<_, i64>(7)?.max(0) as u64,
+                last_handshake: row.get(8)?,
                 enabled: None,
                 expires_at: None,
+                created_at: row.get(9)?,
+                legacy: row.get::<_,i64>(10)? != 0,
             }))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         }).unwrap_or_default();

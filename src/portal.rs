@@ -263,7 +263,58 @@ struct PromoRequest {
 
 #[derive(serde::Deserialize)]
 struct TransferRequest {
-    to_user_id: i64,
+    recipient: String,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyRestoreRequest {
+    name: String,
+    comment: Option<String>,
+    code: Option<String>,
+}
+
+async fn create_web_legacy_request(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<LegacyRestoreRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let now = now_epoch();
+    if !state.store.legacy_user_eligible(user_id, now) {
+        let Some(code) = input.code.as_deref() else {
+            return (
+                StatusCode::PRECONDITION_REQUIRED,
+                "Введите технический промокод",
+            )
+                .into_response();
+        };
+        if !state.store.activate_legacy_promo(user_id, code, now) {
+            return (
+                StatusCode::CONFLICT,
+                "Промокод недействителен или приём заявок закрыт",
+            )
+                .into_response();
+        }
+    }
+    match state
+        .store
+        .create_legacy_request(user_id, &input.name, input.comment.as_deref(), now)
+    {
+        Some(id) => {
+            for admin in state.admin_ids.iter() {
+                let _=state.bot.send_message(ChatId(*admin),format!("♻️ Новая веб-заявка на восстановление #{id}\nПользователь: ID {user_id}\nЖелаемое имя: {}",input.name)).await;
+            }
+            Json(serde_json::json!({"ok":true,"request_id":id})).into_response()
+        }
+        None => (StatusCode::CONFLICT, "Не удалось создать заявку").into_response(),
+    }
 }
 
 async fn create_web_transfer(
@@ -280,13 +331,26 @@ async fn create_web_transfer(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    let recipient = input.recipient.trim();
+    let target = recipient
+        .parse::<i64>()
+        .ok()
+        .and_then(|id| state.store.user(id))
+        .or_else(|| {
+            state
+                .store
+                .find_user_by_username(recipient.trim_start_matches('@'))
+        });
+    let Some(target) = target else {
+        return (StatusCode::NOT_FOUND, "Получатель не найден").into_response();
+    };
     match state
         .store
-        .create_key_transfer(&name, user_id, input.to_user_id, now_epoch())
+        .create_key_transfer(&name, user_id, target.user_id, now_epoch())
     {
         Ok(id) => {
-            if input.to_user_id > 0 {
-                let _=state.bot.send_message(ChatId(input.to_user_id),format!("🎁 Вам предлагают принять VPN-ключ «{name}». Откройте веб-кабинет или раздел ключей в боте, чтобы подтвердить передачу.")).await;
+            if target.user_id > 0 {
+                let _=state.bot.send_message(ChatId(target.user_id),format!("🎁 Вам предлагают принять VPN-ключ «{name}». Откройте веб-кабинет или раздел ключей в боте, чтобы подтвердить передачу.")).await;
             }
             Json(serde_json::json!({"ok":true,"transfer_id":id})).into_response()
         }
@@ -1413,6 +1477,7 @@ pub async fn run(
         .route("/api/purchases", post(create_purchase))
         .route("/api/promos/activate", post(activate_web_promo))
         .route("/api/keys/{name}/transfer", post(create_web_transfer))
+        .route("/api/legacy/requests", post(create_web_legacy_request))
         .route("/api/transfers/{id}/action", post(web_transfer_action))
         .route("/api/payments/{id}/proof", post(submit_payment_proof))
         .route("/api/payments/webhook", post(acquiring_webhook))
