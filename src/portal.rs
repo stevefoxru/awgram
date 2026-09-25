@@ -355,6 +355,14 @@ async fn create_web_legacy_request(
         .create_legacy_request(user_id, &input.name, input.comment.as_deref(), now)
     {
         Some(id) => {
+            state.store.add_portal_notification(
+                user_id,
+                "recovery",
+                "Заявка на восстановление принята",
+                &format!("Заявка #{id} для ключа «{}» ожидает проверки.", input.name),
+                Some("/?view=restore"),
+                now,
+            );
             for admin in state.admin_ids.iter() {
                 let _=state.bot.send_message(ChatId(*admin),format!("♻️ Новая веб-заявка на восстановление #{id}\nПользователь: ID {user_id}\nЖелаемое имя: {}",input.name)).await;
             }
@@ -396,6 +404,22 @@ async fn create_web_transfer(
         .create_key_transfer(&name, user_id, target.user_id, now_epoch())
     {
         Ok(id) => {
+            state.store.add_portal_notification(
+                user_id,
+                "transfer",
+                "Передача ключа создана",
+                &format!("Ожидаем подтверждение получателя для ключа «{name}»."),
+                Some("/?view=keys"),
+                now_epoch(),
+            );
+            state.store.add_portal_notification(
+                target.user_id,
+                "transfer",
+                "Вам передают VPN-ключ",
+                &format!("Пользователь предлагает вам принять ключ «{name}»."),
+                Some("/?view=keys"),
+                now_epoch(),
+            );
             if target.user_id > 0 {
                 let _=state.bot.send_message(ChatId(target.user_id),format!("🎁 Вам предлагают принять VPN-ключ «{name}». Откройте веб-кабинет или раздел ключей в боте, чтобы подтвердить передачу.")).await;
             }
@@ -511,6 +535,17 @@ async fn create_purchase(
             if discount > 0 {
                 state.store.take_promo_discount(user_id);
             }
+            state.store.add_portal_notification(
+                user_id,
+                "payment",
+                "Заявка на покупку создана",
+                &format!(
+                    "Заявка #{id} на сумму {:.2} ₽ ожидает оплаты.",
+                    amount as f64 / 100.0
+                ),
+                Some("/?view=finance"),
+                now_epoch(),
+            );
             Json(serde_json::json!({"ok":true,"payment_id":id,"amount_kopecks":amount,"discount_percent":discount,"instructions":state.store.payment_instructions()})).into_response()
         }
         None => (
@@ -1364,6 +1399,14 @@ async fn support(
     });
     match ticket_id {
         Some(id) => {
+            state.store.add_portal_notification(
+                user_id,
+                "support",
+                "Обращение отправлено",
+                &format!("Обращение #{id} передано в поддержку."),
+                Some("/?view=support"),
+                now_epoch(),
+            );
             if existing.is_some() {
                 state.store.add_support_message(
                     id,

@@ -464,6 +464,24 @@ impl Store {
         self.with_conn(|c|{let mut s=c.prepare("SELECT id,kind,title,body,action_url,created_at,read_at FROM portal_notifications WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2")?;let rows=s.query_map(rusqlite::params![user_id,limit.min(100) as i64],|r|Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"kind":r.get::<_,String>(1)?,"title":r.get::<_,String>(2)?,"body":r.get::<_,String>(3)?,"action_url":r.get::<_,Option<String>>(4)?,"created_at":r.get::<_,i64>(5)?,"read":r.get::<_,Option<i64>>(6)?.is_some()})))?;rows.collect()}).unwrap_or_default()
     }
 
+    pub fn add_portal_notification(
+        &self,
+        user_id: i64,
+        kind: &str,
+        title: &str,
+        body: &str,
+        action_url: Option<&str>,
+        now: i64,
+    ) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO portal_notifications(user_id,kind,title,body,action_url,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![user_id, kind, title, body, action_url, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
     pub fn mark_portal_notifications_read(&self, user_id: i64, now: i64) -> usize {
         self.with_conn(|c| {
             c.execute(
