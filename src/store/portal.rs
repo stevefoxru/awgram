@@ -59,6 +59,14 @@ pub struct PortalPayment {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortalSession {
+    pub id: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub current: bool,
+}
+
 fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
@@ -298,6 +306,44 @@ impl Store {
         .unwrap_or(false)
     }
 
+    pub fn portal_sessions(&self, user_id: i64, current_session: &str) -> Vec<PortalSession> {
+        let current_hash = token_hash(current_session);
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT token_hash,created_at,expires_at FROM web_sessions
+                 WHERE user_id=?1 AND activated_at IS NOT NULL AND revoked_at IS NULL
+                 ORDER BY created_at DESC",
+            )?;
+            let rows = statement.query_map([user_id], |row| {
+                let hash: String = row.get(0)?;
+                Ok(PortalSession {
+                    id: hash.chars().take(12).collect(),
+                    created_at: row.get(1)?,
+                    expires_at: row.get(2)?,
+                    current: hash == current_hash,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn revoke_other_portal_sessions(
+        &self,
+        user_id: i64,
+        current_session: &str,
+        now: i64,
+    ) -> usize {
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE web_sessions SET revoked_at=?3
+                 WHERE user_id=?1 AND token_hash<>?2 AND activated_at IS NOT NULL AND revoked_at IS NULL",
+                rusqlite::params![user_id, token_hash(current_session), now],
+            )
+        })
+        .unwrap_or_default()
+    }
+
     pub fn portal_overview(&self, user_id: i64, now: i64) -> Option<PortalOverview> {
         let user = self.user(user_id)?;
         let mut keys = self.with_conn(|connection| {
@@ -422,6 +468,20 @@ mod tests {
         assert_eq!(store.verified_user_by_email("ALICE@example.ru"), Some(7));
         let session = store.create_portal_session(7, 103).unwrap();
         assert_eq!(store.portal_user_id(&session, 104), Some(7));
+    }
+
+    #[test]
+    fn customer_can_review_and_revoke_other_web_sessions() {
+        let store = Store::open_in_memory();
+        store.upsert_user(7, Some("alice"), "Alice", None, 100);
+        let current = store.create_portal_session(7, 101).unwrap();
+        let other = store.create_portal_session(7, 102).unwrap();
+        let sessions = store.portal_sessions(7, &current);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions.iter().filter(|item| item.current).count(), 1);
+        assert_eq!(store.revoke_other_portal_sessions(7, &current, 103), 1);
+        assert_eq!(store.portal_user_id(&current, 104), Some(7));
+        assert_eq!(store.portal_user_id(&other, 104), None);
     }
 
     #[test]

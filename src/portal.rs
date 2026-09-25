@@ -100,14 +100,126 @@ async fn robots(State(state): State<PortalState>) -> Response {
 
 async fn sitemap(State(state): State<PortalState>) -> Response {
     let url = state.public_url.trim_end_matches('/');
+    let pages = [
+        "",
+        "vpn-for-android",
+        "vpn-for-iphone",
+        "vpn-for-windows",
+        "vpn-for-keenetic",
+        "instructions",
+        "status",
+    ];
+    let entries = pages.iter().map(|page| format!("<url><loc>{url}/{page}</loc><changefreq>{}</changefreq><priority>{}</priority></url>",if page.is_empty(){"weekly"}else{"monthly"},if page.is_empty(){"1.0"}else{"0.7"})).collect::<String>();
     let body = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>{url}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url></urlset>"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">{entries}</urlset>"
     );
     (
         [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
         body,
     )
         .into_response()
+}
+
+async fn marketing_page(
+    State(state): State<PortalState>,
+    AxumPath(page): AxumPath<String>,
+) -> Response {
+    let allowed = [
+        "vpn-for-android",
+        "vpn-for-iphone",
+        "vpn-for-windows",
+        "vpn-for-keenetic",
+        "instructions",
+        "status",
+    ];
+    if !allowed.contains(&page.as_str()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let (title, description) = match page.as_str() {
+        "vpn-for-android" => (
+            "VPN для Android — ZPNet",
+            "Подключение AmneziaWG на Android: личный кабинет, QR-код и управление ключом.",
+        ),
+        "vpn-for-iphone" => (
+            "VPN для iPhone и iPad — ZPNet",
+            "Подключение AmneziaWG на iPhone и iPad с удобным управлением в веб-кабинете.",
+        ),
+        "vpn-for-windows" => (
+            "VPN для Windows — ZPNet",
+            "VPN на базе AmneziaWG для компьютера Windows: конфигурация, трафик и поддержка.",
+        ),
+        "vpn-for-keenetic" => (
+            "VPN для роутера Keenetic — ZPNet",
+            "Установка VPN-ключа на совместимый роутер Keenetic для защиты домашних устройств.",
+        ),
+        "instructions" => (
+            "Инструкции по установке VPN — ZPNet",
+            "Инструкции по установке и подключению AmneziaWG на телефоне, компьютере и роутере.",
+        ),
+        _ => (
+            "Состояние VPN-сервиса — ZPNet",
+            "Публичная информация о доступности VPN-сервиса и его компонентов.",
+        ),
+    };
+    let canonical = format!("{}/{page}", state.public_url.trim_end_matches('/'));
+    let html = INDEX_HTML
+        .replace("ZPNet — VPN для телефона, компьютера и роутера", title)
+        .replace("https://zpnet.pro/\">", &format!("{canonical}\">"))
+        .replace(
+            "VPN на базе AmneziaWG для телефона, компьютера и роутера. Покупка, управление подключениями, трафиком и поддержкой в одном личном кабинете.",
+            description,
+        );
+    Html(html).into_response()
+}
+
+async fn manifest() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/manifest+json; charset=utf-8",
+        )],
+        MANIFEST_JSON,
+    )
+        .into_response()
+}
+
+async fn service_worker() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        SERVICE_WORKER,
+    )
+        .into_response()
+}
+
+async fn app_icon() -> Response {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+        APP_ICON,
+    )
+        .into_response()
+}
+
+async fn public_status(State(state): State<PortalState>) -> Response {
+    let servers = state.store.available_vpn_servers();
+    let total = servers.len();
+    let online = servers
+        .iter()
+        .filter(|server| server.status == "online")
+        .count();
+    let components = state
+        .store
+        .monitor_states()
+        .into_iter()
+        .map(|item| {
+            serde_json::json!({
+                "component":item.component,"status":item.status,"checked_at":item.checked_at
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({
+        "status":if total > 0 && online == total {"operational"} else if online > 0 {"degraded"} else {"outage"},
+        "servers":{"online":online,"total":total},"components":components,"updated_at":now_epoch()
+    })).into_response()
 }
 
 async fn catalog(State(state): State<PortalState>) -> Response {
@@ -654,6 +766,33 @@ async fn logout(State(state): State<PortalState>, headers: HeaderMap) -> Respons
     response
 }
 
+async fn portal_sessions(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    let Some(current) = session(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(user_id) = state.store.portal_user_id(current, now_epoch()) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    Json(serde_json::json!({"sessions":state.store.portal_sessions(user_id,current)}))
+        .into_response()
+}
+
+async fn revoke_other_sessions(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(current) = session(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(user_id) = state.store.portal_user_id(current, now_epoch()) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let revoked = state
+        .store
+        .revoke_other_portal_sessions(user_id, current, now_epoch());
+    Json(serde_json::json!({"ok":true,"revoked":revoked})).into_response()
+}
+
 async fn client_artifacts(
     state: &PortalState,
     user_id: i64,
@@ -1020,13 +1159,20 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let app = Router::new()
         .route("/", get(index))
+        .route("/{page}", get(marketing_page))
         .route("/robots.txt", get(robots))
         .route("/sitemap.xml", get(sitemap))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/service-worker.js", get(service_worker))
         .route("/assets/app.css", get(frontend_css))
         .route("/assets/app.js", get(frontend_js))
+        .route("/assets/icon.svg", get(app_icon))
         .route("/login", get(login))
         .route("/api/catalog", get(catalog))
         .route("/api/session", get(portal_session))
+        .route("/api/sessions", get(portal_sessions))
+        .route("/api/sessions/revoke-others", post(revoke_other_sessions))
+        .route("/api/public/status", get(public_status))
         .route("/api/email/bind/request", post(request_email_bind))
         .route("/api/email/bind/confirm", post(confirm_email_bind))
         .route("/api/email/login/request", post(request_email_login))
@@ -1066,6 +1212,9 @@ pub async fn run(
 const INDEX_HTML: &str = include_str!("../frontend/index.html");
 const APP_CSS: &str = include_str!("../frontend/app.css");
 const APP_JS: &str = include_str!("../frontend/app.js");
+const MANIFEST_JSON: &str = include_str!("../frontend/manifest.webmanifest");
+const SERVICE_WORKER: &str = include_str!("../frontend/service-worker.js");
+const APP_ICON: &str = include_str!("../frontend/icon.svg");
 
 /* Previous embedded frontend kept out of the binary by cfg for an easy audit trail. */
 #[cfg(any())]
