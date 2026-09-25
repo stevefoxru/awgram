@@ -1061,6 +1061,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "crm_payments":payments,
         "crm_tickets":tickets,
         "promos":state.store.admin_promos(100),
+        "partner_withdrawals":state.store.pending_partner_withdrawals(100),
         "cleanup": {"enabled": state.store.blocked_key_cleanup_enabled(), "days": state.store.blocked_key_cleanup_days()},
     }))
     .into_response()
@@ -1163,6 +1164,40 @@ async fn admin_promo_action(
         Json(serde_json::json!({"ok":true})).into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+async fn admin_withdrawal_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(input): Json<AdminPaymentAction>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(admin_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let paid = match input.action.as_str() {
+        "paid" => true,
+        "reject" => false,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if state.store.decide_partner_withdrawal(
+        id,
+        paid,
+        admin_id,
+        input.reason.as_deref(),
+        now_epoch(),
+    ) {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        StatusCode::CONFLICT.into_response()
     }
 }
 
@@ -2050,6 +2085,10 @@ pub async fn run(
         )
         .route("/api/admin/promos", post(admin_create_promo))
         .route("/api/admin/promos/{code}/action", post(admin_promo_action))
+        .route(
+            "/api/admin/withdrawals/{id}/action",
+            post(admin_withdrawal_action),
+        )
         .route("/api/admin/servers/{id}/action", post(admin_server_action))
         .route("/api/logout", post(logout))
         .route("/api/keys/{name}/config", get(download_config))

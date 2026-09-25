@@ -44,7 +44,7 @@ pub struct PartnerSalesSummary {
     pub wholesale_kopecks: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PartnerWithdrawal {
     pub id: i64,
     pub partner_id: i64,
@@ -318,6 +318,9 @@ impl Store {
 
     pub fn partner_withdrawals(&self, partner_id: i64, limit: usize) -> Vec<PartnerWithdrawal> {
         self.with_conn(|connection| { let mut statement=connection.prepare("SELECT id,partner_id,amount_kopecks,requisites,status,created_at FROM partner_withdrawals WHERE partner_id=?1 ORDER BY created_at DESC LIMIT ?2")?; let rows=statement.query_map(rusqlite::params![partner_id,limit as i64],withdrawal_row)?.collect(); rows }).unwrap_or_default()
+    }
+    pub fn pending_partner_withdrawals(&self, limit: usize) -> Vec<PartnerWithdrawal> {
+        self.with_conn(|connection| { let mut statement=connection.prepare("SELECT id,partner_id,amount_kopecks,requisites,status,created_at FROM partner_withdrawals WHERE status='pending' ORDER BY created_at LIMIT ?1")?; let rows=statement.query_map([limit.min(200) as i64],withdrawal_row)?.collect(); rows }).unwrap_or_default()
     }
 
     pub fn decide_partner_withdrawal(
