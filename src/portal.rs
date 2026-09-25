@@ -89,6 +89,17 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn catalog(State(state): State<PortalState>) -> Response {
+    let brand = state
+        .store
+        .mirror_bot_config()
+        .map(|(username, _, _, _)| {
+            username
+                .trim_start_matches('@')
+                .trim_end_matches("_bot")
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "ZuevVPN".to_string());
     let tariffs = [1_i64, 3, 6, 12]
         .into_iter()
         .filter_map(|months| {
@@ -102,7 +113,7 @@ async fn catalog(State(state): State<PortalState>) -> Response {
         "id":server.id,"name":server.name,"location":server.location,"protocol":match server.protocol.as_str(){"amneziawg-3"=>"AWG 3.1","amneziawg-2"=>"AWG 2.0",_=>"AWG 1.0"},
         "available":server.capacity.saturating_sub(state.store.server_client_count(server.id)).max(0)
     })).collect::<Vec<_>>();
-    Json(serde_json::json!({"brand":"ZuevVPN","tariffs":tariffs,"servers":servers})).into_response()
+    Json(serde_json::json!({"brand":brand,"tariffs":tariffs,"servers":servers})).into_response()
 }
 
 #[derive(serde::Deserialize)]
