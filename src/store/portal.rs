@@ -38,6 +38,7 @@ pub struct PortalOverview {
     pub referral_count: i64,
     pub referral_percent: u8,
     pub transfers: Vec<PortalKeyTransfer>,
+    pub partner_wallet: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -571,6 +572,13 @@ impl Store {
             .collect();
         let (expiry_notifications, maintenance_notifications) =
             self.notification_preferences(user_id);
+        let partner_wallet=self.partner_by_owner(user_id).map(|partner|serde_json::json!({
+            "partner_id":partner.id,
+            "status":partner.status,
+            "available_kopecks":self.partner_balance_kopecks(partner.id,now),
+            "hold_kopecks":self.partner_hold_kopecks(partner.id,now),
+            "withdrawals":self.partner_withdrawals(partner.id,20).into_iter().map(|w|serde_json::json!({"id":w.id,"amount_kopecks":w.amount_kopecks,"requisites":w.requisites,"status":w.status,"created_at":w.created_at})).collect::<Vec<_>>()
+        }));
         Some(PortalOverview {
             user_id,
             display_name: user.display_name,
@@ -586,6 +594,7 @@ impl Store {
             referral_count: self.referral_count(user_id),
             referral_percent: self.referral_percent(),
             transfers: self.portal_key_transfers(user_id, now),
+            partner_wallet,
         })
     }
 }

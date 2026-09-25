@@ -261,6 +261,73 @@ struct RenewalRequest {
     months: Option<i64>,
 }
 
+#[derive(serde::Deserialize)]
+struct PartnerWalletRequest {
+    amount_rubles: f64,
+    requisites: Option<String>,
+}
+
+async fn partner_wallet_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(action): AxumPath<String>,
+    Json(input): Json<PartnerWalletRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(partner) = state.store.partner_by_owner(user_id) else {
+        return (
+            StatusCode::CONFLICT,
+            "Партнёрский кабинет ещё не активирован",
+        )
+            .into_response();
+    };
+    let amount = (input.amount_rubles * 100.0).round() as i64;
+    let now = now_epoch();
+    let result = match action.as_str() {
+        "transfer" => state
+            .store
+            .transfer_partner_balance_to_owner(partner.id, user_id, amount, now)
+            .map(|_| None),
+        "withdraw" => state
+            .store
+            .create_partner_withdrawal(
+                partner.id,
+                amount,
+                input.requisites.as_deref().unwrap_or(""),
+                now,
+            )
+            .map(Some),
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match result {
+        Ok(id) => {
+            if let Some(id) = id {
+                for admin in state.admin_ids.iter() {
+                    let _ = state
+                        .bot
+                        .send_message(
+                            ChatId(*admin),
+                            format!(
+                                "💸 Заявка партнёра на вывод #{id}\nПартнёр: {}\nСумма: {:.2} ₽",
+                                partner.display_name,
+                                amount as f64 / 100.0
+                            ),
+                        )
+                        .await;
+                }
+            }
+            Json(serde_json::json!({"ok":true,"withdrawal_id":id})).into_response()
+        }
+        Err(e) => (StatusCode::CONFLICT, e).into_response(),
+    }
+}
+
 async fn create_web_renewal(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -1991,6 +2058,7 @@ pub async fn run(
         .route("/api/keys/{name}/label", patch(rename_key))
         .route("/api/keys/{name}/folder", patch(set_key_folder))
         .route("/api/keys/{name}/renew", post(create_web_renewal))
+        .route("/api/partner/wallet/{action}", post(partner_wallet_action))
         .route("/api/notifications/feed", get(notifications))
         .route("/api/notifications/read", post(read_notifications))
         .route("/api/support", post(support))

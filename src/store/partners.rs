@@ -293,6 +293,29 @@ impl Store {
         }).map_err(|error| if matches!(error, rusqlite::Error::InvalidQuery) { "недостаточно доступных средств".into() } else { format!("не удалось создать заявку: {error}") })
     }
 
+    pub fn transfer_partner_balance_to_owner(
+        &self,
+        partner_id: i64,
+        owner_user_id: i64,
+        amount: i64,
+        now: i64,
+    ) -> Result<(), String> {
+        if amount <= 0 {
+            return Err("укажите положительную сумму".into());
+        }
+        self.with_conn(|connection| {
+            let transaction=connection.unchecked_transaction()?;
+            let owner:i64=transaction.query_row("SELECT owner_user_id FROM partners WHERE id=?1 AND status='active'",[partner_id],|r|r.get(0))?;
+            if owner!=owner_user_id{return Err(rusqlite::Error::InvalidQuery);}
+            let balance:i64=transaction.query_row("SELECT COALESCE(SUM(amount_kopecks),0) FROM partner_ledger WHERE partner_id=?1 AND available_at<=?2",rusqlite::params![partner_id,now],|r|r.get(0))?;
+            if balance<amount{return Err(rusqlite::Error::InvalidQuery);}
+            let reference=format!("partner-transfer:{partner_id}:{now}");
+            transaction.execute("INSERT INTO partner_ledger(partner_id,amount_kopecks,kind,reference,available_at,details,created_at) VALUES(?1,?2,'adjustment',?3,?4,'Перевод на основной баланс',?4)",rusqlite::params![partner_id,-amount,reference,now])?;
+            transaction.execute("INSERT INTO balance_ledger(user_id,amount_kopecks,kind,reference,details,created_at) VALUES(?1,?2,'partner_transfer',?3,'Перевод с партнёрского баланса',?4)",rusqlite::params![owner_user_id,amount,reference,now])?;
+            transaction.commit()
+        }).map_err(|e|if matches!(e,rusqlite::Error::InvalidQuery){"недостаточно доступных средств или партнёр не активен".into()}else{format!("не удалось выполнить перевод: {e}")})
+    }
+
     pub fn partner_withdrawals(&self, partner_id: i64, limit: usize) -> Vec<PartnerWithdrawal> {
         self.with_conn(|connection| { let mut statement=connection.prepare("SELECT id,partner_id,amount_kopecks,requisites,status,created_at FROM partner_withdrawals WHERE partner_id=?1 ORDER BY created_at DESC LIMIT ?2")?; let rows=statement.query_map(rusqlite::params![partner_id,limit as i64],withdrawal_row)?.collect(); rows }).unwrap_or_default()
     }
