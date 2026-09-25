@@ -256,6 +256,40 @@ struct PurchaseRequest {
     server_id: i64,
 }
 
+#[derive(serde::Deserialize)]
+struct PromoRequest {
+    code: String,
+}
+
+async fn activate_web_promo(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<PromoRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let code = input.code.trim();
+    if code.is_empty() || code.len() > 64 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match state.store.activate_promo(user_id, code, now_epoch()) {
+        Some(discount) => {
+            Json(serde_json::json!({"ok":true,"discount_percent":discount})).into_response()
+        }
+        None => (
+            StatusCode::CONFLICT,
+            "Промокод недействителен или уже использован",
+        )
+            .into_response(),
+    }
+}
+
 async fn create_purchase(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -293,9 +327,24 @@ async fn create_purchase(
         .peek_purchase_discount(user_id, now_epoch())
         .clamp(0, 100);
     let amount = base.saturating_mul(100 - discount) / 100;
-    match state.store.create_web_purchase_request(user_id,input.months,amount,input.server_id,now_epoch()) {
-        Some(id)=>Json(serde_json::json!({"ok":true,"payment_id":id,"amount_kopecks":amount,"discount_percent":discount,"instructions":state.store.payment_instructions()})).into_response(),
-        None=>(StatusCode::CONFLICT,"У вас уже есть незавершённая заявка или выбранный сервер недоступен").into_response(),
+    match state.store.create_web_purchase_request(
+        user_id,
+        input.months,
+        amount,
+        input.server_id,
+        now_epoch(),
+    ) {
+        Some(id) => {
+            if discount > 0 {
+                state.store.take_promo_discount(user_id);
+            }
+            Json(serde_json::json!({"ok":true,"payment_id":id,"amount_kopecks":amount,"discount_percent":discount,"instructions":state.store.payment_instructions()})).into_response()
+        }
+        None => (
+            StatusCode::CONFLICT,
+            "У вас уже есть незавершённая заявка или выбранный сервер недоступен",
+        )
+            .into_response(),
     }
 }
 
@@ -1300,6 +1349,7 @@ pub async fn run(
         .route("/api/notifications", post(update_notifications))
         .route("/api/payments/topup", post(create_topup))
         .route("/api/purchases", post(create_purchase))
+        .route("/api/promos/activate", post(activate_web_promo))
         .route("/api/payments/{id}/proof", post(submit_payment_proof))
         .route("/api/payments/webhook", post(acquiring_webhook))
         .layer(middleware::from_fn(security_headers))
