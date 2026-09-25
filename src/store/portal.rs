@@ -33,6 +33,7 @@ pub struct PortalOverview {
     pub discount_percent: i64,
     pub referral_count: i64,
     pub referral_percent: u8,
+    pub transfers: Vec<PortalKeyTransfer>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -86,6 +87,18 @@ pub struct PortalCrmUser {
     pub keys: i64,
     pub created_at: i64,
     pub last_seen: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortalKeyTransfer {
+    pub id: i64,
+    pub client_name: String,
+    pub from_user_id: i64,
+    pub from_name: String,
+    pub to_user_id: i64,
+    pub to_name: String,
+    pub created_at: i64,
+    pub incoming: bool,
 }
 
 fn token_hash(token: &str) -> String {
@@ -419,6 +432,23 @@ impl Store {
         .unwrap_or_default()
     }
 
+    pub fn portal_key_transfers(&self, user_id: i64, now: i64) -> Vec<PortalKeyTransfer> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT t.id,t.client_name,t.from_user_id,fu.display_name,t.to_user_id,tu.display_name,t.created_at
+                 FROM key_transfers t JOIN users fu ON fu.user_id=t.from_user_id
+                 JOIN users tu ON tu.user_id=t.to_user_id
+                 WHERE (t.from_user_id=?1 OR t.to_user_id=?1) AND t.status='pending' AND t.created_at>?2
+                 ORDER BY t.created_at DESC",
+            )?;
+            let rows = statement.query_map(rusqlite::params![user_id, now - 86_400], |row| {
+                let to_user_id: i64 = row.get(4)?;
+                Ok(PortalKeyTransfer { id:row.get(0)?,client_name:row.get(1)?,from_user_id:row.get(2)?,from_name:row.get(3)?,to_user_id,to_name:row.get(5)?,created_at:row.get(6)?,incoming:to_user_id==user_id })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        }).unwrap_or_default()
+    }
+
     pub fn portal_overview(&self, user_id: i64, now: i64) -> Option<PortalOverview> {
         let user = self.user(user_id)?;
         let mut keys = self.with_conn(|connection| {
@@ -508,6 +538,7 @@ impl Store {
             discount_percent: self.peek_purchase_discount(user_id, now),
             referral_count: self.referral_count(user_id),
             referral_percent: self.referral_percent(),
+            transfers: self.portal_key_transfers(user_id, now),
         })
     }
 }

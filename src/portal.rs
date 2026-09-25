@@ -261,6 +261,68 @@ struct PromoRequest {
     code: String,
 }
 
+#[derive(serde::Deserialize)]
+struct TransferRequest {
+    to_user_id: i64,
+}
+
+async fn create_web_transfer(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+    Json(input): Json<TransferRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match state
+        .store
+        .create_key_transfer(&name, user_id, input.to_user_id, now_epoch())
+    {
+        Ok(id) => {
+            if input.to_user_id > 0 {
+                let _=state.bot.send_message(ChatId(input.to_user_id),format!("🎁 Вам предлагают принять VPN-ключ «{name}». Откройте веб-кабинет или раздел ключей в боте, чтобы подтвердить передачу.")).await;
+            }
+            Json(serde_json::json!({"ok":true,"transfer_id":id})).into_response()
+        }
+        Err(error) => (StatusCode::CONFLICT, error).into_response(),
+    }
+}
+
+async fn web_transfer_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(input): Json<AdminCrmAction>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let ok = match input.action.as_str() {
+        "accept" => state
+            .store
+            .accept_key_transfer(id, user_id, now_epoch())
+            .is_some(),
+        "cancel" => state.store.cancel_key_transfer(id, user_id, now_epoch()),
+        _ => false,
+    };
+    if ok {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        (StatusCode::CONFLICT, "Передача недоступна или истекла").into_response()
+    }
+}
+
 async fn activate_web_promo(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -1350,6 +1412,8 @@ pub async fn run(
         .route("/api/payments/topup", post(create_topup))
         .route("/api/purchases", post(create_purchase))
         .route("/api/promos/activate", post(activate_web_promo))
+        .route("/api/keys/{name}/transfer", post(create_web_transfer))
+        .route("/api/transfers/{id}/action", post(web_transfer_action))
         .route("/api/payments/{id}/proof", post(submit_payment_proof))
         .route("/api/payments/webhook", post(acquiring_webhook))
         .layer(middleware::from_fn(security_headers))
