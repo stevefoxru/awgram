@@ -974,6 +974,27 @@ async fn admin_user_action(
     }
 }
 
+async fn admin_user_profile(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> Response {
+    let Some(admin_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user) = state.store.user(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(overview) = state.store.portal_overview(id, now_epoch()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Json(serde_json::json!({"user":{"id":user.user_id,"display_name":user.display_name,"username":user.username,"created_at":user.created_at,"balance_kopecks":overview.balance_kopecks,"referral_count":overview.referral_count},"keys":overview.keys,"payments":overview.payments,"tickets":overview.tickets,"balance_history":overview.balance_history})).into_response()
+}
+
 async fn admin_ticket_action(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -1799,6 +1820,7 @@ pub async fn run(
         .route("/api/me", get(me))
         .route("/api/admin/overview", get(admin_overview))
         .route("/api/admin/users/{id}/action", post(admin_user_action))
+        .route("/api/admin/users/{id}", get(admin_user_profile))
         .route("/api/admin/users/{id}/balance", post(admin_balance_action))
         .route("/api/admin/tickets/{id}/action", post(admin_ticket_action))
         .route(
