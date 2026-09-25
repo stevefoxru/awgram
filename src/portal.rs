@@ -826,6 +826,39 @@ async fn client_artifacts(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct TrafficQuery {
+    days: Option<i64>,
+}
+
+async fn key_traffic(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+    Query(query): Query<TrafficQuery>,
+) -> Response {
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if state.store.client_owner(&name) != Some(user_id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let days = query.days.unwrap_or(7).clamp(1, 90);
+    let points = state
+        .store
+        .portal_key_traffic(user_id, &name, now_epoch() - days * 86_400);
+    let rx = points.iter().map(|point| point.rx).sum::<u64>();
+    let tx = points.iter().map(|point| point.tx).sum::<u64>();
+    let online_minutes = points.iter().map(|point| point.online_minutes).sum::<u64>();
+    Json(serde_json::json!({
+        "name":name,"days":days,"points":points,
+        "totals":{"rx":rx,"tx":tx,"online_minutes":online_minutes}
+    }))
+    .into_response()
+}
+
 async fn download_config(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -1183,6 +1216,7 @@ pub async fn run(
         .route("/api/logout", post(logout))
         .route("/api/keys/{name}/config", get(download_config))
         .route("/api/keys/{name}/qr", get(download_qr))
+        .route("/api/keys/{name}/traffic", get(key_traffic))
         .route("/api/keys/{name}/label", patch(rename_key))
         .route("/api/support", post(support))
         .route("/api/notifications", post(update_notifications))

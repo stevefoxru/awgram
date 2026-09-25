@@ -67,6 +67,14 @@ pub struct PortalSession {
     pub current: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortalTrafficPoint {
+    pub ts: i64,
+    pub rx: u64,
+    pub tx: u64,
+    pub online_minutes: u64,
+}
+
 fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
@@ -340,6 +348,33 @@ impl Store {
                  WHERE user_id=?1 AND token_hash<>?2 AND activated_at IS NOT NULL AND revoked_at IS NULL",
                 rusqlite::params![user_id, token_hash(current_session), now],
             )
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn portal_key_traffic(
+        &self,
+        user_id: i64,
+        client_name: &str,
+        since: i64,
+    ) -> Vec<PortalTrafficPoint> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT h.hour_ts,h.rx_bytes,h.tx_bytes,h.online_minutes
+                 FROM traffic_hourly h JOIN clients c ON c.id=h.client_id
+                 WHERE c.owner_user_id=?1 AND c.name=?2 AND c.removed_at IS NULL AND h.hour_ts>=?3
+                 ORDER BY h.hour_ts",
+            )?;
+            let rows =
+                statement.query_map(rusqlite::params![user_id, client_name, since], |row| {
+                    Ok(PortalTrafficPoint {
+                        ts: row.get(0)?,
+                        rx: row.get::<_, i64>(1)?.max(0) as u64,
+                        tx: row.get::<_, i64>(2)?.max(0) as u64,
+                        online_minutes: row.get::<_, i64>(3)?.max(0) as u64,
+                    })
+                })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .unwrap_or_default()
     }
