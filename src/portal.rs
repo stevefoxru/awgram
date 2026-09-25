@@ -273,6 +273,53 @@ struct LegacyRestoreRequest {
     code: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct FolderRequest {
+    folder: Option<String>,
+}
+
+async fn set_key_folder(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+    Json(input): Json<FolderRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if state
+        .store
+        .set_portal_folder(user_id, &name, input.folder.as_deref())
+    {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        StatusCode::BAD_REQUEST.into_response()
+    }
+}
+
+async fn notifications(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    Json(serde_json::json!({"items":state.store.portal_notifications(user_id,50)})).into_response()
+}
+
+async fn read_notifications(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    Json(serde_json::json!({"ok":true,"updated":state.store.mark_portal_notifications_read(user_id,now_epoch())})).into_response()
+}
+
 async fn create_web_legacy_request(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -1471,6 +1518,9 @@ pub async fn run(
         .route("/api/keys/{name}/qr", get(download_qr))
         .route("/api/keys/{name}/traffic", get(key_traffic))
         .route("/api/keys/{name}/label", patch(rename_key))
+        .route("/api/keys/{name}/folder", patch(set_key_folder))
+        .route("/api/notifications/feed", get(notifications))
+        .route("/api/notifications/read", post(read_notifications))
         .route("/api/support", post(support))
         .route("/api/notifications", post(update_notifications))
         .route("/api/payments/topup", post(create_topup))

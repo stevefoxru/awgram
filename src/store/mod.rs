@@ -803,6 +803,21 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_server_migration_items_owner ON server_migration_items(campaign_id,owner_user_id,completed_at);
     "#,
+    // v39: пользовательские папки ключей и единый центр веб-уведомлений.
+    r#"
+    ALTER TABLE clients ADD COLUMN portal_folder TEXT;
+    CREATE TABLE portal_notifications(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        action_url TEXT,
+        created_at INTEGER NOT NULL,
+        read_at INTEGER
+    );
+    CREATE INDEX idx_portal_notifications_user ON portal_notifications(user_id,read_at,created_at DESC);
+    "#,
 ];
 
 pub struct Store {

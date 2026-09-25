@@ -19,6 +19,7 @@ pub struct PortalKey {
     pub expires_at: Option<i64>,
     pub created_at: i64,
     pub legacy: bool,
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -452,6 +453,27 @@ impl Store {
         }).unwrap_or_default()
     }
 
+    pub fn set_portal_folder(&self, user_id: i64, name: &str, folder: Option<&str>) -> bool {
+        let folder = folder
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && v.chars().count() <= 40);
+        self.with_conn(|c|c.execute("UPDATE clients SET portal_folder=?3 WHERE name=?1 AND owner_user_id=?2 AND removed_at IS NULL",rusqlite::params![name,user_id,folder])).is_ok_and(|n|n==1)
+    }
+
+    pub fn portal_notifications(&self, user_id: i64, limit: usize) -> Vec<serde_json::Value> {
+        self.with_conn(|c|{let mut s=c.prepare("SELECT id,kind,title,body,action_url,created_at,read_at FROM portal_notifications WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2")?;let rows=s.query_map(rusqlite::params![user_id,limit.min(100) as i64],|r|Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"kind":r.get::<_,String>(1)?,"title":r.get::<_,String>(2)?,"body":r.get::<_,String>(3)?,"action_url":r.get::<_,Option<String>>(4)?,"created_at":r.get::<_,i64>(5)?,"read":r.get::<_,Option<i64>>(6)?.is_some()})))?;rows.collect()}).unwrap_or_default()
+    }
+
+    pub fn mark_portal_notifications_read(&self, user_id: i64, now: i64) -> usize {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE portal_notifications SET read_at=?2 WHERE user_id=?1 AND read_at IS NULL",
+                rusqlite::params![user_id, now],
+            )
+        })
+        .unwrap_or_default()
+    }
+
     pub fn portal_overview(&self, user_id: i64, now: i64) -> Option<PortalOverview> {
         let user = self.user(user_id)?;
         let mut keys = self.with_conn(|connection| {
@@ -466,7 +488,7 @@ impl Store {
                         COALESCE((SELECT rx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY ts DESC LIMIT 1),0),
                         COALESCE((SELECT tx FROM traffic_samples t WHERE t.client_id=c.id ORDER BY ts DESC LIMIT 1),0),
                         (SELECT ts FROM traffic_samples t WHERE t.client_id=c.id AND t.online=1 ORDER BY ts DESC LIMIT 1),
-                        c.first_seen,COALESCE((SELECT legacy FROM client_subscriptions sub WHERE sub.client_name=c.name),0)
+                        c.first_seen,COALESCE((SELECT legacy FROM client_subscriptions sub WHERE sub.client_name=c.name),0),c.portal_folder
                  FROM clients c LEFT JOIN vpn_servers s ON s.id=c.server_id
                  WHERE c.owner_user_id=?1 AND c.removed_at IS NULL ORDER BY c.name",
             )?;
@@ -480,6 +502,7 @@ impl Store {
                 expires_at: None,
                 created_at: row.get(9)?,
                 legacy: row.get::<_,i64>(10)? != 0,
+                folder: row.get(11)?,
             }))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         }).unwrap_or_default();
