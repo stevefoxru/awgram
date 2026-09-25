@@ -122,7 +122,7 @@ pub struct AdminUserProfile {
     pub ticket_count: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PromoCode {
     pub code: String,
     pub discount_percent: i64,
