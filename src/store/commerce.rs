@@ -746,6 +746,18 @@ impl Store {
     pub fn promo(&self, code: &str, now: i64) -> Option<PromoCode> {
         self.with_conn(|c|c.query_row("SELECT code,discount_percent,max_uses,used_count,expires_at,active FROM promo_codes WHERE code=?1 COLLATE NOCASE AND kind='discount' AND active=1 AND (expires_at IS NULL OR expires_at>?2) AND (max_uses IS NULL OR used_count<max_uses)",rusqlite::params![code.trim(),now],|r|Ok(PromoCode{code:r.get(0)?,discount_percent:r.get(1)?,max_uses:r.get(2)?,used_count:r.get(3)?,expires_at:r.get(4)?,active:r.get::<_,i64>(5)?!=0})).optional()).ok().flatten()
     }
+    pub fn admin_promos(&self, limit: usize) -> Vec<PromoCode> {
+        self.with_conn(|c|{let mut s=c.prepare("SELECT code,discount_percent,max_uses,used_count,expires_at,active FROM promo_codes WHERE kind='discount' ORDER BY created_at DESC LIMIT ?1")?;let rows=s.query_map([limit.min(200) as i64],|r|Ok(PromoCode{code:r.get(0)?,discount_percent:r.get(1)?,max_uses:r.get(2)?,used_count:r.get(3)?,expires_at:r.get(4)?,active:r.get::<_,i64>(5)?!=0}))?;rows.collect()}).unwrap_or_default()
+    }
+    pub fn set_promo_active(&self, code: &str, active: bool) -> bool {
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE promo_codes SET active=?2 WHERE code=?1 COLLATE NOCASE AND kind='discount'",
+                rusqlite::params![code.trim(), if active { 1 } else { 0 }],
+            )
+        })
+        .is_ok_and(|n| n == 1)
+    }
 
     pub fn activate_promo(&self, user_id: i64, code: &str, now: i64) -> Option<i64> {
         let code = code.trim().to_uppercase();

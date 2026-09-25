@@ -993,6 +993,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "crm_users":crm_users,
         "crm_payments":payments,
         "crm_tickets":tickets,
+        "promos":state.store.admin_promos(100),
         "cleanup": {"enabled": state.store.blocked_key_cleanup_enabled(), "days": state.store.blocked_key_cleanup_days()},
     }))
     .into_response()
@@ -1020,6 +1021,82 @@ struct AdminPaymentAction {
 struct AdminBalanceAction {
     amount_rubles: f64,
     reason: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AdminPromoInput {
+    code: String,
+    discount_percent: i64,
+    max_uses: Option<i64>,
+    expires_at: Option<i64>,
+}
+
+async fn admin_create_promo(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<AdminPromoInput>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(admin_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let code = input.code.trim().to_uppercase();
+    if code.len() < 3
+        || code.len() > 32
+        || !code
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !(1..=100).contains(&input.discount_percent)
+        || input.max_uses.is_some_and(|v| v < 1)
+    {
+        return (StatusCode::BAD_REQUEST, "Проверьте код, скидку и лимит").into_response();
+    }
+    if state.store.create_promo(
+        &code,
+        input.discount_percent,
+        input.max_uses,
+        input.expires_at,
+        admin_id,
+        now_epoch(),
+    ) {
+        Json(serde_json::json!({"ok":true,"code":code})).into_response()
+    } else {
+        (StatusCode::CONFLICT, "Такой промокод уже существует").into_response()
+    }
+}
+
+async fn admin_promo_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(code): AxumPath<String>,
+    Json(input): Json<AdminCrmAction>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(admin_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let active = match input.action.as_str() {
+        "enable" => true,
+        "disable" => false,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if state.store.set_promo_active(&code, active) {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 async fn admin_user_action(
@@ -1904,6 +1981,8 @@ pub async fn run(
             "/api/admin/payments/{id}/action",
             post(admin_payment_action),
         )
+        .route("/api/admin/promos", post(admin_create_promo))
+        .route("/api/admin/promos/{code}/action", post(admin_promo_action))
         .route("/api/admin/servers/{id}/action", post(admin_server_action))
         .route("/api/logout", post(logout))
         .route("/api/keys/{name}/config", get(download_config))
