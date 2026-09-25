@@ -75,6 +75,19 @@ pub struct PortalTrafficPoint {
     pub online_minutes: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PortalCrmUser {
+    pub user_id: i64,
+    pub display_name: String,
+    pub username: Option<String>,
+    pub email: Option<String>,
+    pub blocked: bool,
+    pub balance_kopecks: i64,
+    pub keys: i64,
+    pub created_at: i64,
+    pub last_seen: i64,
+}
+
 fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
@@ -374,6 +387,33 @@ impl Store {
                         online_minutes: row.get::<_, i64>(3)?.max(0) as u64,
                     })
                 })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn portal_crm_users(&self, limit: usize) -> Vec<PortalCrmUser> {
+        self.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT u.user_id,u.display_name,u.username,u.email,u.blocked,
+                        COALESCE((SELECT SUM(amount_kopecks) FROM balance_ledger b WHERE b.user_id=u.user_id),0),
+                        (SELECT COUNT(*) FROM clients c WHERE c.owner_user_id=u.user_id AND c.removed_at IS NULL),
+                        u.created_at,u.last_seen
+                 FROM users u ORDER BY u.last_seen DESC LIMIT ?1",
+            )?;
+            let rows = statement.query_map([limit.min(500) as i64], |row| {
+                Ok(PortalCrmUser {
+                    user_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    username: row.get(2)?,
+                    email: row.get(3)?,
+                    blocked: row.get::<_, i64>(4)? != 0,
+                    balance_kopecks: row.get(5)?,
+                    keys: row.get(6)?,
+                    created_at: row.get(7)?,
+                    last_seen: row.get(8)?,
+                })
+            })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .unwrap_or_default()

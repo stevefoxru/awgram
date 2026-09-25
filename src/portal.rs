@@ -639,6 +639,16 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
             })
         })
         .collect::<Vec<_>>();
+    let crm_users = state.store.portal_crm_users(250);
+    let payments = state.store.pending_payments().into_iter().take(100).map(|item| serde_json::json!({
+        "id":item.id,"user_id":item.user_id,"amount_kopecks":item.amount_kopecks,
+        "method":item.method,"proof":item.proof,"created_at":item.created_at,"months":item.months
+    })).collect::<Vec<_>>();
+    let tickets = state.store.support_tickets("open",100).into_iter()
+        .chain(state.store.support_tickets("in_progress",100))
+        .map(|item| serde_json::json!({"id":item.id,"user_id":item.user_id,"subject":item.subject,
+            "status":item.status,"category":item.category,"priority":item.priority,"updated_at":item.updated_at}))
+        .collect::<Vec<_>>();
     Json(serde_json::json!({
         "users": {"total": users.total, "new_today": users.new_today, "new_30d": users.new_30d, "paying": users.paying, "blocked": users.blocked},
         "keys": {"total": clients.len(), "online": online},
@@ -646,6 +656,9 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "payments_pending": state.store.pending_payments().len(),
         "revenue_kopecks": state.store.approved_revenue_kopecks(),
         "support_open": state.store.open_support_count(),
+        "crm_users":crm_users,
+        "crm_payments":payments,
+        "crm_tickets":tickets,
         "cleanup": {"enabled": state.store.blocked_key_cleanup_enabled(), "days": state.store.blocked_key_cleanup_days()},
     }))
     .into_response()
@@ -656,6 +669,69 @@ struct AdminServerAction {
     action: String,
     reason: Option<String>,
     days: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct AdminCrmAction {
+    action: String,
+}
+
+async fn admin_user_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(input): Json<AdminCrmAction>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(admin_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let result = match input.action.as_str() {
+        "block" => state.store.set_user_blocked(id, true),
+        "unblock" => state.store.set_user_blocked(id, false),
+        _ => false,
+    };
+    if result {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        StatusCode::CONFLICT.into_response()
+    }
+}
+
+async fn admin_ticket_action(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(input): Json<AdminCrmAction>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(admin_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let result = match input.action.as_str() {
+        "take" => state.store.assign_support_ticket(id, admin_id, now_epoch()),
+        "close" => state.store.close_support_ticket(id, admin_id, now_epoch()),
+        _ => false,
+    };
+    if result {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        StatusCode::CONFLICT.into_response()
+    }
 }
 
 async fn admin_server_action(
@@ -1212,6 +1288,8 @@ pub async fn run(
         .route("/api/email/login/confirm", post(confirm_email_login))
         .route("/api/me", get(me))
         .route("/api/admin/overview", get(admin_overview))
+        .route("/api/admin/users/{id}/action", post(admin_user_action))
+        .route("/api/admin/tickets/{id}/action", post(admin_ticket_action))
         .route("/api/admin/servers/{id}/action", post(admin_server_action))
         .route("/api/logout", post(logout))
         .route("/api/keys/{name}/config", get(download_config))
