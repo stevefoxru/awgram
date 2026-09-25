@@ -1343,6 +1343,13 @@ impl Store {
         let (chat, message) = telegram_message;
         let _=self.with_conn(|c| c.execute("INSERT INTO support_messages(ticket_id,sender_user_id,is_admin,telegram_chat_id,telegram_message_id,text,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![ticket_id,sender,if is_admin {1}else{0},chat,message,text,now]));
     }
+    pub fn support_messages(&self, ticket_id: i64, limit: usize) -> Vec<serde_json::Value> {
+        self.with_conn(|c| {
+            let mut statement = c.prepare("SELECT id,sender_user_id,is_admin,text,created_at FROM support_messages WHERE ticket_id=?1 ORDER BY created_at ASC LIMIT ?2")?;
+            let rows = statement.query_map(rusqlite::params![ticket_id, limit.min(500) as i64], |row| Ok(serde_json::json!({"id":row.get::<_,i64>(0)?,"sender_user_id":row.get::<_,i64>(1)?,"is_admin":row.get::<_,i64>(2)?!=0,"text":row.get::<_,Option<String>>(3)?,"created_at":row.get::<_,i64>(4)?})))?;
+            rows.collect()
+        }).unwrap_or_default()
+    }
     pub fn set_auto_renew(
         &self,
         client_name: &str,

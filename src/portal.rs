@@ -1440,6 +1440,86 @@ async fn support(
     }
 }
 
+async fn support_thread(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> Response {
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(ticket) = state.store.support_ticket(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if ticket.user_id != user_id && !state.admin_ids.contains(&user_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    Json(serde_json::json!({"ticket":{"id":ticket.id,"user_id":ticket.user_id,"subject":ticket.subject,"status":ticket.status,"category":ticket.category,"priority":ticket.priority,"updated_at":ticket.updated_at},"messages":state.store.support_messages(id,500),"admin":state.admin_ids.contains(&user_id)})).into_response()
+}
+
+async fn support_reply(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(request): Json<SupportRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(ticket) = state.store.support_ticket(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let is_admin = state.admin_ids.contains(&user_id);
+    if ticket.user_id != user_id && !is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if ticket.status == "closed" {
+        return (StatusCode::CONFLICT, "Обращение уже закрыто").into_response();
+    }
+    let message = request.message.trim();
+    if message.is_empty() || message.chars().count() > 2000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Введите сообщение длиной до 2000 символов",
+        )
+            .into_response();
+    }
+    let now = now_epoch();
+    state
+        .store
+        .add_support_message(id, user_id, is_admin, (0, 0), Some(message), now);
+    if is_admin {
+        state.store.assign_support_ticket(id, user_id, now);
+        state.store.add_portal_notification(
+            ticket.user_id,
+            "support",
+            "Новый ответ поддержки",
+            &format!("В обращении #{id} появился ответ."),
+            Some("/?view=support"),
+            now,
+        );
+        if ticket.user_id > 0 {
+            let _=state.bot.send_message(ChatId(ticket.user_id),format!("💬 Новый ответ поддержки в обращении #{id}. Откройте веб-кабинет, чтобы прочитать.")).await;
+        }
+    } else {
+        for admin in state.admin_ids.iter() {
+            let _ = state
+                .bot
+                .send_message(
+                    ChatId(*admin),
+                    format!("💬 Новое сообщение в веб-обращении #{id}\nПользователь: {user_id}"),
+                )
+                .await;
+        }
+    }
+    Json(serde_json::json!({"ok":true})).into_response()
+}
+
 #[derive(serde::Deserialize)]
 struct AcquiringNotice {
     order_id: i64,
@@ -1565,6 +1645,7 @@ pub async fn run(
         .route("/api/notifications/feed", get(notifications))
         .route("/api/notifications/read", post(read_notifications))
         .route("/api/support", post(support))
+        .route("/api/support/{id}", get(support_thread).post(support_reply))
         .route("/api/notifications", post(update_notifications))
         .route("/api/payments/topup", post(create_topup))
         .route("/api/purchases", post(create_purchase))
