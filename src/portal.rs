@@ -200,26 +200,64 @@ async fn app_icon() -> Response {
 }
 
 async fn public_status(State(state): State<PortalState>) -> Response {
+    let now = now_epoch();
     let servers = state.store.available_vpn_servers();
     let total = servers.len();
     let online = servers
         .iter()
         .filter(|server| server.status == "online")
         .count();
+    let active_server_prefixes = servers
+        .iter()
+        .map(|server| format!("vpn-server-{}", server.id))
+        .collect::<Vec<_>>();
     let components = state
         .store
         .monitor_states()
         .into_iter()
+        .filter(|item| {
+            item.checked_at >= now.saturating_sub(3_600)
+                && (item.component == "database_backup"
+                    || item.component == "stale-key-replacements"
+                    || active_server_prefixes.iter().any(|prefix| {
+                        item.component == *prefix
+                            || item.component.starts_with(&format!("{prefix}-"))
+                    }))
+        })
         .map(|item| {
             serde_json::json!({
                 "component":item.component,"status":item.status,"checked_at":item.checked_at
             })
         })
         .collect::<Vec<_>>();
+    let monitoring_problem = components.iter().any(|item| {
+        item.get("status")
+            .and_then(|value| value.as_str())
+            .is_some_and(|status| status != "ok" && status != "online")
+    });
+    let updated_at = components
+        .iter()
+        .filter_map(|item| item.get("checked_at").and_then(|value| value.as_i64()))
+        .max()
+        .unwrap_or(now);
+    let status = if total == 0 || online == 0 {
+        "outage"
+    } else if online < total || monitoring_problem {
+        "degraded"
+    } else {
+        "operational"
+    };
     Json(serde_json::json!({
-        "status":if total > 0 && online == total {"operational"} else if online > 0 {"degraded"} else {"outage"},
-        "servers":{"online":online,"total":total},"components":components,"updated_at":now_epoch()
+        "status":status,"servers":{"online":online,"total":total},"components":components,"updated_at":updated_at
     })).into_response()
+}
+
+fn display_brand(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "zpnet" => "ZPNet".to_string(),
+        "zuevvpn" => "ZuevVPN".to_string(),
+        _ => value.trim().to_string(),
+    }
 }
 
 async fn catalog(State(state): State<PortalState>) -> Response {
@@ -227,10 +265,7 @@ async fn catalog(State(state): State<PortalState>) -> Response {
     let bot_username = mirror.as_ref().map(|(username, _, _, _)| username.clone());
     let brand = mirror
         .map(|(username, _, _, _)| {
-            username
-                .trim_start_matches('@')
-                .trim_end_matches("_bot")
-                .to_string()
+            display_brand(username.trim_start_matches('@').trim_end_matches("_bot"))
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "ZuevVPN".to_string());
@@ -2199,7 +2234,7 @@ fetch('/api/me').then(async r=>{if(!r.ok)throw 0;return r.json()}).then(d=>{
 
 #[cfg(test)]
 mod tests {
-    use super::{same_site_request, valid_email};
+    use super::{display_brand, same_site_request, valid_email};
     use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -2218,5 +2253,12 @@ mod tests {
         assert!(!valid_email("user"));
         assert!(!valid_email("@example.ru"));
         assert!(!valid_email("user@example."));
+    }
+
+    #[test]
+    fn mirror_usernames_get_customer_facing_brand_case() {
+        assert_eq!(display_brand("zpnet"), "ZPNet");
+        assert_eq!(display_brand("zuevvpn"), "ZuevVPN");
+        assert_eq!(display_brand("OtherVPN"), "OtherVPN");
     }
 }
