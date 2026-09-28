@@ -34,7 +34,9 @@ pub use groups::{
 pub use inventory::{InventoryItem, InventoryReport, KeyRuntimeStats, ServerRuntimeSummary};
 pub use nodes::{InstallationJob, VpnInstance, VpnNode};
 pub use partners::{Partner, PartnerOrder, PartnerSalesSummary, PartnerWithdrawal};
-pub use portal::{PortalBalanceEntry, PortalKey, PortalOverview, PortalPayment, PortalTicket};
+pub use portal::{
+    PortalBalanceEntry, PortalKey, PortalOverview, PortalPayment, PortalTicket, PwaLoginStatus,
+};
 pub use server_enrollment::{EnrollmentIssue, EnrollmentStatus, ENROLLMENT_TTL_SECS};
 pub use servers::{
     BlockedClientCleanup, MigrationCampaign, MigrationItem, NewVpnServer, ServerBillingUpdate,
@@ -817,6 +819,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         read_at INTEGER
     );
     CREATE INDEX idx_portal_notifications_user ON portal_notifications(user_id,read_at,created_at DESC);
+    "#,
+    // v40: подтверждение входа в установленную PWA через Telegram без
+    // открытия одноразовой веб-ссылки во внешнем браузере.
+    r#"
+    CREATE TABLE pwa_login_requests(
+        token_hash TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        approved_user_id INTEGER REFERENCES users(user_id),
+        approved_at INTEGER,
+        consumed_at INTEGER
+    );
+    CREATE INDEX idx_pwa_login_expiry ON pwa_login_requests(expires_at,consumed_at);
     "#,
 ];
 

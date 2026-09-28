@@ -106,11 +106,105 @@ pub struct PortalKeyTransfer {
     pub incoming: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PwaLoginStatus {
+    Pending,
+    Approved(String),
+    Invalid,
+}
+
 fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
 impl Store {
+    pub fn issue_pwa_login_request(&self, now: i64) -> Option<String> {
+        let random: [u8; 24] = rand::rng().random();
+        let token =
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, random);
+        self.with_conn(|connection| {
+            connection.execute(
+                "DELETE FROM pwa_login_requests WHERE expires_at<?1 OR consumed_at IS NOT NULL",
+                [now],
+            )?;
+            let active: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM pwa_login_requests WHERE expires_at>=?1",
+                [now],
+                |row| row.get(0),
+            )?;
+            if active >= 5_000 {
+                return Ok(false);
+            }
+            connection.execute(
+                "INSERT INTO pwa_login_requests(token_hash,created_at,expires_at) VALUES(?1,?2,?3)",
+                rusqlite::params![token_hash(&token), now, now + 10 * 60],
+            )?;
+            Ok(true)
+        })
+        .ok()
+        .filter(|inserted| *inserted)
+        .map(|_| token)
+    }
+
+    pub fn approve_pwa_login(&self, token: &str, user_id: i64, now: i64) -> bool {
+        if token.len() != 32 || self.user(user_id).is_none() {
+            return false;
+        }
+        self.with_conn(|connection| {
+            connection.execute(
+                "UPDATE pwa_login_requests
+                 SET approved_user_id=?2,approved_at=?3
+                 WHERE token_hash=?1 AND expires_at>=?3
+                   AND approved_at IS NULL AND consumed_at IS NULL",
+                rusqlite::params![token_hash(token), user_id, now],
+            )
+        })
+        .map(|changed| changed == 1)
+        .unwrap_or(false)
+    }
+
+    pub fn consume_pwa_login(&self, token: &str, now: i64) -> PwaLoginStatus {
+        if token.len() != 32 {
+            return PwaLoginStatus::Invalid;
+        }
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let request = transaction
+                .query_row(
+                    "SELECT approved_user_id FROM pwa_login_requests
+                     WHERE token_hash=?1 AND expires_at>=?2 AND consumed_at IS NULL",
+                    rusqlite::params![token_hash(token), now],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()?;
+            let Some(user_id) = request else {
+                return Ok(PwaLoginStatus::Invalid);
+            };
+            let Some(user_id) = user_id else {
+                return Ok(PwaLoginStatus::Pending);
+            };
+            let random: [u8; 32] = rand::rng().random();
+            let session =
+                base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, random);
+            let changed = transaction.execute(
+                "UPDATE pwa_login_requests SET consumed_at=?2
+                 WHERE token_hash=?1 AND consumed_at IS NULL",
+                rusqlite::params![token_hash(token), now],
+            )?;
+            if changed != 1 {
+                return Ok(PwaLoginStatus::Invalid);
+            }
+            transaction.execute(
+                "INSERT INTO web_sessions(token_hash,user_id,created_at,expires_at,activated_at)
+                 VALUES(?1,?2,?3,?4,?3)",
+                rusqlite::params![token_hash(&session), user_id, now, now + 30 * 86_400],
+            )?;
+            transaction.commit()?;
+            Ok(PwaLoginStatus::Approved(session))
+        })
+        .unwrap_or(PwaLoginStatus::Invalid)
+    }
+
     pub fn email_user(&self, email: &str) -> Option<i64> {
         self.with_conn(|connection| {
             connection
@@ -618,6 +712,27 @@ mod tests {
         assert!(overview.expiry_notifications);
         assert!(overview.maintenance_notifications);
         assert_eq!(overview.discount_percent, 0);
+    }
+
+    #[test]
+    fn pwa_login_is_confirmed_by_bot_and_consumed_once() {
+        let store = Store::open_in_memory();
+        store.upsert_user(7, Some("alice"), "Alice", None, 100);
+        let token = store.issue_pwa_login_request(101).unwrap();
+        assert_eq!(
+            store.consume_pwa_login(&token, 102),
+            PwaLoginStatus::Pending
+        );
+        assert!(store.approve_pwa_login(&token, 7, 103));
+        let PwaLoginStatus::Approved(session) = store.consume_pwa_login(&token, 104) else {
+            panic!("approved request must create a portal session");
+        };
+        assert_eq!(store.portal_user_id(&session, 105), Some(7));
+        assert_eq!(
+            store.consume_pwa_login(&token, 106),
+            PwaLoginStatus::Invalid
+        );
+        assert!(!store.approve_pwa_login(&token, 7, 107));
     }
 
     #[test]

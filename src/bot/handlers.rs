@@ -3981,6 +3981,36 @@ async fn message_handler(
 
     let role = resolve_role(uid, &cfg.admin_ids, &settings);
     let state = dialogue.get().await?.unwrap_or_default();
+    if let Some(token) = msg
+        .text()
+        .and_then(|text| text.trim().strip_prefix("/start pwa_"))
+        .map(str::trim)
+    {
+        if role == Role::Denied && settings.user_blocked(uid) {
+            bot.send_message(
+                msg.chat.id,
+                "⛔ Доступ к личному кабинету приостановлен. Обратитесь в поддержку.",
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+        } else if settings.approve_pwa_login(token, uid, now_epoch()) {
+            bot.send_message(
+                msg.chat.id,
+                "✅ Вход подтверждён\n\nВернитесь в установленное приложение ZPNet — кабинет откроется автоматически. Ссылку в браузере нажимать не нужно.",
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "⌛ Запрос входа устарел или уже использован. Вернитесь в ZPNet и запросите вход повторно.",
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+        }
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
     if msg
         .text()
         .is_some_and(|text| text.trim() == "/start portal")

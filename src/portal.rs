@@ -43,6 +43,11 @@ struct LoginQuery {
     token: String,
 }
 
+#[derive(serde::Deserialize)]
+struct PwaLoginRequest {
+    token: String,
+}
+
 fn now_epoch() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -825,6 +830,57 @@ async fn login(State(state): State<PortalState>, Query(query): Query<LoginQuery>
         response.headers_mut().insert(header::SET_COOKIE, value);
     }
     response
+}
+
+async fn request_pwa_login(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some((username, _, _, _)) = state.store.mirror_bot_config() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Публичный Telegram-бот не настроен",
+        )
+            .into_response();
+    };
+    let Some(token) = state.store.issue_pwa_login_request(now_epoch()) else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    let username = username.trim().trim_start_matches('@');
+    Json(serde_json::json!({
+        "token":token,
+        "deep_link":format!("https://t.me/{username}?start=pwa_{token}"),
+        "expires_in":600
+    }))
+    .into_response()
+}
+
+async fn poll_pwa_login(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<PwaLoginRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match state
+        .store
+        .consume_pwa_login(input.token.trim(), now_epoch())
+    {
+        crate::store::PwaLoginStatus::Pending => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"status":"pending"})),
+        )
+            .into_response(),
+        crate::store::PwaLoginStatus::Approved(session) => {
+            session_response(&session, state.secure_cookie)
+        }
+        crate::store::PwaLoginStatus::Invalid => (
+            StatusCode::GONE,
+            Json(serde_json::json!({"status":"expired"})),
+        )
+            .into_response(),
+    }
 }
 
 async fn me(State(state): State<PortalState>, headers: HeaderMap) -> Response {
@@ -2133,6 +2189,8 @@ pub async fn run(
         .route("/assets/icon.svg", get(app_icon))
         .route("/login", get(login))
         .route("/api/catalog", get(catalog))
+        .route("/api/telegram/login/request", post(request_pwa_login))
+        .route("/api/telegram/login/poll", post(poll_pwa_login))
         .route("/api/session", get(portal_session))
         .route("/api/sessions", get(portal_sessions))
         .route("/api/sessions/revoke-others", post(revoke_other_sessions))
