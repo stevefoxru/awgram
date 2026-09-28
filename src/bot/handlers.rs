@@ -3981,6 +3981,23 @@ async fn message_handler(
 
     let role = resolve_role(uid, &cfg.admin_ids, &settings);
     let state = dialogue.get().await?.unwrap_or_default();
+    if msg
+        .text()
+        .is_some_and(|text| text.trim() == "/start portal")
+    {
+        if role == Role::Denied && settings.user_blocked(uid) {
+            bot.send_message(
+                msg.chat.id,
+                "⛔ Доступ к личному кабинету приостановлен. Обратитесь в поддержку.",
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+        } else {
+            portal_login_screen(&bot, msg.chat.id, uid, &cfg, &settings).await?;
+        }
+        dialogue.update(State::Idle).await?;
+        return Ok(());
+    }
     if msg.text().is_some_and(|text| text == "/paysupport") {
         bot.send_message(msg.chat.id, "💳 Поддержка по платежам\n\nОпишите проблему с оплатой и, если есть, укажите номер заказа. Не отправляйте данные банковской карты.")
             .reply_markup(menu::support_category_menu()).await?;
