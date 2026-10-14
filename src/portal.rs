@@ -82,8 +82,8 @@ async fn send_email_code(smtp: crate::config::SmtpConfig, email: String, code: S
     tokio::task::spawn_blocking(move || {
         let from: Mailbox = smtp.from.parse().ok()?;
         let to: Mailbox = email.parse().ok()?;
-        let message = Message::builder().from(from).to(to).subject("Код входа ZuevVPN")
-            .body(format!("Код подтверждения ZuevVPN: {code}\n\nОн действует 10 минут. Если вы не запрашивали код, просто проигнорируйте письмо.")).ok()?;
+        let message = Message::builder().from(from).to(to).subject("Код входа ZPNet")
+            .body(format!("Ваш код входа в ZPNet: {code}\n\nКод действует 10 минут и подходит только для одного входа. Если вы не запрашивали код, просто проигнорируйте письмо.")).ok()?;
         let transport = SmtpTransport::relay(&smtp.host).ok()?.port(smtp.port)
             .credentials(Credentials::new(smtp.username, smtp.password)).build();
         transport.send(&message).ok()?;
@@ -1053,8 +1053,13 @@ async fn request_email_login(
             }
         }
     }
-    Json(serde_json::json!({"ok":true,"message":"Если адрес подтверждён, письмо уже отправлено"}))
-        .into_response()
+    Json(serde_json::json!({
+        "ok":true,
+        "message":"Если адрес указан верно, письмо уже отправлено",
+        "expires_in":600,
+        "retry_after":60
+    }))
+    .into_response()
 }
 
 async fn confirm_email_login(
