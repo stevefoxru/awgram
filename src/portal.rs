@@ -67,7 +67,7 @@ fn session(headers: &HeaderMap) -> Option<&str> {
 
 fn session_response(session: &str, secure: bool) -> Response {
     let cookie = format!(
-        "awgram_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
+        "awgram_session={session}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{}",
         30 * 86_400,
         if secure { "; Secure" } else { "" }
     );
@@ -821,7 +821,7 @@ async fn login(State(state): State<PortalState>, Query(query): Query<LoginQuery>
             .into_response();
     };
     let cookie = format!(
-        "awgram_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
+        "awgram_session={session}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{}",
         30 * 86_400,
         if state.secure_cookie { "; Secure" } else { "" }
     );
@@ -1661,7 +1661,7 @@ async fn logout(State(state): State<PortalState>, headers: HeaderMap) -> Respons
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
-            "awgram_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{}",
+            "awgram_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
             if state.secure_cookie { "; Secure" } else { "" }
         )
         .parse()
