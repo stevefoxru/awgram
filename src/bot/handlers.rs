@@ -1554,7 +1554,7 @@ async fn extend_managed_client(
     Ok(target)
 }
 
-async fn set_managed_expiry(
+pub(crate) async fn set_managed_expiry(
     vpn: &Vpn,
     settings: &Store,
     name: &str,
@@ -2608,6 +2608,26 @@ async fn finance_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
 async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
     let requests = settings.legacy_requests("pending", 100);
     let price = settings.legacy_renewal_price_kopecks();
+    let legacy = settings.legacy_clients();
+    let restored = legacy.len();
+    let used = legacy
+        .iter()
+        .filter(|(name, _)| settings.client_ever_used(name))
+        .count();
+    let unused = restored.saturating_sub(used);
+    let owners = legacy
+        .iter()
+        .map(|(_, owner)| *owner)
+        .collect::<std::collections::BTreeSet<_>>();
+    let forecast = owners
+        .iter()
+        .map(|owner| {
+            let (_, billable, _) = settings.legacy_usage_for_user(*owner);
+            settings
+                .legacy_renewal_price_for_user(*owner, price)
+                .saturating_mul(billable as i64)
+        })
+        .sum::<i64>();
     let details = requests
         .iter()
         .map(|r| {
@@ -2625,7 +2645,7 @@ async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Handl
             )
         })
         .collect::<Vec<_>>();
-    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nБазовая цена ежегодного продления: {:.2} ₽\n6–9 legacy-ключей: 750 ₽ за ключ/год\n10 и более: 500 ₽ за ключ/год\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
+    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nВосстановлено: {} у {} пользователей\nИспользовались: {} · ни разу не использовались: {}\nПрогноз продлений: {:.2} ₽\n\nБазовая цена ежегодного продления: {:.2} ₽\n6–9 используемых legacy-ключей: 750 ₽ за ключ/год\n10 и более: 500 ₽ за ключ/год\nНеиспользованные ключи в оплату не входят.\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),restored,owners.len(),used,unused,forecast as f64/100.0,price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
     Ok(())
 }
 
@@ -10673,6 +10693,10 @@ async fn callback_handler(
         Action::Renew(name) => {
             if settings.client_owner(&name) == Some(uid) {
                 if settings.is_legacy_client(&name, uid) {
+                    if !settings.client_ever_used(&name) {
+                        bot.send_message(chat,format!("🟢 Legacy-ключ «{name}» ни разу не использовался. Он не включён в расчёт оплаты. Если ключ вам не нужен, оплачивать его не требуется.")).reply_markup(menu::customer_keyboard()).await?;
+                        return Ok(());
+                    }
                     let price = settings.legacy_renewal_price_for_user(
                         uid,
                         settings.legacy_renewal_price_kopecks(),
@@ -10718,6 +10742,15 @@ async fn callback_handler(
         }
         Action::LegacyRenew(name) => {
             if settings.client_owner(&name) == Some(uid) && settings.is_legacy_client(&name, uid) {
+                if !settings.client_ever_used(&name) {
+                    bot.send_message(
+                        chat,
+                        "Этот legacy-ключ ни разу не использовался и не требует оплаты.",
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                    return Ok(());
+                }
                 let target =
                     crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
                 let price = settings
@@ -10727,6 +10760,15 @@ async fn callback_handler(
         }
         Action::LegacyRenewMethod(name, method) => {
             if settings.client_owner(&name) != Some(uid) || !settings.is_legacy_client(&name, uid) {
+                return Ok(());
+            }
+            if !settings.client_ever_used(&name) {
+                bot.send_message(
+                    chat,
+                    "Этот legacy-ключ ни разу не использовался и не требует оплаты.",
+                )
+                .reply_markup(menu::customer_keyboard())
+                .await?;
                 return Ok(());
             }
             let amount = settings

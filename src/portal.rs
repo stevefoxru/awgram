@@ -287,7 +287,8 @@ async fn catalog(State(state): State<PortalState>) -> Response {
         "id":server.id,"name":server.name,"location":server.location,"protocol":match server.protocol.as_str(){"amneziawg-3"=>"AWG 3.1","amneziawg-2"=>"AWG 2.0",_=>"AWG 1.0"},
         "available":server.capacity.saturating_sub(state.store.server_client_count(server.id)).max(0)
     })).collect::<Vec<_>>();
-    Json(serde_json::json!({"brand":brand,"bot_username":bot_username,"email_login_enabled":state.smtp.is_some(),"tariffs":tariffs,"servers":servers})).into_response()
+    Json(serde_json::json!({"brand":brand,"bot_username":bot_username,"email_login_enabled":state.smtp.is_some(),"tariffs":tariffs,"servers":servers,
+        "legacy":{"request_deadline":crate::calendar::LEGACY_REQUEST_DEADLINE,"renewal_from":crate::calendar::start_of_december(crate::calendar::year_at(now_epoch())),"base_price_kopecks":state.store.legacy_renewal_price_kopecks()}})).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -386,6 +387,13 @@ async fn create_web_renewal(
     }
     let now = now_epoch();
     let (months, amount, legacy) = if state.store.is_legacy_client(&name, user_id) {
+        if !state.store.client_ever_used(&name) {
+            return (
+                StatusCode::CONFLICT,
+                "Ключ ни разу не использовался и сейчас не требует оплаты",
+            )
+                .into_response();
+        }
         let year = crate::calendar::year_at(now);
         if now < crate::calendar::start_of_december(year)
             || now > crate::calendar::end_of_year(year)
@@ -1139,8 +1147,25 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
     let crm_users = state.store.portal_crm_users(250);
     let payments = state.store.pending_payments().into_iter().take(100).map(|item| serde_json::json!({
         "id":item.id,"user_id":item.user_id,"amount_kopecks":item.amount_kopecks,
-        "method":item.method,"proof":item.proof,"created_at":item.created_at,"months":item.months
+        "method":item.method,"proof":item.proof,"created_at":item.created_at,"months":item.months,"client_name":item.client_name
     })).collect::<Vec<_>>();
+    let legacy_owners = state
+        .store
+        .legacy_clients()
+        .into_iter()
+        .map(|(_, owner)| owner)
+        .collect::<std::collections::BTreeSet<_>>();
+    let legacy_billing = legacy_owners.into_iter().filter_map(|owner| {
+        let user = state.store.user(owner)?;
+        let keys = state.store.legacy_clients().into_iter().filter(|(_, id)| *id == owner).map(|(name, _)| {
+            let runtime = state.store.client_runtime_stats(&name);
+            let used = state.store.client_ever_used(&name);
+            serde_json::json!({"name":name,"used":used,"rx":runtime.as_ref().map(|v|v.rx).unwrap_or(0),"tx":runtime.as_ref().map(|v|v.tx).unwrap_or(0),"last_handshake":runtime.and_then(|v|v.last_handshake)})
+        }).collect::<Vec<_>>();
+        let (_, billable, unused) = state.store.legacy_usage_for_user(owner);
+        let unit = state.store.legacy_renewal_price_for_user(owner,state.store.legacy_renewal_price_kopecks());
+        Some(serde_json::json!({"user_id":owner,"display_name":user.display_name,"username":user.username,"keys":keys,"billable":billable,"unused":unused,"unit_price_kopecks":unit,"total_kopecks":unit.saturating_mul(billable as i64)}))
+    }).collect::<Vec<_>>();
     let tickets = state.store.support_tickets("open",100).into_iter()
         .chain(state.store.support_tickets("in_progress",100))
         .map(|item| serde_json::json!({"id":item.id,"user_id":item.user_id,"subject":item.subject,
@@ -1156,6 +1181,8 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "crm_users":crm_users,
         "crm_payments":payments,
         "crm_tickets":tickets,
+        "legacy_billing":legacy_billing,
+        "legacy_request_deadline":crate::calendar::LEGACY_REQUEST_DEADLINE,
         "promos":state.store.admin_promos(100),
         "partner_withdrawals":state.store.pending_partner_withdrawals(100),
         "cleanup": {"enabled": state.store.blocked_key_cleanup_enabled(), "days": state.store.blocked_key_cleanup_days()},
@@ -1415,6 +1442,43 @@ async fn admin_payment_action(
                     now,
                 )
         }
+        "approve" if payment.method == "legacy_manual" => {
+            let Some(name) = payment.client_name.as_deref() else {
+                return (StatusCode::CONFLICT, "В заявке не указан ключ").into_response();
+            };
+            if state.store.client_owner(name) != Some(payment.user_id)
+                || !state.store.is_legacy_client(name, payment.user_id)
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    "Legacy-ключ больше не принадлежит пользователю",
+                )
+                    .into_response();
+            }
+            if !state.store.claim_payment_processing(id) {
+                return (StatusCode::CONFLICT, "Заявка уже обрабатывается").into_response();
+            }
+            let target = crate::calendar::legacy_renewal_target(now, state.vpn.client_expiry(name));
+            match crate::bot::handlers::set_managed_expiry(&state.vpn, &state.store, name, target)
+                .await
+            {
+                Ok(()) => state.store.decide_payment(
+                    id,
+                    crate::store::PaymentStatus::Approved,
+                    admin_id,
+                    Some(name),
+                    now,
+                ),
+                Err(error) => {
+                    state.store.release_payment_processing(id);
+                    return (
+                        StatusCode::CONFLICT,
+                        format!("Продление не выполнено: {error}"),
+                    )
+                        .into_response();
+                }
+            }
+        }
         "approve" => {
             let Some(server_id) = payment.server_id else {
                 return (StatusCode::CONFLICT, "В заявке не указана локация").into_response();
@@ -1469,6 +1533,14 @@ async fn admin_payment_action(
                 format!(
                     "Баланс пополнен на {:.2} ₽.",
                     payment.amount_kopecks as f64 / 100.0
+                ),
+            )
+        } else if payment.method == "legacy_manual" {
+            (
+                "Legacy-продление подтверждено",
+                format!(
+                    "Ключ «{}» продлён после проверки ручного перевода.",
+                    payment.client_name.as_deref().unwrap_or("—")
                 ),
             )
         } else {

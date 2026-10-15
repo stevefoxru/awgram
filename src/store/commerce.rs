@@ -934,16 +934,35 @@ impl Store {
     }
 
     pub fn legacy_renewal_price_for_user(&self, user_id: i64, base: i64) -> i64 {
-        let count = self
-            .legacy_clients()
-            .into_iter()
-            .filter(|(_, owner)| *owner == user_id)
-            .count();
+        let count = self.legacy_usage_for_user(user_id).1;
         match count {
             10.. => 50_000,
             6..=9 => 75_000,
             _ => base,
         }
+    }
+
+    /// Returns (all legacy keys, keys that have ever transferred traffic, unused keys).
+    pub fn legacy_usage_for_user(&self, user_id: i64) -> (usize, usize, usize) {
+        let keys = self
+            .legacy_clients()
+            .into_iter()
+            .filter(|(_, owner)| *owner == user_id)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let billable = keys
+            .iter()
+            .filter(|name| self.client_ever_used(name))
+            .count();
+        (keys.len(), billable, keys.len().saturating_sub(billable))
+    }
+
+    pub fn client_ever_used(&self, name: &str) -> bool {
+        self.client_runtime_stats(name).is_some_and(|runtime| {
+            runtime.rx > 0
+                || runtime.tx > 0
+                || runtime.last_handshake.is_some_and(|value| value > 0)
+        })
     }
 
     pub fn set_subscription_pause(
