@@ -2596,8 +2596,8 @@ async fn admin_user_screen(
         .unwrap_or_else(|| "—".into());
     let note = p.admin_note.as_deref().unwrap_or("—");
     bot.send_message(chat,format!(
-        "👤 Карточка пользователя\n\n{}\nTelegram ID: {}\nUsername: {}\nСтатус: {}\nСоздан: {}\nПоследняя активность: {}\n\n💰 Баланс: {:.2} ₽\n💳 Платежей: {} · Потрачено: {:.2} ₽\n🔑 Ключей: {}\n👥 Рефералов: {}\n🆘 Обращений: {}\n📝 Заметка: {}",
-        p.user.display_name,p.user.user_id,username,if p.blocked{"⛔ заблокирован"}else{"✅ активен"},p.user.created_at,p.last_seen,p.balance_kopecks as f64/100.0,p.payment_count,p.spent_kopecks as f64/100.0,p.key_count,p.referral_count,p.ticket_count,note
+        "👤 Карточка пользователя\n\n{}\nZP ID: {}\nTelegram ID: {}\nUsername: {}\nСтатус: {}\nСоздан: {}\nПоследняя активность: {}\n\n💰 Баланс: {:.2} ₽\n💳 Платежей: {} · Потрачено: {:.2} ₽\n🔑 Ключей: {}\n👥 Рефералов: {}\n🆘 Обращений: {}\n📝 Заметка: {}",
+        p.user.display_name,settings.internal_user_id(user_id).unwrap_or(user_id),p.user.user_id,username,if p.blocked{"⛔ заблокирован"}else{"✅ активен"},p.user.created_at,p.last_seen,p.balance_kopecks as f64/100.0,p.payment_count,p.spent_kopecks as f64/100.0,p.key_count,p.referral_count,p.ticket_count,note
     )).reply_markup(menu::admin_user_menu_with_legacy(user_id,p.blocked,settings.legacy_discount_enabled(user_id))).await?;
     Ok(())
 }
@@ -5534,30 +5534,37 @@ async fn message_handler(
             dialogue.update(State::Idle).await?;
             return Ok(());
         }
-        let value = msg
+        let values = msg
             .text()
             .unwrap_or_default()
-            .trim()
             .replace(',', ".")
-            .parse::<f64>()
-            .ok()
-            .map(|v| (v * 100.0).round() as i64)
-            .filter(|v| *v >= 0);
-        if let Some(value) = value {
-            settings.set_legacy_renewal_price_kopecks(value);
+            .split_whitespace()
+            .filter_map(|v| v.parse::<f64>().ok().map(|n| (n * 100.0).round() as i64))
+            .collect::<Vec<_>>();
+        let prices = match values.as_slice() {
+            [base] => Some((*base, 75_000, 50_000)),
+            [base, six, ten] => Some((*base, *six, *ten)),
+            _ => None,
+        };
+        if let Some((base, six, ten)) =
+            prices.filter(|(a, b, c)| settings.set_legacy_prices_kopecks(*a, *b, *c))
+        {
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "✅ Цена технического продления: {:.2} ₽",
-                    value as f64 / 100.0
+                    "✅ Legacy-цены сохранены\nСтандартная: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽",
+                    base as f64/100.0,six as f64/100.0,ten as f64/100.0
                 ),
             )
             .reply_markup(menu::admin_dashboard_menu())
             .await?;
             dialogue.update(State::Idle).await?;
         } else {
-            bot.send_message(msg.chat.id, "Введите цену в рублях, например 1000.")
-                .await?;
+            bot.send_message(
+                msg.chat.id,
+                "Введите три цены в рублях, например: 1000 750 500",
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -10014,7 +10021,8 @@ async fn callback_handler(
             legacy_admin_screen(&bot, chat, &settings).await?;
         }
         Action::LegacyPriceAsk => {
-            bot.send_message(chat,format!("Текущая цена ежегодного legacy-продления: {:.2} ₽\nВведите новую цену в рублях:",settings.legacy_renewal_price_kopecks() as f64/100.0)).await?;
+            let (six, ten) = settings.legacy_discount_prices_kopecks();
+            bot.send_message(chat,format!("Legacy-цены:\nСтандартная: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽\n\nВведите три новые цены, например: 1000 750 500",settings.legacy_renewal_price_kopecks() as f64/100.0,six as f64/100.0,ten as f64/100.0)).await?;
             dialogue.update(State::AwaitingLegacyPrice).await?;
         }
         Action::PromoInput => {

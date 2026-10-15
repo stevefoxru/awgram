@@ -1,3 +1,7 @@
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use rand::RngExt;
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
@@ -25,6 +29,7 @@ pub struct PortalKey {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PortalOverview {
     pub user_id: i64,
+    pub internal_id: i64,
     pub display_name: String,
     pub username: Option<String>,
     pub balance_kopecks: i64,
@@ -39,6 +44,10 @@ pub struct PortalOverview {
     pub referral_percent: u8,
     pub transfers: Vec<PortalKeyTransfer>,
     pub partner_wallet: Option<serde_json::Value>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub preferred_contact: String,
+    pub password_enabled: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -84,6 +93,7 @@ pub struct PortalTrafficPoint {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PortalCrmUser {
     pub user_id: i64,
+    pub internal_id: i64,
     pub display_name: String,
     pub username: Option<String>,
     pub email: Option<String>,
@@ -119,6 +129,138 @@ fn token_hash(token: &str) -> String {
 }
 
 impl Store {
+    pub fn internal_user_id(&self, user_id: i64) -> Option<i64> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT internal_id FROM user_internal_ids WHERE user_id=?1",
+                [user_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
+    pub fn user_by_internal_id(&self, internal_id: i64) -> Option<i64> {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT user_id FROM user_internal_ids WHERE internal_id=?1",
+                [internal_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_portal_password(&self, user_id: i64, password: &str, now: i64) -> bool {
+        if password.chars().count() < 10
+            || password.chars().count() > 128
+            || self.portal_email(user_id).is_none()
+        {
+            return false;
+        }
+        let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+        let Ok(hash) = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|v| v.to_string())
+        else {
+            return false;
+        };
+        self.with_conn(|c|c.execute("INSERT INTO portal_passwords(user_id,password_hash,updated_at) VALUES(?1,?2,?3) ON CONFLICT(user_id) DO UPDATE SET password_hash=?2,updated_at=?3",rusqlite::params![user_id,hash,now])).is_ok()
+    }
+
+    pub fn verify_portal_password(&self, email: &str, password: &str, now: i64) -> Option<i64> {
+        let user_id = self.verified_user_by_email(email)?;
+        let locked = self
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT locked_until FROM password_login_attempts WHERE user_id=?1",
+                    [user_id],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .optional()
+            })
+            .ok()
+            .flatten()
+            .flatten()
+            .is_some_and(|until| until > now);
+        if locked {
+            return None;
+        }
+        let hash: String = self
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT password_hash FROM portal_passwords WHERE user_id=?1",
+                    [user_id],
+                    |r| r.get(0),
+                )
+            })
+            .ok()?;
+        let parsed = PasswordHash::new(&hash).ok()?;
+        if Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
+        {
+            let _ = self.with_conn(|c| {
+                c.execute(
+                    "DELETE FROM password_login_attempts WHERE user_id=?1",
+                    [user_id],
+                )
+            });
+            Some(user_id)
+        } else {
+            let _=self.with_conn(|c|c.execute("INSERT INTO password_login_attempts(user_id,attempts,window_started_at,locked_until) VALUES(?1,1,?2,NULL) ON CONFLICT(user_id) DO UPDATE SET attempts=CASE WHEN window_started_at<?3 THEN 1 ELSE attempts+1 END,window_started_at=CASE WHEN window_started_at<?3 THEN ?2 ELSE window_started_at END,locked_until=CASE WHEN (CASE WHEN window_started_at<?3 THEN 1 ELSE attempts+1 END)>=5 THEN ?4 ELSE NULL END",rusqlite::params![user_id,now,now-900,now+900]));
+            None
+        }
+    }
+
+    pub fn portal_password_enabled(&self, user_id: i64) -> bool {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM portal_passwords WHERE user_id=?1)",
+                [user_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn portal_profile(&self, user_id: i64) -> (Option<String>, String) {
+        self.with_conn(|c| {
+            c.query_row(
+                "SELECT phone,preferred_contact FROM user_profiles WHERE user_id=?1",
+                [user_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .unwrap_or((None, "email".into()))
+    }
+
+    pub fn set_portal_profile(
+        &self,
+        user_id: i64,
+        display_name: &str,
+        phone: Option<&str>,
+        preferred: &str,
+        now: i64,
+    ) -> bool {
+        let name = display_name.trim();
+        let phone = phone.map(str::trim).filter(|v| !v.is_empty());
+        if name.is_empty()
+            || name.chars().count() > 80
+            || phone.is_some_and(|v| v.chars().count() > 30)
+            || !matches!(preferred, "email" | "telegram" | "phone")
+        {
+            return false;
+        }
+        self.with_conn(|c|{let tx=c.unchecked_transaction()?;tx.execute("UPDATE users SET display_name=?2 WHERE user_id=?1",rusqlite::params![user_id,name])?;tx.execute("INSERT INTO user_profiles(user_id,phone,preferred_contact,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(user_id) DO UPDATE SET phone=?2,preferred_contact=?3,updated_at=?4",rusqlite::params![user_id,phone,preferred,now])?;tx.commit()}).is_ok()
+    }
     pub fn issue_pwa_login_request(&self, now: i64) -> Option<String> {
         let random: [u8; 24] = rand::rng().random();
         let token =
@@ -508,7 +650,7 @@ impl Store {
     pub fn portal_crm_users(&self, limit: usize) -> Vec<PortalCrmUser> {
         self.with_conn(|connection| {
             let mut statement = connection.prepare(
-                "SELECT u.user_id,u.display_name,u.username,u.email,u.blocked,
+                "SELECT u.user_id,COALESCE((SELECT internal_id FROM user_internal_ids i WHERE i.user_id=u.user_id),u.rowid),u.display_name,u.username,u.email,u.blocked,
                         COALESCE((SELECT SUM(amount_kopecks) FROM balance_ledger b WHERE b.user_id=u.user_id),0),
                         (SELECT COUNT(*) FROM clients c WHERE c.owner_user_id=u.user_id AND c.removed_at IS NULL),
                         u.created_at,u.last_seen,
@@ -518,15 +660,16 @@ impl Store {
             let rows = statement.query_map([limit.min(500) as i64], |row| {
                 Ok(PortalCrmUser {
                     user_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    username: row.get(2)?,
-                    email: row.get(3)?,
-                    blocked: row.get::<_, i64>(4)? != 0,
-                    balance_kopecks: row.get(5)?,
-                    keys: row.get(6)?,
-                    created_at: row.get(7)?,
-                    last_seen: row.get(8)?,
-                    legacy_discount_enabled: row.get::<_, i64>(9)? != 0,
+                    internal_id: row.get(1)?,
+                    display_name: row.get(2)?,
+                    username: row.get(3)?,
+                    email: row.get(4)?,
+                    blocked: row.get::<_, i64>(5)? != 0,
+                    balance_kopecks: row.get(6)?,
+                    keys: row.get(7)?,
+                    created_at: row.get(8)?,
+                    last_seen: row.get(9)?,
+                    legacy_discount_enabled: row.get::<_, i64>(10)? != 0,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -678,6 +821,7 @@ impl Store {
         }));
         Some(PortalOverview {
             user_id,
+            internal_id: self.internal_user_id(user_id).unwrap_or(user_id),
             display_name: user.display_name,
             username: user.username,
             balance_kopecks: self.balance_kopecks(user_id),
@@ -692,6 +836,10 @@ impl Store {
             referral_percent: self.referral_percent(),
             transfers: self.portal_key_transfers(user_id, now),
             partner_wallet,
+            email: self.portal_email(user_id),
+            phone: self.portal_profile(user_id).0,
+            preferred_contact: self.portal_profile(user_id).1,
+            password_enabled: self.portal_password_enabled(user_id),
         })
     }
 }
@@ -745,6 +893,15 @@ mod tests {
         assert!(store.request_email_code(7, "Alice@Example.ru", "bind", "123456", 101));
         assert!(store.confirm_email_code(7, "alice@example.ru", "bind", "123456", 102));
         assert_eq!(store.portal_email(7).as_deref(), Some("alice@example.ru"));
+        assert!(store.set_portal_password(7, "correct horse battery", 103));
+        assert_eq!(
+            store.verify_portal_password("alice@example.ru", "correct horse battery", 104),
+            Some(7)
+        );
+        assert_eq!(
+            store.verify_portal_password("alice@example.ru", "wrong password", 105),
+            None
+        );
         assert_eq!(store.verified_user_by_email("ALICE@example.ru"), Some(7));
         let session = store.create_portal_session(7, 103).unwrap();
         assert_eq!(store.portal_user_id(&session, 104), Some(7));

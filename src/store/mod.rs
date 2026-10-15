@@ -852,6 +852,37 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         enabled_at INTEGER NOT NULL
     );
     "#,
+    // v43: стабильный внутренний ZP ID, парольный вход и профиль веб-кабинета.
+    r#"
+    CREATE TABLE user_internal_ids(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        internal_id INTEGER NOT NULL UNIQUE
+    );
+    INSERT INTO user_internal_ids(user_id,internal_id)
+      SELECT user_id,rowid FROM users ORDER BY rowid;
+    CREATE TRIGGER users_assign_internal_id AFTER INSERT ON users
+    BEGIN
+      INSERT OR IGNORE INTO user_internal_ids(user_id,internal_id)
+      VALUES(NEW.user_id,COALESCE((SELECT MAX(internal_id)+1 FROM user_internal_ids),1001));
+    END;
+    CREATE TABLE portal_passwords(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        password_hash TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE password_login_attempts(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        window_started_at INTEGER NOT NULL,
+        locked_until INTEGER
+    );
+    CREATE TABLE user_profiles(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        phone TEXT,
+        preferred_contact TEXT NOT NULL DEFAULT 'email',
+        updated_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub struct Store {

@@ -952,9 +952,10 @@ impl Store {
             return base;
         }
         let count = self.legacy_usage_for_user(user_id).1;
+        let (six_to_nine, ten_plus) = self.legacy_discount_prices_kopecks();
         match count {
-            10.. => 50_000,
-            6..=9 => 75_000,
+            10.. => ten_plus,
+            6..=9 => six_to_nine,
             _ => base,
         }
     }

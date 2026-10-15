@@ -584,6 +584,15 @@ async fn create_web_transfer(
         .ok()
         .and_then(|id| state.store.user(id))
         .or_else(|| {
+            recipient
+                .trim_start_matches("ZP")
+                .trim_start_matches("zp")
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| state.store.user_by_internal_id(id))
+                .and_then(|id| state.store.user(id))
+        })
+        .or_else(|| {
             state
                 .store
                 .find_user_by_username(recipient.trim_start_matches('@'))
@@ -949,6 +958,8 @@ async fn portal_session(State(state): State<PortalState>, headers: HeaderMap) ->
         "role": if state.admin_ids.contains(&user_id) { "owner" } else { "customer" },
         "is_admin": state.admin_ids.contains(&user_id),
         "email": state.store.portal_email(user_id),
+        "internal_id": state.store.internal_user_id(user_id),
+        "password_enabled": state.store.portal_password_enabled(user_id),
         "email_login_enabled": state.smtp.is_some(),
     }))
     .into_response()
@@ -963,6 +974,97 @@ struct EmailRequest {
 struct EmailConfirm {
     email: String,
     code: String,
+}
+
+#[derive(serde::Deserialize)]
+struct PasswordRequest {
+    email: Option<String>,
+    password: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ProfileRequest {
+    display_name: String,
+    phone: Option<String>,
+    preferred_contact: String,
+}
+
+async fn set_password(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<PasswordRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if state
+        .store
+        .set_portal_password(user_id, &input.password, now_epoch())
+    {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            "Подтвердите почту и задайте пароль длиной от 10 до 128 символов",
+        )
+            .into_response()
+    }
+}
+
+async fn password_login(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<PasswordRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(email) = input.email.as_deref() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(user_id) = state
+        .store
+        .verify_portal_password(email, &input.password, now_epoch())
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Неверная почта или пароль либо вход временно ограничен",
+        )
+            .into_response();
+    };
+    match state.store.create_portal_session(user_id, now_epoch()) {
+        Some(value) => session_response(&value, state.secure_cookie),
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn update_profile(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<ProfileRequest>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if state.store.set_portal_profile(
+        user_id,
+        &input.display_name,
+        input.phone.as_deref(),
+        &input.preferred_contact,
+        now_epoch(),
+    ) {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        (StatusCode::BAD_REQUEST, "Проверьте данные профиля").into_response()
+    }
 }
 
 fn valid_email(value: &str) -> bool {
@@ -1183,6 +1285,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "crm_tickets":tickets,
         "legacy_billing":legacy_billing,
         "legacy_request_deadline":crate::calendar::LEGACY_REQUEST_DEADLINE,
+        "legacy_prices":{"base":state.store.legacy_renewal_price_kopecks(),"six_to_nine":state.store.legacy_discount_prices_kopecks().0,"ten_plus":state.store.legacy_discount_prices_kopecks().1},
         "promos":state.store.admin_promos(100),
         "partner_withdrawals":state.store.pending_partner_withdrawals(100),
         "cleanup": {"enabled": state.store.blocked_key_cleanup_enabled(), "days": state.store.blocked_key_cleanup_days()},
@@ -1200,6 +1303,43 @@ struct AdminServerAction {
 #[derive(serde::Deserialize)]
 struct AdminCrmAction {
     action: String,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyPricesInput {
+    base_rubles: i64,
+    six_to_nine_rubles: i64,
+    ten_plus_rubles: i64,
+}
+
+async fn admin_legacy_prices(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(input): Json<LegacyPricesInput>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(id) = session(&headers).and_then(|v| state.store.portal_user_id(v, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if state.store.set_legacy_prices_kopecks(
+        input.base_rubles * 100,
+        input.six_to_nine_rubles * 100,
+        input.ten_plus_rubles * 100,
+    ) {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            "Цены должны быть положительными и уменьшаться",
+        )
+            .into_response()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2286,11 +2426,15 @@ pub async fn run(
         .route("/api/email/bind/confirm", post(confirm_email_bind))
         .route("/api/email/login/request", post(request_email_login))
         .route("/api/email/login/confirm", post(confirm_email_login))
+        .route("/api/password", post(set_password))
+        .route("/api/password/login", post(password_login))
+        .route("/api/profile", patch(update_profile))
         .route("/api/me", get(me))
         .route("/api/admin/overview", get(admin_overview))
         .route("/api/admin/users/{id}/action", post(admin_user_action))
         .route("/api/admin/users/{id}", get(admin_user_profile))
         .route("/api/admin/users/{id}/balance", post(admin_balance_action))
+        .route("/api/admin/legacy/prices", patch(admin_legacy_prices))
         .route("/api/admin/tickets/{id}/action", post(admin_ticket_action))
         .route(
             "/api/admin/payments/{id}/action",

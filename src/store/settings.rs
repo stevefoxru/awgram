@@ -294,6 +294,30 @@ impl Store {
     pub fn set_legacy_renewal_price_kopecks(&self, value: i64) {
         self.set_json("legacy_renewal_price_kopecks", &value.max(0));
     }
+    pub fn legacy_discount_prices_kopecks(&self) -> (i64, i64) {
+        (
+            self.get_json::<i64>("legacy_discount_6_9_kopecks")
+                .unwrap_or(75_000)
+                .max(0),
+            self.get_json::<i64>("legacy_discount_10_plus_kopecks")
+                .unwrap_or(50_000)
+                .max(0),
+        )
+    }
+    pub fn set_legacy_prices_kopecks(&self, base: i64, six_to_nine: i64, ten_plus: i64) -> bool {
+        if base <= 0
+            || six_to_nine <= 0
+            || ten_plus <= 0
+            || six_to_nine > base
+            || ten_plus > six_to_nine
+        {
+            return false;
+        }
+        self.set_json("legacy_renewal_price_kopecks", &base);
+        self.set_json("legacy_discount_6_9_kopecks", &six_to_nine);
+        self.set_json("legacy_discount_10_plus_kopecks", &ten_plus);
+        true
+    }
     /// Фильтр списка клиентов — персональный (групповой админ не меняет вид
     /// владельцу). Фолбэк на старый глобальный ключ: туда писали версии до
     /// per-user фильтра и миграция из legacy state.json.
