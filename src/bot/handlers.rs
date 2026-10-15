@@ -14388,6 +14388,15 @@ mod tests {
             AdminOperations,
             AdminOperationsRefresh,
             AdminOperationsAck,
+            ExitManagement,
+            ExitStatus,
+            ExitAutomatic(true),
+            ExitClients,
+            ExitClientAsk,
+            ExitClientMode("10.66.0.2".into(), "auto".into()),
+            ExitDryRun,
+            ExitRollback,
+            ExitEvents,
             AdminSystem,
             PortalDomain,
             PortalDomainAsk,
@@ -14650,6 +14659,15 @@ mod tests {
                 AdminOperations => {}
                 AdminOperationsRefresh => {}
                 AdminOperationsAck => {}
+                ExitManagement => {}
+                ExitStatus => {}
+                ExitAutomatic(_) => {}
+                ExitClients => {}
+                ExitClientAsk => {}
+                ExitClientMode(_, _) => {}
+                ExitDryRun => {}
+                ExitRollback => {}
+                ExitEvents => {}
                 AdminSystem => {}
                 PortalDomain => {}
                 PortalDomainAsk => {}
