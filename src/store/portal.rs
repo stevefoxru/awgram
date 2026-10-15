@@ -88,7 +88,7 @@ pub struct PortalCrmUser {
     pub username: Option<String>,
     pub email: Option<String>,
     pub blocked: bool,
-    pub legacy_fixed_price_kopecks: Option<i64>,
+    pub legacy_discount_enabled: bool,
     pub balance_kopecks: i64,
     pub keys: i64,
     pub created_at: i64,
@@ -512,7 +512,7 @@ impl Store {
                         COALESCE((SELECT SUM(amount_kopecks) FROM balance_ledger b WHERE b.user_id=u.user_id),0),
                         (SELECT COUNT(*) FROM clients c WHERE c.owner_user_id=u.user_id AND c.removed_at IS NULL),
                         u.created_at,u.last_seen,
-                        (SELECT fixed_price_kopecks FROM legacy_pricing_overrides l WHERE l.user_id=u.user_id)
+                        EXISTS(SELECT 1 FROM legacy_discount_users l WHERE l.user_id=u.user_id)
                  FROM users u ORDER BY u.last_seen DESC LIMIT ?1",
             )?;
             let rows = statement.query_map([limit.min(500) as i64], |row| {
@@ -526,7 +526,7 @@ impl Store {
                     keys: row.get(6)?,
                     created_at: row.get(7)?,
                     last_seen: row.get(8)?,
-                    legacy_fixed_price_kopecks: row.get(9)?,
+                    legacy_discount_enabled: row.get::<_, i64>(9)? != 0,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()

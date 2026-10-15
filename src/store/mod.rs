@@ -842,6 +842,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         updated_at INTEGER NOT NULL
     );
     "#,
+    // v42: Legacy-скидки теперь выключены по умолчанию и включаются адресно.
+    // Новая пустая таблица намеренно не переносит старые исключения: после
+    // обновления фиксированная базовая цена применяется ко всем пользователям.
+    r#"
+    CREATE TABLE legacy_discount_users(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        enabled_by INTEGER NOT NULL,
+        enabled_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub struct Store {

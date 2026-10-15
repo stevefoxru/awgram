@@ -1311,6 +1311,29 @@ pub fn admin_user_menu(user_id: i64, blocked: bool) -> InlineKeyboardMarkup {
     ])
 }
 
+pub fn admin_user_menu_with_legacy(
+    user_id: i64,
+    blocked: bool,
+    legacy_discount: bool,
+) -> InlineKeyboardMarkup {
+    let mut menu = admin_user_menu(user_id, blocked);
+    menu.inline_keyboard.insert(
+        3,
+        vec![cb(
+            if legacy_discount {
+                "♻️ Legacy-скидка: включена"
+            } else {
+                "♻️ Legacy-скидка: выключена"
+            },
+            &format!(
+                "admin:userlegacy:{user_id}:{}",
+                if legacy_discount { "off" } else { "on" }
+            ),
+        )],
+    );
+    menu
+}
+
 pub fn admin_user_keys_menu(user_id: i64, names: &[String]) -> InlineKeyboardMarkup {
     let mut rows = names
         .iter()

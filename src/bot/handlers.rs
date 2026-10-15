@@ -139,6 +139,7 @@ pub enum Action {
     AdminUserPayments(i64),
     AdminUserBalance(i64),
     AdminUserDiscount(i64),
+    AdminUserLegacyDiscount(i64, bool),
     AdminUserNote(i64),
     AdminUserBlock(i64, bool),
     StatsSection(String),
@@ -616,6 +617,13 @@ fn parse_callback(data: &str) -> Action {
                 v.parse()
                     .map(Action::AdminUserDiscount)
                     .unwrap_or(Action::Unknown)
+            } else if let Some(v) = data.strip_prefix("admin:userlegacy:") {
+                let mut parts = v.splitn(2, ':');
+                match (parts.next().and_then(|id| id.parse().ok()), parts.next()) {
+                    (Some(id), Some("on")) => Action::AdminUserLegacyDiscount(id, true),
+                    (Some(id), Some("off")) => Action::AdminUserLegacyDiscount(id, false),
+                    _ => Action::Unknown,
+                }
             } else if let Some(v) = data.strip_prefix("admin:usernote:") {
                 v.parse()
                     .map(Action::AdminUserNote)
@@ -2590,7 +2598,7 @@ async fn admin_user_screen(
     bot.send_message(chat,format!(
         "👤 Карточка пользователя\n\n{}\nTelegram ID: {}\nUsername: {}\nСтатус: {}\nСоздан: {}\nПоследняя активность: {}\n\n💰 Баланс: {:.2} ₽\n💳 Платежей: {} · Потрачено: {:.2} ₽\n🔑 Ключей: {}\n👥 Рефералов: {}\n🆘 Обращений: {}\n📝 Заметка: {}",
         p.user.display_name,p.user.user_id,username,if p.blocked{"⛔ заблокирован"}else{"✅ активен"},p.user.created_at,p.last_seen,p.balance_kopecks as f64/100.0,p.payment_count,p.spent_kopecks as f64/100.0,p.key_count,p.referral_count,p.ticket_count,note
-    )).reply_markup(menu::admin_user_menu(user_id,p.blocked)).await?;
+    )).reply_markup(menu::admin_user_menu_with_legacy(user_id,p.blocked,settings.legacy_discount_enabled(user_id))).await?;
     Ok(())
 }
 
@@ -2671,7 +2679,7 @@ async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Handl
             )
         })
         .collect::<Vec<_>>();
-    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nВосстановлено: {} у {} пользователей\nИспользовались: {} · ни разу не использовались: {}\nПрогноз продлений: {:.2} ₽\n\nБазовая цена ежегодного продления: {:.2} ₽\n6–9 используемых legacy-ключей: 750 ₽ за ключ/год\n10 и более: 500 ₽ за ключ/год\nНеиспользованные ключи в оплату не входят.\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),restored,owners.len(),used,unused,forecast as f64/100.0,price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
+    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nВосстановлено: {} у {} пользователей\nИспользовались: {} · ни разу не использовались: {}\nПрогноз продлений: {:.2} ₽\n\nСтандартная цена: {:.2} ₽ за используемый ключ/год.\nСкидки по умолчанию отключены. Администратор может индивидуально включить шкалу: 6–9 ключей — 750 ₽, 10 и более — 500 ₽.\nНеиспользованные ключи в оплату не входят.\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),restored,owners.len(),used,unused,forecast as f64/100.0,price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
     Ok(())
 }
 
@@ -3690,6 +3698,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminUserPayments(_)
         | AdminUserBalance(_)
         | AdminUserDiscount(_)
+        | AdminUserLegacyDiscount(_, _)
         | AdminUserNote(_)
         | AdminUserBlock(_, _)
         | StatsSection(_)
@@ -10398,6 +10407,23 @@ async fn callback_handler(
                 .update(State::AwaitingUserDiscount { user_id })
                 .await?;
         }
+        Action::AdminUserLegacyDiscount(user_id, enabled) => {
+            if settings.set_legacy_discount_enabled(user_id, enabled, uid, now_epoch()) {
+                bot.send_message(
+                    chat,
+                    if enabled {
+                        "✅ Индивидуальная Legacy-скидка включена: 750 ₽ при 6–9 используемых ключах и 500 ₽ при 10+."
+                    } else {
+                        "✅ Legacy-скидка отключена. Действует стандартная цена 1000 ₽ за используемый ключ."
+                    },
+                )
+                .await?;
+                admin_user_screen(&bot, chat, &settings, user_id).await?;
+            } else {
+                bot.send_message(chat, "❌ Не удалось изменить Legacy-скидку.")
+                    .await?;
+            }
+        }
         Action::AdminUserNote(user_id) => {
             bot.send_message(
                 chat,
@@ -14449,6 +14475,7 @@ mod tests {
             AdminUserPayments(1),
             AdminUserBalance(1),
             AdminUserDiscount(1),
+            AdminUserLegacyDiscount(1, true),
             AdminUserNote(1),
             AdminUserBlock(1, true),
             StatsSection("vpn".into()),
@@ -14715,6 +14742,7 @@ mod tests {
                 AdminUserPayments(_) => {}
                 AdminUserBalance(_) => {}
                 AdminUserDiscount(_) => {}
+                AdminUserLegacyDiscount(_, _) => {}
                 AdminUserNote(_) => {}
                 AdminUserBlock(_, _) => {}
                 StatsSection(_) => {}
@@ -15150,6 +15178,7 @@ mod tests {
             (Action::AdminUserPayments(1), true, false),
             (Action::AdminUserBalance(1), true, false),
             (Action::AdminUserDiscount(1), true, false),
+            (Action::AdminUserLegacyDiscount(1, true), true, false),
             (Action::AdminUserNote(1), true, false),
             (Action::AdminUserBlock(1, true), true, false),
             (Action::StatsSection("vpn".into()), true, false),

@@ -948,8 +948,8 @@ impl Store {
     }
 
     pub fn legacy_renewal_price_for_user(&self, user_id: i64, base: i64) -> i64 {
-        if let Some(fixed) = self.legacy_fixed_price(user_id) {
-            return fixed;
+        if !self.legacy_discount_enabled(user_id) {
+            return base;
         }
         let count = self.legacy_usage_for_user(user_id).1;
         match count {
@@ -959,41 +959,41 @@ impl Store {
         }
     }
 
-    pub fn legacy_fixed_price(&self, user_id: i64) -> Option<i64> {
+    pub fn legacy_discount_enabled(&self, user_id: i64) -> bool {
         self.with_conn(|connection| {
-            connection
-                .query_row(
-                    "SELECT fixed_price_kopecks FROM legacy_pricing_overrides WHERE user_id=?1",
-                    [user_id],
-                    |row| row.get(0),
-                )
-                .optional()
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM legacy_discount_users WHERE user_id=?1)",
+                [user_id],
+                |row| row.get(0),
+            )
         })
-        .ok()
-        .flatten()
+        .unwrap_or(false)
     }
 
-    pub fn set_legacy_fixed_price(
+    pub fn set_legacy_discount_enabled(
         &self,
         user_id: i64,
-        price_kopecks: Option<i64>,
+        enabled: bool,
         admin_id: i64,
         now: i64,
     ) -> bool {
-        if price_kopecks.is_some_and(|price| price <= 0) || self.user(user_id).is_none() {
+        if self.user(user_id).is_none() {
             return false;
         }
-        self.with_conn(|connection| match price_kopecks {
-            Some(price) => connection.execute(
-                "INSERT INTO legacy_pricing_overrides(user_id,fixed_price_kopecks,updated_by,updated_at)
-                 VALUES(?1,?2,?3,?4) ON CONFLICT(user_id) DO UPDATE SET
-                 fixed_price_kopecks=excluded.fixed_price_kopecks,updated_by=excluded.updated_by,updated_at=excluded.updated_at",
-                rusqlite::params![user_id, price, admin_id, now],
-            ),
-            None => connection.execute(
-                "DELETE FROM legacy_pricing_overrides WHERE user_id=?1",
-                [user_id],
-            ),
+        self.with_conn(|connection| {
+            if enabled {
+                connection.execute(
+                    "INSERT INTO legacy_discount_users(user_id,enabled_by,enabled_at)
+                 VALUES(?1,?2,?3) ON CONFLICT(user_id) DO UPDATE SET
+                 enabled_by=excluded.enabled_by,enabled_at=excluded.enabled_at",
+                    rusqlite::params![user_id, admin_id, now],
+                )
+            } else {
+                connection.execute(
+                    "DELETE FROM legacy_discount_users WHERE user_id=?1",
+                    [user_id],
+                )
+            }
         })
         .is_ok()
     }
@@ -2374,16 +2374,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fixed_price_can_override_and_restore_tiers() {
+    fn legacy_discount_is_opt_in() {
         let s = Store::open_in_memory();
         s.upsert_user(7, Some("alice"), "Alice", None, 10);
-        assert_eq!(s.legacy_fixed_price(7), None);
-        assert!(s.set_legacy_fixed_price(7, Some(100_000), 1, 20));
-        assert_eq!(s.legacy_fixed_price(7), Some(100_000));
-        assert_eq!(s.legacy_renewal_price_for_user(7, 90_000), 100_000);
-        assert!(s.set_legacy_fixed_price(7, None, 1, 21));
-        assert_eq!(s.legacy_fixed_price(7), None);
+        assert!(!s.legacy_discount_enabled(7));
         assert_eq!(s.legacy_renewal_price_for_user(7, 90_000), 90_000);
+        assert!(s.set_legacy_discount_enabled(7, true, 1, 20));
+        assert!(s.legacy_discount_enabled(7));
+        assert!(s.set_legacy_discount_enabled(7, false, 1, 21));
+        assert!(!s.legacy_discount_enabled(7));
     }
 
     #[test]
