@@ -252,6 +252,12 @@ pub enum Action {
     CustomerMore,
     CustomerLegacyRestore,
     Profile,
+    ProfileSettings,
+    ProfileEmail,
+    ProfilePhone,
+    ProfilePassword,
+    ProfilePasswordReset,
+    ProfilePasswordResetConfirm,
     Portal,
     Balance,
     PaymentApprove(i64),
@@ -375,6 +381,12 @@ fn parse_callback(data: &str) -> Action {
         "legacy:customer" => Action::CustomerLegacyRestore,
         "server:sync-all" => Action::ServerPanelSyncAll,
         "profile" => Action::Profile,
+        "profile:settings" => Action::ProfileSettings,
+        "profile:email" => Action::ProfileEmail,
+        "profile:phone" => Action::ProfilePhone,
+        "profile:password" => Action::ProfilePassword,
+        "profile:password:reset" => Action::ProfilePasswordReset,
+        "profile:password:reset:confirm" => Action::ProfilePasswordResetConfirm,
         "portal" => Action::Portal,
         "balance" => Action::Balance,
         "set:payment" => Action::PaymentInstructionsAsk,
@@ -3488,6 +3500,12 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | CustomerMore
         | CustomerLegacyRestore
         | Profile
+        | ProfileSettings
+        | ProfileEmail
+        | ProfilePhone
+        | ProfilePassword
+        | ProfilePasswordReset
+        | ProfilePasswordResetConfirm
         | Portal
         | Balance
         | CustomerKey(_)
@@ -5397,6 +5415,144 @@ async fn message_handler(
         .await?;
         if changed {
             dialogue.update(State::Idle).await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingProfileEmail) {
+        let email = msg.text().unwrap_or_default().trim().to_lowercase();
+        let valid = email.len() <= 254
+            && email.split_once('@').is_some_and(|(local, domain)| {
+                !local.is_empty() && domain.contains('.') && !domain.ends_with('.')
+            });
+        let available = settings
+            .verified_user_by_email(&email)
+            .is_none_or(|user_id| user_id == uid);
+        let Some(smtp) = cfg.smtp.clone() else {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Почтовый шлюз пока не настроен администратором.",
+            )
+            .reply_markup(menu::profile_settings_menu(
+                settings.portal_password_enabled(uid),
+            ))
+            .await?;
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        };
+        if !valid || !available {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Адрес некорректен или уже привязан к другому аккаунту. Введите другую почту:",
+            )
+            .await?;
+            return Ok(());
+        }
+        let code = format!("{:06}", rand::random_range(0..1_000_000));
+        if !settings.request_email_code(uid, &email, "bind", &code, now_epoch()) {
+            bot.send_message(
+                msg.chat.id,
+                "Подождите минуту перед повторной отправкой кода.",
+            )
+            .await?;
+            return Ok(());
+        }
+        if !crate::portal::send_email_code(smtp, email.clone(), code).await {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Не удалось отправить письмо. Проверьте настройки SMTP или попробуйте позже.",
+            )
+            .reply_markup(menu::profile_settings_menu(
+                settings.portal_password_enabled(uid),
+            ))
+            .await?;
+            dialogue.update(State::Idle).await?;
+            return Ok(());
+        }
+        bot.send_message(
+            msg.chat.id,
+            "Введите шестизначный код из письма. Код действует 10 минут:",
+        )
+        .await?;
+        dialogue
+            .update(State::AwaitingProfileEmailCode { email })
+            .await?;
+        return Ok(());
+    }
+    if let State::AwaitingProfileEmailCode { email } = state.clone() {
+        let code = msg.text().unwrap_or_default().trim();
+        if settings.confirm_email_code(uid, &email, "bind", code, now_epoch()) {
+            bot.send_message(
+                msg.chat.id,
+                format!("✅ Почта {email} подтверждена и добавлена к профилю."),
+            )
+            .reply_markup(menu::profile_settings_menu(
+                settings.portal_password_enabled(uid),
+            ))
+            .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Код неверный или истёк. Проверьте письмо и введите код ещё раз.",
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingProfilePhone) {
+        let raw = msg.text().unwrap_or_default().trim();
+        let phone = if matches!(raw.to_lowercase().as_str(), "удалить" | "delete" | "clear")
+        {
+            None
+        } else {
+            Some(raw)
+        };
+        let user = settings.user(uid);
+        let name = user
+            .as_ref()
+            .map(|value| value.display_name.as_str())
+            .unwrap_or("Пользователь");
+        let preferred = if phone.is_some() { "phone" } else { "telegram" };
+        if settings.set_portal_profile(uid, name, phone, preferred, now_epoch()) {
+            bot.send_message(
+                msg.chat.id,
+                if phone.is_some() {
+                    "✅ Телефон сохранён."
+                } else {
+                    "✅ Телефон удалён из профиля."
+                },
+            )
+            .reply_markup(menu::profile_settings_menu(
+                settings.portal_password_enabled(uid),
+            ))
+            .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Не удалось сохранить телефон. Используйте не более 30 символов.",
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    if matches!(&state, State::AwaitingProfilePassword) {
+        let password = msg.text().unwrap_or_default().to_owned();
+        let _ = bot.delete_message(msg.chat.id, msg.id).await;
+        if settings.set_portal_password(uid, password.trim(), now_epoch()) {
+            bot.send_message(
+                msg.chat.id,
+                "✅ Пароль веб-кабинета установлен. Сообщение с паролем удалено из чата.",
+            )
+            .reply_markup(menu::profile_settings_menu(true))
+            .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "❌ Пароль должен содержать от 10 до 128 символов. Отправьте другой пароль:",
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -11274,6 +11430,70 @@ async fn callback_handler(
             bot.send_message(chat, format!("👤 Профиль\n\n{display_name}\nTelegram ID: {uid}\n🔑 Ключей: {}\n💰 Баланс: {:.2} ₽\n🎟 Скидка: {discount_text}\n👥 Приглашено: {}\n🎁 Реферальное начисление: {}% от покупки\n\nВаша ссылка:\nhttps://t.me/{username}?start=ref_{uid}\n\nНачисления за приглашённых автоматически появляются в истории баланса.", settings.user_client_names(uid).len(), settings.balance_kopecks(uid) as f64 / 100.0, settings.referral_count(uid), settings.referral_percent()))
                 .reply_markup(menu::profile_menu(cfg.portal_public_url.is_some())).await?;
         }
+        Action::ProfileSettings => {
+            let email = settings
+                .portal_email(uid)
+                .unwrap_or_else(|| "не добавлена".into());
+            let (phone, preferred) = settings.portal_profile(uid);
+            let password_enabled = settings.portal_password_enabled(uid);
+            bot.send_message(
+                chat,
+                format!(
+                    "👤 Контакты и вход\n\n✉️ Почта: {email}\n📱 Телефон: {}\n💬 Основной канал: {preferred}\n🔐 Пароль: {}\n\nПочта подтверждается одноразовым кодом. Пароль используется только для входа в веб-кабинет.",
+                    phone.as_deref().unwrap_or("не добавлен"),
+                    if password_enabled { "установлен" } else { "не установлен" }
+                ),
+            )
+            .reply_markup(menu::profile_settings_menu(password_enabled))
+            .await?;
+        }
+        Action::ProfileEmail => {
+            if cfg.smtp.is_none() {
+                bot.send_message(chat, "❌ Почтовый шлюз пока не настроен администратором.")
+                    .reply_markup(menu::profile_settings_menu(
+                        settings.portal_password_enabled(uid),
+                    ))
+                    .await?;
+            } else {
+                bot.send_message(chat, "Введите адрес электронной почты. На него придёт шестизначный код подтверждения:")
+                    .await?;
+                dialogue.update(State::AwaitingProfileEmail).await?;
+            }
+        }
+        Action::ProfilePhone => {
+            bot.send_message(
+                chat,
+                "Введите номер телефона или слово «удалить», чтобы очистить поле:",
+            )
+            .await?;
+            dialogue.update(State::AwaitingProfilePhone).await?;
+        }
+        Action::ProfilePassword => {
+            if settings.portal_email(uid).is_none() {
+                bot.send_message(chat, "Сначала добавьте и подтвердите почту — она понадобится для резервного восстановления доступа.")
+                    .reply_markup(menu::profile_settings_menu(false))
+                    .await?;
+            } else {
+                bot.send_message(chat, "Отправьте новый пароль длиной от 10 до 128 символов. Сообщение будет сразу удалено, а пароль сохранится только в виде защищённого хеша.")
+                    .await?;
+                dialogue.update(State::AwaitingProfilePassword).await?;
+            }
+        }
+        Action::ProfilePasswordReset => {
+            bot.send_message(chat, "Сбросить пароль веб-кабинета? Вход по почте с одноразовым кодом и через Telegram продолжит работать.")
+                .reply_markup(menu::profile_password_reset_menu())
+                .await?;
+        }
+        Action::ProfilePasswordResetConfirm => {
+            if settings.clear_portal_password(uid) {
+                bot.send_message(chat, "✅ Пароль сброшен. При необходимости установите новый в разделе «Контакты и пароль».")
+                    .reply_markup(menu::profile_settings_menu(false))
+                    .await?;
+            } else {
+                bot.send_message(chat, "❌ Не удалось сбросить пароль. Попробуйте ещё раз.")
+                    .await?;
+            }
+        }
         Action::Portal => {
             portal_login_screen(&bot, chat, uid, &cfg, &settings).await?;
         }
@@ -14601,6 +14821,12 @@ mod tests {
             CustomerMore,
             CustomerLegacyRestore,
             Profile,
+            ProfileSettings,
+            ProfileEmail,
+            ProfilePhone,
+            ProfilePassword,
+            ProfilePasswordReset,
+            ProfilePasswordResetConfirm,
             Portal,
             Balance,
             CustomerKey("s".into()),
@@ -14876,6 +15102,12 @@ mod tests {
                 CustomerMore => {}
                 CustomerLegacyRestore => {}
                 Profile => {}
+                ProfileSettings => {}
+                ProfileEmail => {}
+                ProfilePhone => {}
+                ProfilePassword => {}
+                ProfilePasswordReset => {}
+                ProfilePasswordResetConfirm => {}
                 Portal => {}
                 Balance => {}
                 PaymentApprove(_) => {}
@@ -15047,6 +15279,12 @@ mod tests {
             (Action::CustomerMore, true, true),
             (Action::CustomerLegacyRestore, true, true),
             (Action::Profile, true, true),
+            (Action::ProfileSettings, true, true),
+            (Action::ProfileEmail, true, true),
+            (Action::ProfilePhone, true, true),
+            (Action::ProfilePassword, true, true),
+            (Action::ProfilePasswordReset, true, true),
+            (Action::ProfilePasswordResetConfirm, true, true),
             (Action::Balance, true, true),
             (Action::CustomerKey("mine".into()), true, true),
             (Action::CustomerRefresh("mine".into()), true, true),

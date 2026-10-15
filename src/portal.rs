@@ -78,7 +78,11 @@ fn session_response(session: &str, secure: bool) -> Response {
     response
 }
 
-async fn send_email_code(smtp: crate::config::SmtpConfig, email: String, code: String) -> bool {
+pub(crate) async fn send_email_code(
+    smtp: crate::config::SmtpConfig,
+    email: String,
+    code: String,
+) -> bool {
     tokio::task::spawn_blocking(move || {
         let from: Mailbox = smtp.from.parse().ok()?;
         let to: Mailbox = email.parse().ok()?;
@@ -1012,6 +1016,22 @@ async fn set_password(
             "Подтвердите почту и задайте пароль длиной от 10 до 128 символов",
         )
             .into_response()
+    }
+}
+
+async fn reset_password(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if state.store.clear_portal_password(user_id) {
+        Json(serde_json::json!({"ok":true})).into_response()
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     }
 }
 
@@ -2426,7 +2446,7 @@ pub async fn run(
         .route("/api/email/bind/confirm", post(confirm_email_bind))
         .route("/api/email/login/request", post(request_email_login))
         .route("/api/email/login/confirm", post(confirm_email_login))
-        .route("/api/password", post(set_password))
+        .route("/api/password", post(set_password).delete(reset_password))
         .route("/api/password/login", post(password_login))
         .route("/api/profile", patch(update_profile))
         .route("/api/me", get(me))

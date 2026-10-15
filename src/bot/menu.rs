@@ -28,9 +28,39 @@ pub fn profile_menu(portal_enabled: bool) -> InlineKeyboardMarkup {
         cb("➕ Купить ключ", "buy"),
         cb("🎟 Промокод", "legacy:promo"),
     ]);
+    rows.push(vec![cb("👤 Контакты и пароль", "profile:settings")]);
     rows.push(vec![cb("🆘 Помощь", "customer:help")]);
     rows.push(vec![cb("⚙️ Ещё", "customer:more")]);
     InlineKeyboardMarkup::new(rows)
+}
+
+pub fn profile_settings_menu(password_enabled: bool) -> InlineKeyboardMarkup {
+    let mut rows = vec![
+        vec![
+            cb("✉️ Добавить/изменить почту", "profile:email"),
+            cb("📱 Изменить телефон", "profile:phone"),
+        ],
+        vec![cb(
+            if password_enabled {
+                "🔐 Изменить пароль"
+            } else {
+                "🔐 Установить пароль"
+            },
+            "profile:password",
+        )],
+    ];
+    if password_enabled {
+        rows.push(vec![cb("♻️ Сбросить пароль", "profile:password:reset")]);
+    }
+    rows.push(vec![cb("⬅️ Кабинет", "profile")]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn profile_password_reset_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("✅ Сбросить пароль", "profile:password:reset:confirm")],
+        vec![cb("⬅️ Назад", "profile:settings")],
+    ])
 }
 
 pub fn notification_settings_menu(expiry: bool, maintenance: bool) -> InlineKeyboardMarkup {

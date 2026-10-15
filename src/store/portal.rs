@@ -228,6 +228,19 @@ impl Store {
         .unwrap_or(false)
     }
 
+    pub fn clear_portal_password(&self, user_id: i64) -> bool {
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute("DELETE FROM portal_passwords WHERE user_id=?1", [user_id])?;
+            transaction.execute(
+                "DELETE FROM password_login_attempts WHERE user_id=?1",
+                [user_id],
+            )?;
+            transaction.commit()
+        })
+        .is_ok()
+    }
+
     pub fn portal_profile(&self, user_id: i64) -> (Option<String>, String) {
         self.with_conn(|c| {
             c.query_row(
@@ -903,6 +916,13 @@ mod tests {
             None
         );
         assert_eq!(store.verified_user_by_email("ALICE@example.ru"), Some(7));
+        assert!(store.portal_password_enabled(7));
+        assert!(store.clear_portal_password(7));
+        assert!(!store.portal_password_enabled(7));
+        assert_eq!(
+            store.verify_portal_password("alice@example.ru", "correct horse battery", 106),
+            None
+        );
         let session = store.create_portal_session(7, 103).unwrap();
         assert_eq!(store.portal_user_id(&session, 104), Some(7));
     }

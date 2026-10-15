@@ -151,6 +151,12 @@ pub enum State {
         kind: String,
     },
     AwaitingCustomerPromo,
+    AwaitingProfileEmail,
+    AwaitingProfileEmailCode {
+        email: String,
+    },
+    AwaitingProfilePhone,
+    AwaitingProfilePassword,
     AwaitingLegacyRequest,
     AwaitingLegacyReject {
         id: i64,
