@@ -833,6 +833,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_pwa_login_expiry ON pwa_login_requests(expires_at,consumed_at);
     "#,
+    // v41: индивидуальная фиксированная цена Legacy вместо скидочных ступеней.
+    r#"
+    CREATE TABLE legacy_pricing_overrides(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        fixed_price_kopecks INTEGER NOT NULL CHECK(fixed_price_kopecks > 0),
+        updated_by INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub struct Store {

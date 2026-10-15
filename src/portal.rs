@@ -1164,7 +1164,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         }).collect::<Vec<_>>();
         let (_, billable, unused) = state.store.legacy_usage_for_user(owner);
         let unit = state.store.legacy_renewal_price_for_user(owner,state.store.legacy_renewal_price_kopecks());
-        Some(serde_json::json!({"user_id":owner,"display_name":user.display_name,"username":user.username,"keys":keys,"billable":billable,"unused":unused,"unit_price_kopecks":unit,"total_kopecks":unit.saturating_mul(billable as i64)}))
+        Some(serde_json::json!({"user_id":owner,"display_name":user.display_name,"username":user.username,"keys":keys,"billable":billable,"unused":unused,"unit_price_kopecks":unit,"fixed_price":state.store.legacy_fixed_price(owner).is_some(),"total_kopecks":unit.saturating_mul(billable as i64)}))
     }).collect::<Vec<_>>();
     let tickets = state.store.support_tickets("open",100).into_iter()
         .chain(state.store.support_tickets("in_progress",100))
@@ -1344,6 +1344,14 @@ async fn admin_user_action(
     let result = match input.action.as_str() {
         "block" => state.store.set_user_blocked(id, true),
         "unblock" => state.store.set_user_blocked(id, false),
+        "legacy_fixed_1000" => {
+            state
+                .store
+                .set_legacy_fixed_price(id, Some(100_000), admin_id, now_epoch())
+        }
+        "legacy_tiered" => state
+            .store
+            .set_legacy_fixed_price(id, None, admin_id, now_epoch()),
         _ => false,
     };
     if result {
