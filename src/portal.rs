@@ -99,6 +99,10 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn cabinet_page() -> Html<&'static str> {
+    Html(INDEX_HTML)
+}
+
 async fn robots(State(state): State<PortalState>) -> Response {
     let body = format!(
         "User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /login\nSitemap: {}/sitemap.xml\n",
@@ -1043,16 +1047,16 @@ async fn password_login(
     if !same_site_request(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some(email) = input.email.as_deref() else {
+    let Some(login) = input.email.as_deref() else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let Some(user_id) = state
         .store
-        .verify_portal_password(email, &input.password, now_epoch())
+        .verify_portal_password(login, &input.password, now_epoch())
     else {
         return (
             StatusCode::UNAUTHORIZED,
-            "Неверная почта или пароль либо вход временно ограничен",
+            "Неверная почта, телефон или пароль либо вход временно ограничен",
         )
             .into_response();
     };
@@ -1268,7 +1272,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         .collect::<Vec<_>>();
     let crm_users = state.store.portal_crm_users(250);
     let payments = state.store.pending_payments().into_iter().take(100).map(|item| serde_json::json!({
-        "id":item.id,"user_id":item.user_id,"amount_kopecks":item.amount_kopecks,
+        "id":item.id,"user_id":item.user_id,"internal_id":state.store.internal_user_id(item.user_id),"amount_kopecks":item.amount_kopecks,
         "method":item.method,"proof":item.proof,"created_at":item.created_at,"months":item.months,"client_name":item.client_name
     })).collect::<Vec<_>>();
     let legacy_owners = state
@@ -1286,11 +1290,11 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         }).collect::<Vec<_>>();
         let (_, billable, unused) = state.store.legacy_usage_for_user(owner);
         let unit = state.store.legacy_renewal_price_for_user(owner,state.store.legacy_renewal_price_kopecks());
-        Some(serde_json::json!({"user_id":owner,"display_name":user.display_name,"username":user.username,"keys":keys,"billable":billable,"unused":unused,"unit_price_kopecks":unit,"discount_enabled":state.store.legacy_discount_enabled(owner),"total_kopecks":unit.saturating_mul(billable as i64)}))
+        Some(serde_json::json!({"user_id":owner,"internal_id":state.store.internal_user_id(owner),"display_name":user.display_name,"username":user.username,"keys":keys,"billable":billable,"unused":unused,"unit_price_kopecks":unit,"discount_enabled":state.store.legacy_discount_enabled(owner),"total_kopecks":unit.saturating_mul(billable as i64)}))
     }).collect::<Vec<_>>();
     let tickets = state.store.support_tickets("open",100).into_iter()
         .chain(state.store.support_tickets("in_progress",100))
-        .map(|item| serde_json::json!({"id":item.id,"user_id":item.user_id,"subject":item.subject,
+        .map(|item| serde_json::json!({"id":item.id,"user_id":item.user_id,"internal_id":state.store.internal_user_id(item.user_id),"subject":item.subject,
             "status":item.status,"category":item.category,"priority":item.priority,"updated_at":item.updated_at}))
         .collect::<Vec<_>>();
     Json(serde_json::json!({
@@ -1535,13 +1539,16 @@ async fn admin_user_profile(
     if !state.admin_ids.contains(&admin_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some(user) = state.store.user(id) else {
+    let Some(user_id) = state.store.user_by_internal_id(id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(overview) = state.store.portal_overview(id, now_epoch()) else {
+    let Some(user) = state.store.user(user_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    Json(serde_json::json!({"user":{"id":user.user_id,"display_name":user.display_name,"username":user.username,"created_at":user.created_at,"balance_kopecks":overview.balance_kopecks,"referral_count":overview.referral_count},"keys":overview.keys,"payments":overview.payments,"tickets":overview.tickets,"balance_history":overview.balance_history})).into_response()
+    let Some(overview) = state.store.portal_overview(user_id, now_epoch()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Json(serde_json::json!({"user":{"id":user.user_id,"internal_id":overview.internal_id,"display_name":user.display_name,"username":user.username,"created_at":user.created_at,"balance_kopecks":overview.balance_kopecks,"referral_count":overview.referral_count},"keys":overview.keys,"payments":overview.payments,"tickets":overview.tickets,"balance_history":overview.balance_history})).into_response()
 }
 
 async fn admin_ticket_action(
@@ -2217,7 +2224,7 @@ async fn support(
                 "support",
                 "Обращение отправлено",
                 &format!("Обращение #{id} передано в поддержку."),
-                Some("/?view=support"),
+                Some(&format!("/lk/support/{id}")),
                 now_epoch(),
             );
             if existing.is_some() {
@@ -2426,6 +2433,8 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let app = Router::new()
         .route("/", get(index))
+        .route("/lk", get(cabinet_page))
+        .route("/lk/{*path}", get(cabinet_page))
         .route("/{page}", get(marketing_page))
         .route("/robots.txt", get(robots))
         .route("/sitemap.xml", get(sitemap))

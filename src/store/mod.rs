@@ -883,6 +883,30 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         updated_at INTEGER NOT NULL
     );
     "#,
+    // v44: внутренние ID всегда представляют короткую непрерывную нумерацию
+    // аккаунтов, начиная с 1. Telegram ID в пользовательском интерфейсе не
+    // используется как запасной идентификатор.
+    r#"
+    DROP TRIGGER IF EXISTS users_assign_internal_id;
+    ALTER TABLE user_internal_ids RENAME TO user_internal_ids_old;
+    CREATE TABLE user_internal_ids(
+        user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        internal_id INTEGER NOT NULL UNIQUE
+    );
+    INSERT INTO user_internal_ids(user_id,internal_id)
+      SELECT user_id,ROW_NUMBER() OVER (ORDER BY internal_id,user_id)
+      FROM user_internal_ids_old;
+    INSERT OR IGNORE INTO user_internal_ids(user_id,internal_id)
+      SELECT u.user_id,
+             (SELECT COUNT(*) FROM users earlier WHERE earlier.rowid<=u.rowid)
+      FROM users u ORDER BY u.rowid;
+    DROP TABLE user_internal_ids_old;
+    CREATE TRIGGER users_assign_internal_id AFTER INSERT ON users
+    BEGIN
+      INSERT OR IGNORE INTO user_internal_ids(user_id,internal_id)
+      VALUES(NEW.user_id,COALESCE((SELECT MAX(internal_id)+1 FROM user_internal_ids),1));
+    END;
+    "#,
 ];
 
 pub struct Store {

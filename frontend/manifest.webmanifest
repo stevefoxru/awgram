@@ -3,11 +3,16 @@
   "short_name": "ZPNet",
   "description": "Управление VPN-подключениями, оплатой и поддержкой",
   "lang": "ru",
-  "start_url": "/",
+  "start_url": "/lk",
   "scope": "/",
   "display": "standalone",
+  "orientation": "any",
   "background_color": "#f6f7fb",
   "theme_color": "#252833",
+  "shortcuts": [
+    {"name": "Мои ключи", "short_name": "Ключи", "url": "/lk/keys"},
+    {"name": "Поддержка", "short_name": "Помощь", "url": "/lk/support"}
+  ],
   "icons": [
     {"src": "/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}
   ]

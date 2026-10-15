@@ -129,6 +129,13 @@ fn token_hash(token: &str) -> String {
 }
 
 impl Store {
+    fn normalized_phone(value: &str) -> String {
+        value
+            .chars()
+            .filter(|character| character.is_ascii_digit())
+            .collect()
+    }
+
     pub fn internal_user_id(&self, user_id: i64) -> Option<i64> {
         self.with_conn(|c| {
             c.query_row(
@@ -172,8 +179,35 @@ impl Store {
         self.with_conn(|c|c.execute("INSERT INTO portal_passwords(user_id,password_hash,updated_at) VALUES(?1,?2,?3) ON CONFLICT(user_id) DO UPDATE SET password_hash=?2,updated_at=?3",rusqlite::params![user_id,hash,now])).is_ok()
     }
 
-    pub fn verify_portal_password(&self, email: &str, password: &str, now: i64) -> Option<i64> {
-        let user_id = self.verified_user_by_email(email)?;
+    pub fn verify_portal_password(&self, login: &str, password: &str, now: i64) -> Option<i64> {
+        let login = login.trim();
+        let user_id = if login.contains('@') {
+            self.verified_user_by_email(login)?
+        } else {
+            let normalized = Self::normalized_phone(login);
+            if normalized.len() < 7 {
+                return None;
+            }
+            let matches = self
+                .with_conn(|connection| {
+                    let mut statement = connection.prepare(
+                        "SELECT user_id,phone FROM user_profiles WHERE phone IS NOT NULL",
+                    )?;
+                    let rows = statement.query_map([], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, phone)| Self::normalized_phone(phone) == normalized)
+                .map(|(user_id, _)| user_id)
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return None;
+            }
+            matches[0]
+        };
         let locked = self
             .with_conn(|c| {
                 c.query_row(
@@ -265,9 +299,26 @@ impl Store {
     ) -> bool {
         let name = display_name.trim();
         let phone = phone.map(str::trim).filter(|v| !v.is_empty());
+        let phone_taken = phone.is_some_and(|candidate| {
+            let normalized = Self::normalized_phone(candidate);
+            normalized.len() < 7
+                || self.with_conn(|connection| {
+                    let mut statement = connection.prepare(
+                        "SELECT user_id,phone FROM user_profiles WHERE user_id<>?1 AND phone IS NOT NULL",
+                    )?;
+                    let rows = statement.query_map([user_id], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?;
+                    Ok(rows
+                        .filter_map(Result::ok)
+                        .any(|(_, value)| Self::normalized_phone(&value) == normalized))
+                })
+                .unwrap_or(true)
+        });
         if name.is_empty()
             || name.chars().count() > 80
             || phone.is_some_and(|v| v.chars().count() > 30)
+            || phone_taken
             || !matches!(preferred, "email" | "telegram" | "phone")
         {
             return false;
@@ -911,6 +962,11 @@ mod tests {
             store.verify_portal_password("alice@example.ru", "correct horse battery", 104),
             Some(7)
         );
+        assert!(store.set_portal_profile(7, "Alice", Some("+7 (999) 123-45-67"), "phone", 104));
+        assert_eq!(
+            store.verify_portal_password("+79991234567", "correct horse battery", 104),
+            Some(7)
+        );
         assert_eq!(
             store.verify_portal_password("alice@example.ru", "wrong password", 105),
             None
@@ -925,6 +981,16 @@ mod tests {
         );
         let session = store.create_portal_session(7, 103).unwrap();
         assert_eq!(store.portal_user_id(&session, 104), Some(7));
+    }
+
+    #[test]
+    fn internal_ids_start_at_one_and_increment() {
+        let store = Store::open_in_memory();
+        store.upsert_user(900_000_001, Some("admin"), "Admin", None, 100);
+        store.upsert_user(700_000_002, Some("customer"), "Customer", None, 101);
+        assert_eq!(store.internal_user_id(900_000_001), Some(1));
+        assert_eq!(store.internal_user_id(700_000_002), Some(2));
+        assert_eq!(store.user_by_internal_id(1), Some(900_000_001));
     }
 
     #[test]
