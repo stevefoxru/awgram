@@ -309,9 +309,10 @@ impl Store {
                     let rows = statement.query_map([user_id], |row| {
                         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                     })?;
-                    Ok(rows
+                    let taken = rows
                         .filter_map(Result::ok)
-                        .any(|(_, value)| Self::normalized_phone(&value) == normalized))
+                        .any(|(_, value)| Self::normalized_phone(&value) == normalized);
+                    Ok(taken)
                 })
                 .unwrap_or(true)
         });
