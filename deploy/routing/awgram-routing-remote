@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+case "$*" in
+  status|reconcile|dry-run|rollback|"automatic on"|"automatic off"|"client set 10.66.0."*) ;;
+  *) echo '{"error":"command is not allowed"}'; exit 64 ;;
+esac
+exec /usr/bin/ssh -F /etc/awgram/routing-ssh.conf zpnet-routing -- "$@"

@@ -30,6 +30,15 @@ pub enum Action {
     AdminOperations,
     AdminOperationsRefresh,
     AdminOperationsAck,
+    ExitManagement,
+    ExitStatus,
+    ExitAutomatic(bool),
+    ExitClients,
+    ExitClientAsk,
+    ExitClientMode(String, String),
+    ExitDryRun,
+    ExitRollback,
+    ExitEvents,
     AdminSystem,
     PortalDomain,
     PortalDomainAsk,
@@ -298,6 +307,15 @@ fn parse_callback(data: &str) -> Action {
         "admin:operations" => Action::AdminOperations,
         "admin:operations:refresh" => Action::AdminOperationsRefresh,
         "admin:operations:ack" => Action::AdminOperationsAck,
+        "admin:exit" => Action::ExitManagement,
+        "exit:status" => Action::ExitStatus,
+        "exit:auto:on" => Action::ExitAutomatic(true),
+        "exit:auto:off" => Action::ExitAutomatic(false),
+        "exit:clients" => Action::ExitClients,
+        "exit:client:ask" => Action::ExitClientAsk,
+        "exit:dry-run" => Action::ExitDryRun,
+        "exit:rollback" => Action::ExitRollback,
+        "exit:events" => Action::ExitEvents,
         "admin:system" => Action::AdminSystem,
         "admin:portal-domain" => Action::PortalDomain,
         "admin:portal-domain:ask" => Action::PortalDomainAsk,
@@ -374,7 +392,15 @@ fn parse_callback(data: &str) -> Action {
         "legacy:promo" => Action::PromoInput,
         "legacy:price" => Action::LegacyPriceAsk,
         _ => {
-            if let Some(v) = data.strip_prefix("admin:partner:status:") {
+            if let Some(v) = data.strip_prefix("exit:client:") {
+                let mut parts = v.splitn(2, ':');
+                match (parts.next(), parts.next()) {
+                    (Some(mode @ ("auto" | "main" | "nl")), Some(ip)) => {
+                        Action::ExitClientMode(ip.to_string(), mode.to_string())
+                    }
+                    _ => Action::Unknown,
+                }
+            } else if let Some(v) = data.strip_prefix("admin:partner:status:") {
                 let mut parts = v.splitn(2, ':');
                 match (parts.next().and_then(|id| id.parse().ok()), parts.next()) {
                     (Some(id), Some(status)) => Action::PartnerStatus(id, status.to_string()),
@@ -2649,6 +2675,54 @@ async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Handl
     Ok(())
 }
 
+fn routing_control(cfg: &Config) -> crate::routing::RoutingControl {
+    crate::routing::RoutingControl::new(cfg.routing_control_command.clone(), cfg.op_timeout_secs)
+}
+
+fn routing_status_text(snapshot: &crate::routing::RoutingSnapshot) -> String {
+    let exits = snapshot
+        .exits
+        .iter()
+        .map(|exit| {
+            format!(
+                "{} {} · {}\nроль: {} · задержка: {} · handshake: {}{}",
+                if exit.healthy { "🟢" } else { "🔴" },
+                exit.name,
+                exit.public_ip,
+                exit.role,
+                exit.latency_ms
+                    .map(|value| format!("{value} мс"))
+                    .unwrap_or_else(|| "—".into()),
+                exit.last_handshake
+                    .map(crate::calendar::format_date)
+                    .unwrap_or_else(|| "—".into()),
+                if exit.current {
+                    " · ТЕКУЩИЙ"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!(
+        "🌐 Управление EXIT\n\nАвтоматика: {}\nРежим: {}\nDry-run: {}\nПричина: {}\n\n{}",
+        if snapshot.automatic {
+            "включена"
+        } else {
+            "выключена"
+        },
+        snapshot.mode,
+        if snapshot.dry_run { "да" } else { "нет" },
+        snapshot.reason.as_deref().unwrap_or("—"),
+        if exits.is_empty() {
+            "EXIT-серверы не переданы агентом"
+        } else {
+            &exits
+        }
+    )
+}
+
 fn server_card_text(server: &crate::store::VpnServer, settings: &Store, now: i64) -> String {
     let opened = server
         .opened_at
@@ -3507,6 +3581,15 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | AdminOperations
         | AdminOperationsRefresh
         | AdminOperationsAck
+        | ExitManagement
+        | ExitStatus
+        | ExitAutomatic(_)
+        | ExitClients
+        | ExitClientAsk
+        | ExitClientMode(_, _)
+        | ExitDryRun
+        | ExitRollback
+        | ExitEvents
         | AdminSystem
         | PortalDomain
         | PortalDomainAsk
@@ -6183,6 +6266,24 @@ async fn message_handler(
     }
     let lang = settings.lang(uid);
     match state {
+        State::AwaitingExitClientIp => {
+            let ip = msg.text().unwrap_or_default().trim();
+            match routing_control(&cfg).set_client(ip, "auto").await {
+                Ok(snapshot) => {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("✅ Клиент {ip} добавлен. Выберите его маршрут:"),
+                    )
+                    .reply_markup(menu::exit_clients_menu(&snapshot.clients))
+                    .await?;
+                    dialogue.update(State::Idle).await?;
+                }
+                Err(error) => {
+                    bot.send_message(msg.chat.id, format!("❌ {error}\n\nВведите другой VPN-IP:"))
+                        .await?;
+                }
+            }
+        }
         State::AwaitingName => {
             let name = msg.text().unwrap_or_default().to_string();
             match crate::vpn::validate::normalize_name(&name, None) {
@@ -7495,6 +7596,147 @@ async fn callback_handler(
                 .await?;
             admin_operations_screen(&bot, chat, &settings).await?;
         }
+        Action::ExitManagement | Action::ExitStatus => {
+            match routing_control(&cfg).status().await {
+                Ok(snapshot) => bot.send_message(chat, routing_status_text(&snapshot)).reply_markup(menu::exit_management_menu(snapshot.automatic)).await?,
+                Err(error) => bot.send_message(chat, format!("🌐 Управление EXIT\n\n❌ {error}\n\nДобавьте routing_control_command в config.toml после установки ограниченного SSH-моста.")).reply_markup(menu::exit_management_menu(false)).await?,
+            };
+        }
+        Action::ExitAutomatic(enabled) => {
+            match routing_control(&cfg).set_automatic(enabled).await {
+                Ok(snapshot) => {
+                    bot.send_message(chat, routing_status_text(&snapshot))
+                        .reply_markup(menu::exit_management_menu(snapshot.automatic))
+                        .await?
+                }
+                Err(error) => bot.send_message(chat, format!("❌ {error}")).await?,
+            };
+        }
+        Action::ExitClients => match routing_control(&cfg).status().await {
+            Ok(mut snapshot) => {
+                for client in &mut snapshot.clients {
+                    if client.name.is_none() {
+                        client.name = settings.client_name_for_ip(&client.ip);
+                    }
+                }
+                let text = if snapshot.clients.is_empty() {
+                    "👥 Персональная маршрутизация\n\nНазначений пока нет. Клиенты без назначения работают в автоматическом режиме.".into()
+                } else {
+                    format!(
+                        "👥 Персональная маршрутизация\n\n{}",
+                        snapshot
+                            .clients
+                            .iter()
+                            .map(|client| format!(
+                                "{}{} → {}",
+                                client
+                                    .name
+                                    .as_deref()
+                                    .map(|name| format!("{name} · "))
+                                    .unwrap_or_default(),
+                                client.ip,
+                                client.mode
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                };
+                bot.send_message(chat, text)
+                    .reply_markup(menu::exit_clients_menu(&snapshot.clients))
+                    .await?;
+            }
+            Err(error) => {
+                bot.send_message(chat, format!("❌ {error}")).await?;
+            }
+        },
+        Action::ExitClientAsk => {
+            bot.send_message(
+                chat,
+                "Введите VPN-IP клиента из сети 10.66.0.0/24, например 10.66.0.25:",
+            )
+            .await?;
+            dialogue.update(State::AwaitingExitClientIp).await?;
+        }
+        Action::ExitClientMode(ip, mode) => {
+            match routing_control(&cfg).set_client(&ip, &mode).await {
+                Ok(snapshot) => {
+                    bot.send_message(
+                        chat,
+                        format!("✅ {ip}: режим «{mode}» сохранён и применён."),
+                    )
+                    .reply_markup(menu::exit_clients_menu(&snapshot.clients))
+                    .await?
+                }
+                Err(error) => bot.send_message(chat, format!("❌ {error}")).await?,
+            };
+        }
+        Action::ExitDryRun => {
+            match routing_control(&cfg).dry_run().await {
+                Ok(snapshot) => {
+                    bot.send_message(
+                        chat,
+                        format!(
+                            "🧪 Dry-run завершён. Рабочие маршруты не изменялись.\n\n{}",
+                            routing_status_text(&snapshot)
+                        ),
+                    )
+                    .reply_markup(menu::exit_management_menu(snapshot.automatic))
+                    .await?
+                }
+                Err(error) => bot.send_message(chat, format!("❌ {error}")).await?,
+            };
+        }
+        Action::ExitRollback => {
+            match routing_control(&cfg).rollback().await {
+                Ok(snapshot) => {
+                    bot.send_message(
+                        chat,
+                        format!(
+                            "↩️ Предыдущее состояние восстановлено.\n\n{}",
+                            routing_status_text(&snapshot)
+                        ),
+                    )
+                    .reply_markup(menu::exit_management_menu(snapshot.automatic))
+                    .await?
+                }
+                Err(error) => bot.send_message(chat, format!("❌ {error}")).await?,
+            };
+        }
+        Action::ExitEvents => match routing_control(&cfg).status().await {
+            Ok(snapshot) => {
+                let events = snapshot
+                    .events
+                    .iter()
+                    .rev()
+                    .take(20)
+                    .map(|event| {
+                        format!(
+                            "{} · {}\n{}",
+                            crate::calendar::format_date(event.at),
+                            event.kind,
+                            event.message
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                bot.send_message(
+                    chat,
+                    format!(
+                        "📋 Журнал аварий\n\n{}",
+                        if events.is_empty() {
+                            "Событий пока нет"
+                        } else {
+                            &events
+                        }
+                    ),
+                )
+                .reply_markup(menu::exit_management_menu(snapshot.automatic))
+                .await?;
+            }
+            Err(error) => {
+                bot.send_message(chat, format!("❌ {error}")).await?;
+            }
+        },
         Action::AdminSystem => {
             admin_system_screen(&bot, chat, &settings).await?;
         }

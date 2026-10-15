@@ -202,6 +202,7 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("💬 Связь", "admin:communication"),
         ],
         vec![cb("🔄 Операции", "admin:operations")],
+        vec![cb("🌐 Управление EXIT", "admin:exit")],
         vec![
             cb("⚙️ Система", "admin:system"),
             cb("🌐 Веб-кабинет", "portal"),
@@ -211,6 +212,55 @@ pub fn admin_dashboard_menu() -> InlineKeyboardMarkup {
             cb("🔄 Обновить", "admin:dashboard"),
         ],
     ])
+}
+
+pub fn exit_management_menu(automatic: bool) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb("📊 Статус EXIT-серверов", "exit:status")],
+        vec![cb(
+            if automatic {
+                "⏸ Выключить автоматику"
+            } else {
+                "▶️ Включить автоматику"
+            },
+            if automatic {
+                "exit:auto:off"
+            } else {
+                "exit:auto:on"
+            },
+        )],
+        vec![cb("👥 Маршрутизация клиентов", "exit:clients")],
+        vec![
+            cb("🧪 Dry-run", "exit:dry-run"),
+            cb("↩️ Rollback", "exit:rollback"),
+        ],
+        vec![cb("📋 Журнал аварий", "exit:events")],
+        vec![cb("⬅️ Админ-панель", "admin:dashboard")],
+    ])
+}
+
+pub fn exit_clients_menu(clients: &[crate::routing::ClientRoute]) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    rows.push(vec![cb("➕ Выбрать клиента по VPN-IP", "exit:client:ask")]);
+    for client in clients.iter().take(30) {
+        let next = match client.mode.as_str() {
+            "auto" => "main",
+            "main" => "nl",
+            _ => "auto",
+        };
+        let label = match next {
+            "main" => "Основной",
+            "nl" => "NL полностью",
+            _ => "Автоматически",
+        };
+        rows.push(vec![cb(
+            &format!("{} · {} → {label}", client.ip, client.mode),
+            &format!("exit:client:{next}:{}", client.ip),
+        )]);
+    }
+    rows.push(vec![cb("🔄 Обновить", "exit:clients")]);
+    rows.push(vec![cb("⬅️ Управление EXIT", "admin:exit")]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 pub fn admin_operations_menu(server_ids: &[i64], has_unread: bool) -> InlineKeyboardMarkup {

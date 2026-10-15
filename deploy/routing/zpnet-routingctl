@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+agent=/usr/local/libexec/zpnet-routing-agent
+case "${SSH_ORIGINAL_COMMAND:-$*}" in
+  # The forced command is allowlisted above; word splitting is required to form argv.
+  # shellcheck disable=SC2086
+  status|reconcile|dry-run|rollback|"automatic on"|"automatic off") exec "$agent" ${SSH_ORIGINAL_COMMAND:-$*} ;;
+  # shellcheck disable=SC2086
+  "client set 10.66.0."*) set -- ${SSH_ORIGINAL_COMMAND:-$*}; [ "$#" = 4 ] && exec "$agent" "$@" ;;
+esac
+echo '{"error":"command is not allowed"}'
+exit 64

@@ -16,6 +16,7 @@ pub struct Config {
     pub portal_public_url: Option<String>,
     pub acquiring_webhook_secret: Option<String>,
     pub smtp: Option<SmtpConfig>,
+    pub routing_control_command: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -50,6 +51,7 @@ impl std::fmt::Debug for Config {
                 &self.acquiring_webhook_secret.as_ref().map(|_| "<redacted>"),
             )
             .field("smtp", &self.smtp.as_ref().map(|_| "<configured>"))
+            .field("routing_control_command", &self.routing_control_command)
             .finish()
     }
 }
@@ -100,6 +102,8 @@ struct Raw {
     smtp_username: Option<String>,
     #[serde(default)]
     smtp_from: Option<String>,
+    #[serde(default)]
+    routing_control_command: Option<PathBuf>,
 }
 
 fn default_smtp_port() -> u16 {
@@ -186,6 +190,7 @@ impl Config {
                 .acquiring_webhook_secret
                 .filter(|value| value.len() >= 32),
             smtp,
+            routing_control_command: raw.routing_control_command,
         })
     }
 }

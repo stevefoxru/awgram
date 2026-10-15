@@ -3,6 +3,8 @@ target/
 .env
 .superpowers/
 dist/
+__pycache__/
+*.pyc
 docs/superpowers/
 .serena/
 .claude/

@@ -1,0 +1,14 @@
+{
+  "client_subnet": "10.66.0.0/24",
+  "main_table": 100,
+  "media_table": 200,
+  "direct_mark": "0x66",
+  "media_mark": "0x77",
+  "failure_threshold": 3,
+  "success_threshold": 4,
+  "ipsets": [],
+  "exits": [
+    {"id":"main","name":"Main EXIT","public_ip":"88.214.54.68","peer_ip":"10.88.88.2","interface":"ru-extra","table":100,"role":"main","health_url":"http://10.88.88.2:18081/health"},
+    {"id":"nl","name":"NL EXIT","public_ip":"87.58.210.58","peer_ip":"10.99.99.2","interface":"ru-youtube","table":200,"role":"youtube","health_url":"http://10.99.99.2:18081/health"}
+  ]
+}

@@ -154,6 +154,20 @@ pub struct KeyReplacement {
 }
 
 impl Store {
+    pub fn client_name_for_ip(&self, ip: &str) -> Option<String> {
+        self.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT name FROM clients WHERE ip=?1 AND removed_at IS NULL ORDER BY last_seen DESC LIMIT 1",
+                    [ip],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
     pub fn notification_preferences(&self, user_id: i64) -> (bool, bool) {
         self.with_conn(|c| {
             c.query_row(

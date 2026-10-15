@@ -451,6 +451,7 @@ db_path = "$STATE_DIR/awgram.db"
 controller_only = $([ "$CONTROLLER_ONLY" = 1 ] && printf true || printf false)
 # Внутренний ЛК (v1.0): раскомментируйте и укажите публичный HTTPS-адрес.
 # portal_bind = "127.0.0.1:8787"
+# routing_control_command = "/usr/local/libexec/awgram-routing-remote"
 # portal_public_url = "https://cabinet.example.ru"
 # acquiring_webhook_secret = "replace-with-at-least-32-random-characters"
 EOF

@@ -722,6 +722,55 @@ async fn tick(bot: &Bot, cfg: &Config, vpn: &Vpn, store: &Store, now: i64) {
             }
         }
     }
+
+    let routing = crate::routing::RoutingControl::new(
+        cfg.routing_control_command.clone(),
+        cfg.op_timeout_secs,
+    );
+    if routing.configured() {
+        match routing.status().await {
+            Ok(snapshot) => {
+                let failed = snapshot
+                    .exits
+                    .iter()
+                    .filter(|exit| !exit.healthy)
+                    .map(|exit| exit.name.as_str())
+                    .collect::<Vec<_>>();
+                let status = if failed.is_empty() { "ok" } else { "degraded" };
+                let details = if failed.is_empty() {
+                    format!(
+                        "EXIT работают · {}",
+                        snapshot.reason.as_deref().unwrap_or("—")
+                    )
+                } else {
+                    format!(
+                        "Недоступны: {} · {}",
+                        failed.join(", "),
+                        snapshot.reason.as_deref().unwrap_or("маршрут перестроен")
+                    )
+                };
+                if store.update_monitor_state("routing_exit", status, Some(&details), now) {
+                    let icon = if failed.is_empty() { "✅" } else { "🚨" };
+                    notify_admins(
+                        bot,
+                        cfg,
+                        format!("{icon} Состояние EXIT изменилось\n\n{details}"),
+                    )
+                    .await;
+                }
+            }
+            Err(error) => {
+                if store.update_monitor_state("routing_exit", "error", Some(&error), now) {
+                    notify_admins(
+                        bot,
+                        cfg,
+                        format!("🚨 Routing Manager недоступен\n\n{error}"),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
 }
 
 /// Немедленный безопасный проход штатного мониторинга из админ-панели.

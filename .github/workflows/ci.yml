@@ -52,10 +52,12 @@ jobs:
             echo "::error title=Tests failed::$output"
             exit "$status"
           fi
+      - name: routing agent tests
+        run: python3 -m unittest tests/test_routing_agent.py
       - name: shellcheck installer
         run: |
-          shellcheck install.sh node-bootstrap.sh transfer.sh portal-domain.sh scripts/test-install.sh scripts/test-install-inner.sh
-          bash -n install.sh node-bootstrap.sh transfer.sh portal-domain.sh
+          shellcheck install.sh node-bootstrap.sh transfer.sh portal-domain.sh scripts/test-install.sh scripts/test-install-inner.sh deploy/routing/install.sh deploy/routing/zpnet-routingctl deploy/routing/awgram-routing-remote
+          bash -n install.sh node-bootstrap.sh transfer.sh portal-domain.sh deploy/routing/install.sh deploy/routing/zpnet-routingctl deploy/routing/awgram-routing-remote
           clientctl_end="$(grep -n '^AWGRAM_CLIENTCTL$' install.sh | cut -d: -f1)"
           updatectl_start="$(grep -n '^install_updatectl()' install.sh | cut -d: -f1)"
           test -n "$clientctl_end" && test -n "$updatectl_start"
