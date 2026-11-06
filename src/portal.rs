@@ -118,6 +118,9 @@ async fn sitemap(State(state): State<PortalState>) -> Response {
         "vpn-for-android",
         "vpn-for-iphone",
         "vpn-for-windows",
+        "privacy",
+        "terms",
+        "support",
         "vpn-for-keenetic",
         "instructions",
         "status",
@@ -303,6 +306,19 @@ async fn catalog(State(state): State<PortalState>) -> Response {
 struct PurchaseRequest {
     months: i64,
     server_id: i64,
+}
+
+fn purchase_admin_notification(
+    id: i64,
+    user_id: i64,
+    months: i64,
+    server_id: i64,
+    amount_kopecks: i64,
+) -> String {
+    format!(
+        "🛒 Новая веб-заявка на покупку #{id}\nПользователь: {user_id}\nСрок: {months} мес.\nСервер: #{server_id}\nСумма: {:.2} ₽",
+        amount_kopecks as f64 / 100.0
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -709,6 +725,13 @@ async fn create_purchase(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if state.store.portal_email(user_id).is_none() {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            "Перед оплатой подтвердите электронную почту в настройках кабинета",
+        )
+            .into_response();
+    }
     let available = state
         .store
         .available_vpn_servers()
@@ -733,6 +756,13 @@ async fn create_purchase(
         .peek_purchase_discount(user_id, now_epoch())
         .clamp(0, 100);
     let amount = base.saturating_mul(100 - discount) / 100;
+    if amount > 1_000_000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Максимальная сумма одной оплаты — 10 000 ₽",
+        )
+            .into_response();
+    }
     match state.store.create_web_purchase_request(
         user_id,
         input.months,
@@ -755,6 +785,22 @@ async fn create_purchase(
                 Some("/?view=finance"),
                 now_epoch(),
             );
+            let notification =
+                purchase_admin_notification(id, user_id, input.months, input.server_id, amount);
+            for admin_id in state.admin_ids.iter() {
+                if let Err(error) = state
+                    .bot
+                    .send_message(ChatId(*admin_id), notification.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        admin_id,
+                        payment_id = id,
+                        %error,
+                        "не удалось уведомить администратора о новой веб-покупке"
+                    );
+                }
+            }
             Json(serde_json::json!({"ok":true,"payment_id":id,"amount_kopecks":amount,"discount_percent":discount,"instructions":state.store.payment_instructions()})).into_response()
         }
         None => (
@@ -2136,10 +2182,17 @@ async fn create_topup(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    if !(100..=100_000).contains(&request.amount_rubles) {
+    if state.store.portal_email(user_id).is_none() {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            "Перед оплатой подтвердите электронную почту в настройках кабинета",
+        )
+            .into_response();
+    }
+    if !(100..=10_000).contains(&request.amount_rubles) {
         return (
             StatusCode::BAD_REQUEST,
-            "Сумма должна быть от 100 до 100 000 ₽",
+            "Сумма должна быть от 100 до 10 000 ₽",
         )
             .into_response();
     }
@@ -2552,7 +2605,7 @@ fetch('/api/me').then(async r=>{if(!r.ok)throw 0;return r.json()}).then(d=>{
 
 #[cfg(test)]
 mod tests {
-    use super::{display_brand, same_site_request, valid_email};
+    use super::{display_brand, purchase_admin_notification, same_site_request, valid_email};
     use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -2578,5 +2631,13 @@ mod tests {
         assert_eq!(display_brand("zpnet"), "ZPNet");
         assert_eq!(display_brand("zuevvpn"), "ZuevVPN");
         assert_eq!(display_brand("OtherVPN"), "OtherVPN");
+    }
+
+    #[test]
+    fn web_purchase_notification_contains_actionable_details() {
+        assert_eq!(
+            purchase_admin_notification(42, 1001, 6, 7, 59_900),
+            "🛒 Новая веб-заявка на покупку #42\nПользователь: 1001\nСрок: 6 мес.\nСервер: #7\nСумма: 599.00 ₽"
+        );
     }
 }

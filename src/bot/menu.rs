@@ -113,6 +113,7 @@ pub fn customer_keyboard() -> KeyboardMarkup {
             KeyboardButton::new("🎁 Тест VPN"),
             KeyboardButton::new("♻️ Восстановить ключи"),
         ],
+        vec![KeyboardButton::new("📄 Документы и поддержка")],
     ];
     KeyboardMarkup::new(rows).resize_keyboard().persistent()
 }

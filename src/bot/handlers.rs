@@ -4710,7 +4710,7 @@ async fn message_handler(
     }
     if matches!(&state, State::AwaitingTopupAmount) {
         let rubles = msg.text().unwrap_or_default().trim().parse::<i64>().ok();
-        if let Some(rubles) = rubles.filter(|v| (100..=100_000).contains(v)) {
+        if let Some(rubles) = rubles.filter(|v| (100..=10_000).contains(v)) {
             if let Some(id) =
                 settings.create_payment_request(uid, 0, rubles * 100, "topup", now_epoch())
             {
@@ -4726,7 +4726,7 @@ async fn message_handler(
                 dialogue.update(State::Idle).await?;
             }
         } else {
-            bot.send_message(msg.chat.id, "Введите сумму от 100 до 100000 рублей.")
+            bot.send_message(msg.chat.id, "Введите сумму от 100 до 10000 рублей.")
                 .await?;
         }
         return Ok(());
@@ -4753,7 +4753,10 @@ async fn message_handler(
                 .reply_markup(menu::admin_commerce_menu())
                 .await?;
             dialogue.update(State::Idle).await?;
-        } else if reqwest::Url::parse(value).is_ok() && value.contains("{order_id}") {
+        } else if reqwest::Url::parse(value).is_ok()
+            && value.contains("{order_id}")
+            && value.contains("{email}")
+        {
             settings.set_acquiring_url_template(Some(value));
             bot.send_message(msg.chat.id, "✅ Шаблон платёжной ссылки сохранён.")
                 .reply_markup(menu::admin_commerce_menu())
@@ -4762,7 +4765,7 @@ async fn message_handler(
         } else {
             bot.send_message(
                 msg.chat.id,
-                "Нужен полный HTTPS/HTTP URL с {order_id}. Для отключения отправьте off.",
+                "Нужен полный HTTPS/HTTP URL с {order_id} и {email}. Для отключения отправьте off.",
             )
             .await?;
         }
@@ -6389,7 +6392,7 @@ async fn message_handler(
             "➕ Пополнить" | "💰 Баланс и оплата" => {
                 bot.send_message(
                     msg.chat.id,
-                    "Введите сумму пополнения в рублях (от 100 до 100000):",
+                    "Введите сумму пополнения в рублях (от 100 до 10000):",
                 )
                 .await?;
                 dialogue.update(State::AwaitingTopupAmount).await?;
@@ -6400,6 +6403,17 @@ async fn message_handler(
             "🆘 Поддержка" | "🆘 Помощь" => {
                 bot.send_message(msg.chat.id, "🆘 Помощь\n\nВыберите, что вам нужно. Если готовая инструкция не поможет, напишите в поддержку.")
                     .reply_markup(menu::customer_help_menu()).await?;
+            }
+            "📄 Документы и поддержка" => {
+                let links = cfg.portal_public_url.as_deref().map(|base| format!(
+                    "\n\nПолитика конфиденциальности: {base}/privacy\nПользовательское соглашение: {base}/terms\nПоддержка: {base}/support"
+                )).unwrap_or_else(|| "\n\nДля обращения выберите «🆘 Помощь» → «Написать в поддержку».".into());
+                bot.send_message(
+                    msg.chat.id,
+                    format!("📄 Документы и контакты{links}\n\nПроверочное слово: mekbuda"),
+                )
+                .reply_markup(menu::customer_keyboard())
+                .await?;
             }
             "🎁 Тест VPN" => {
                 maybe_issue_trial(&bot, msg.chat.id, &vpn, &settings, uid).await;
@@ -10834,7 +10848,9 @@ async fn callback_handler(
                 bot.send_message(chat, format!("💳 Шаг 3 из 3 · Оплата\n\n📍 {}\n🛡 AWG 1.0\n📅 Срок: {months} мес.\n💰 Итого: {:.2} ₽{discount_line}\n💼 На балансе: {:.2} ₽\n\nВыберите способ оплаты:", server.location, amount as f64 / 100.0, settings.balance_kopecks(uid) as f64 / 100.0))
                     .reply_markup(menu::buy_method_menu(
                         months,
-                        settings.acquiring_url_template().is_some(),
+                        settings
+                            .acquiring_url_template()
+                            .is_some_and(|template| template.contains("{email}")),
                     ))
                     .await?;
             }
@@ -10878,6 +10894,10 @@ async fn callback_handler(
                 settings.purchase_discount(uid, now_epoch())
             };
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
+            if amount > 1_000_000 {
+                bot.send_message(chat, "Стоимость заказа превышает лимит одной операции 10 000 ₽. Обратитесь в поддержку.").await?;
+                return Ok(());
+            }
             if method == "balance" {
                 let balance = settings.balance_kopecks(uid);
                 if balance < amount {
@@ -10910,6 +10930,11 @@ async fn callback_handler(
                 return Ok(());
             }
             if method == "acquiring" {
+                let Some(email) = settings.portal_email(uid) else {
+                    bot.send_message(chat, "Перед онлайн-оплатой подтвердите электронную почту в настройках веб-кабинета. Она обязательна для создания транзакции.")
+                        .reply_markup(menu::customer_more_menu(cfg.portal_public_url.is_some())).await?;
+                    return Ok(());
+                };
                 let Some(server_id) = settings.purchase_server(uid) else {
                     return Ok(());
                 };
@@ -10929,7 +10954,8 @@ async fn callback_handler(
                     let url = template
                         .replace("{order_id}", &id.to_string())
                         .replace("{amount}", &amount.to_string())
-                        .replace("{user_id}", &uid.to_string());
+                        .replace("{user_id}", &uid.to_string())
+                        .replace("{email}", &email.replace('+', "%2B").replace('@', "%40"));
                     bot.send_message(chat, format!("🏦 Онлайн-оплата · заказ #{id}\n\nК оплате: {:.2} ₽\n\nПерейдите по защищённой ссылке платёжного провайдера:\n{url}\n\nПосле подключения webhook подтверждение и выдача ключа будут выполняться автоматически; пока заказ подтверждается администратором.", amount as f64/100.0)).await?;
                 }
             } else if let Some(nonce) = method.strip_prefix("balance-go-") {
@@ -11956,7 +11982,7 @@ async fn callback_handler(
             dialogue.update(State::AwaitingPaymentInstructions).await?;
         }
         Action::AcquiringUrlAsk => {
-            bot.send_message(chat, format!("🏦 Заготовка эквайринга\n\nУкажите URL платёжной страницы или шлюза. Доступные подстановки: {{order_id}}, {{amount}} (копейки), {{user_id}}. Обязательна {{order_id}}.\n\nПример:\nhttps://pay.example.ru/order/{{order_id}}?amount={{amount}}\n\nТекущее значение: {}\n\nДля отключения отправьте off. Для полноценного T-Банк API следующим этапом понадобятся TerminalKey, секрет и webhook.", settings.acquiring_url_template().unwrap_or_else(|| "не настроено".into()))).await?;
+            bot.send_message(chat, format!("🏦 Онлайн-эквайринг\n\nУкажите URL платёжной страницы или шлюза. Доступные подстановки: {{order_id}}, {{amount}} (копейки), {{user_id}}, {{email}}. Обязательны {{order_id}} и {{email}}.\n\nПример:\nhttps://pay.example.ru/order/{{order_id}}?amount={{amount}}&email={{email}}\n\nТекущее значение: {}\n\nДля отключения отправьте off. Секреты платёжного провайдера храните только на стороне шлюза.", settings.acquiring_url_template().unwrap_or_else(|| "не настроено".into()))).await?;
             dialogue.update(State::AwaitingAcquiringUrl).await?;
         }
         Action::CustomerKey(name) => {
