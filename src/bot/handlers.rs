@@ -10544,24 +10544,74 @@ async fn callback_handler(
         }
         Action::AdminUserPayments(user_id) => {
             let rows = settings.user_payments(user_id, 20);
+            let user = settings.user(user_id);
+            let name = user
+                .as_ref()
+                .map(|value| value.display_name.as_str())
+                .unwrap_or("Неизвестный пользователь");
+            let username = user
+                .as_ref()
+                .and_then(|value| value.username.as_deref())
+                .map(|value| format!("@{}", value.trim_start_matches('@')))
+                .unwrap_or_else(|| "не указан".into());
+            let email = settings
+                .portal_email(user_id)
+                .unwrap_or_else(|| "не подтверждена".into());
+            let internal_id = settings.internal_user_id(user_id).unwrap_or(user_id);
+            let registered = user
+                .as_ref()
+                .map(|value| crate::calendar::format_date(value.created_at))
+                .unwrap_or_else(|| "неизвестно".into());
             let text = if rows.is_empty() {
                 "Платежей нет.".into()
             } else {
                 rows.iter()
                     .map(|p| {
+                        let status = match p.status {
+                            crate::store::PaymentStatus::Pending => "ожидает проверки",
+                            crate::store::PaymentStatus::Approved => "подтверждён",
+                            crate::store::PaymentStatus::Rejected => "отклонён",
+                        };
+                        let method = match p.method.as_str() {
+                            "topup" => "пополнение баланса",
+                            "manual" => "перевод",
+                            "acquiring" => "онлайн-оплата",
+                            "legacy_manual" => "ручная legacy-оплата",
+                            other => other,
+                        };
+                        let purpose = if p.months == 0 {
+                            "пополнение баланса".to_string()
+                        } else if let Some(client) = p.client_name.as_deref() {
+                            format!("продление ключа {client} на {} мес.", p.months)
+                        } else {
+                            let location = p
+                                .server_id
+                                .and_then(|id| settings.vpn_server(id))
+                                .map(|server| server.location)
+                                .unwrap_or_else(|| "локация не выбрана".into());
+                            format!("новое подключение на {} мес. · {location}", p.months)
+                        };
                         format!(
-                            "#{} · {:?} · {:.2} ₽ · {} мес. · {}",
+                            "#{} · {} · {:.2} ₽\n{} · {}\nСоздана: {}{}",
                             p.id,
-                            p.status,
+                            status,
                             p.amount_kopecks as f64 / 100.0,
-                            p.months,
-                            p.client_name.as_deref().unwrap_or("без ключа")
+                            purpose,
+                            method,
+                            crate::calendar::format_date(p.created_at),
+                            if p.proof.is_some() {
+                                " · подтверждение приложено"
+                            } else {
+                                ""
+                            }
                         )
                     })
                     .collect::<Vec<_>>()
-                    .join("\n")
+                    .join("\n\n")
             };
-            bot.send_message(chat, format!("💳 Платежи пользователя {user_id}\n\n{text}"))
+            bot.send_message(chat, format!(
+                "💳 Платежи пользователя\n\n👤 {name}\nTelegram: {username}\nTelegram ID: {user_id}\nВнутренний ID: {internal_id}\nПочта: {email}\nРегистрация: {registered}\n\n{text}"
+            ))
                 .reply_markup(menu::admin_user_menu(
                     user_id,
                     settings.user_blocked(user_id),
