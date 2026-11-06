@@ -45,7 +45,10 @@ jobs:
           output="$(cargo test -- --test-threads=1 --format terse 2>&1)" || status=$?
           printf '%s\n' "$output"
           if (( status != 0 )); then
-            output="$(printf '%s\n' "$output" | tail -n 120)"
+            # Аннотация GitHub ограничена 4096 символами. Короткий хвост
+            # сохраняет названия упавших тестов и итог, не вытесняя их логом
+            # компиляции зависимостей.
+            output="$(printf '%s\n' "$output" | tail -n 35)"
             output="${output//'%'/'%25'}"
             output="${output//$'\r'/'%0D'}"
             output="${output//$'\n'/'%0A'}"
