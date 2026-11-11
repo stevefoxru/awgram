@@ -50,7 +50,7 @@ pub enum Action {
     DatabaseBackupNow,
     DatabaseBackupAudit,
     AdminUpdate,
-    AdminUpdateRun,
+    AdminUpdateRun(String),
     AdminUpdateStatus,
     AdminUpdateRollback,
     ServerAdd,
@@ -335,7 +335,8 @@ fn parse_callback(data: &str) -> Action {
         "admin:db-backup" => Action::DatabaseBackupNow,
         "admin:db-backup-audit" => Action::DatabaseBackupAudit,
         "admin:update" => Action::AdminUpdate,
-        "admin:update:run" => Action::AdminUpdateRun,
+        "admin:update:run:stable" => Action::AdminUpdateRun("stable".into()),
+        "admin:update:run:rc" => Action::AdminUpdateRun("rc".into()),
         "admin:update:status" => Action::AdminUpdateStatus,
         "admin:update:rollback" => Action::AdminUpdateRollback,
         "server:add" => Action::ServerAdd,
@@ -2397,7 +2398,12 @@ async fn admin_operations_screen(bot: &Bot, chat: ChatId, settings: &Store) -> H
 
 async fn admin_system_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
     let current = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let release = latest_release_info().await;
+    let channel = if current.contains("-rc.") {
+        "rc"
+    } else {
+        "stable"
+    };
+    let release = latest_release_info(channel).await;
     let update_line = match &release {
         Some((latest, _, _)) if latest == &current => {
             format!("✅ Установлена актуальная версия {current}")
@@ -3304,13 +3310,18 @@ fn truncate_for_message(body: String) -> String {
     format!("{}\n…", &body[..cut])
 }
 
-async fn latest_release_info() -> Option<(String, String, String)> {
-    let response = reqwest::Client::builder()
+async fn latest_release_info(channel: &str) -> Option<(String, String, String)> {
+    let client = reqwest::Client::builder()
         .user_agent("awgram-update-check")
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .ok()?
-        .get("https://api.github.com/repos/stevefoxru/awgram/releases/latest")
+        .ok()?;
+    let response = client
+        .get(if channel == "rc" {
+            "https://api.github.com/repos/stevefoxru/awgram/releases?per_page=20"
+        } else {
+            "https://api.github.com/repos/stevefoxru/awgram/releases/latest"
+        })
         .send()
         .await
         .ok()?
@@ -3319,6 +3330,17 @@ async fn latest_release_info() -> Option<(String, String, String)> {
         .json::<serde_json::Value>()
         .await
         .ok()?;
+    let response = if channel == "rc" {
+        response.as_array()?.iter().find(|release| {
+            release.get("draft").and_then(|value| value.as_bool()) == Some(false)
+                && release
+                    .get("tag_name")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|tag| tag.contains("-rc."))
+        })?
+    } else {
+        &response
+    };
     let tag = response.get("tag_name")?.as_str()?.to_string();
     let body = response
         .get("body")
@@ -3628,7 +3650,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | DatabaseBackupNow
         | DatabaseBackupAudit
         | AdminUpdate
-        | AdminUpdateRun
+        | AdminUpdateRun(_)
         | AdminUpdateStatus
         | AdminUpdateRollback
         | ServerAdd
@@ -8032,18 +8054,23 @@ async fn callback_handler(
         }
         Action::AdminUpdate => {
             let current = format!("v{}", env!("CARGO_PKG_VERSION"));
-            let details = match latest_release_info().await {
-                Some((latest, body, url)) => format!("Текущая версия: {current}\nДоступная версия: {latest}\n\nИзменения:\n{body}\n\n{url}"),
-                None => format!("Текущая версия: {current}\n\nНе удалось получить описание релиза, но можно установить последний стабильный выпуск."),
+            let stable = latest_release_info("stable").await;
+            let rc = latest_release_info("rc").await;
+            let details = match (stable, rc) {
+                (Some((stable, _, _)), Some((rc, body, url))) => format!("Текущая версия: {current}\nПоследний stable: {stable}\nПоследний RC: {rc}\n\nИзменения RC:\n{body}\n\n{url}"),
+                (Some((stable, body, url)), None) => format!("Текущая версия: {current}\nПоследний stable: {stable}\n\nИзменения:\n{body}\n\n{url}"),
+                (None, Some((rc, body, url))) => format!("Текущая версия: {current}\nПоследний RC: {rc}\n\nИзменения:\n{body}\n\n{url}"),
+                (None, None) => format!("Текущая версия: {current}\n\nНе удалось получить список релизов GitHub."),
             };
-            bot.send_message(chat, format!("⬆️ Обновление бота\n\n{details}\n\nУстановить обновление? Служба автоматически перезапустится; VPN-соединения и ключи не затрагиваются."))
+            bot.send_message(chat, format!("⬆️ Обновление бота\n\n{details}\n\nВыберите канал. Служба автоматически перезапустится; VPN-соединения и ключи не затрагиваются."))
                 .reply_markup(menu::bot_update_confirm_menu())
                 .await?;
         }
-        Action::AdminUpdateRun => {
-            bot.send_message(chat, "⏳ Обновление запущено. Бот вернётся после автоматического перезапуска. Статус: systemctl status awgram-self-update")
+        Action::AdminUpdateRun(channel) => {
+            let label = if channel == "rc" { "RC" } else { "stable" };
+            bot.send_message(chat, format!("⏳ Обновление из канала {label} запущено. Бот вернётся после автоматического перезапуска. Статус: systemctl status awgram-self-update"))
                 .await?;
-            if let Err(error) = vpn.schedule_bot_update().await {
+            if let Err(error) = vpn.schedule_bot_update(&channel).await {
                 bot.send_message(chat, format!("❌ Не удалось запустить обновление: {error}"))
                     .reply_markup(menu::admin_system_hub())
                     .await?;
@@ -14408,6 +14435,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_callback_update_channels() {
+        assert_eq!(
+            parse_callback("admin:update:run:stable"),
+            Action::AdminUpdateRun("stable".into())
+        );
+        assert_eq!(
+            parse_callback("admin:update:run:rc"),
+            Action::AdminUpdateRun("rc".into())
+        );
+        assert_eq!(parse_callback("admin:update:run"), Action::Unknown);
+    }
+
+    #[test]
     fn empty_list_screen_no_clients_keeps_home_menu() {
         // Клиентов нет вообще — фильтровать нечего, остаётся домашнее меню.
         let home = menu::main_menu(Lang::Ru);
@@ -14692,7 +14732,7 @@ mod tests {
             DatabaseBackupNow,
             DatabaseBackupAudit,
             AdminUpdate,
-            AdminUpdateRun,
+            AdminUpdateRun("rc".into()),
             AdminUpdateStatus,
             AdminUpdateRollback,
             ServerAdd,
@@ -14969,7 +15009,7 @@ mod tests {
                 DatabaseBackupNow => {}
                 DatabaseBackupAudit => {}
                 AdminUpdate => {}
-                AdminUpdateRun => {}
+                AdminUpdateRun(_) => {}
                 AdminUpdateStatus => {}
                 AdminUpdateRollback => {}
                 ServerAdd => {}
@@ -15422,7 +15462,7 @@ mod tests {
             (Action::DatabaseBackupNow, true, false),
             (Action::DatabaseBackupAudit, true, false),
             (Action::AdminUpdate, true, false),
-            (Action::AdminUpdateRun, true, false),
+            (Action::AdminUpdateRun("rc".into()), true, false),
             (Action::AdminUpdateStatus, true, false),
             (Action::AdminUpdateRollback, true, false),
             (Action::ServerAdd, true, false),
