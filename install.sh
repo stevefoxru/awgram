@@ -802,6 +802,9 @@ Environment=AWGRAM_CONFIG=$CFG_FILE
 EnvironmentFile=-$ENV_FILE
 Restart=on-failure
 RestartSec=5
+RestartPreventExitStatus=73
+# Блокировка экземпляра общая с ручным запуском и хранится в системном /tmp.
+PrivateTmp=false
 NoNewPrivileges=false
 
 [Install]
@@ -822,7 +825,8 @@ EnvironmentFile=-$ENV_FILE
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
-PrivateTmp=true
+# Общий namespace нужен для lock по токену между partner service и ручным запуском.
+PrivateTmp=false
 
 [Install]
 WantedBy=multi-user.target

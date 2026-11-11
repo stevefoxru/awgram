@@ -26,6 +26,10 @@ grep -q '^MODE=root$' /etc/awgram/setup.conf || fail "mode persisted"
 grep -q '^VERSION=local$' /etc/awgram/setup.conf || fail "version persisted"
 [ -f /etc/systemd/system/awgram.service ] || fail "unit file"
 grep -q '^User=' /etc/systemd/system/awgram.service && fail "root unit must not have User="
+grep -q '^PrivateTmp=false$' /etc/systemd/system/awgram.service || fail "bot unit must share runtime lock"
+grep -q '^RestartPreventExitStatus=73$' /etc/systemd/system/awgram.service || fail "duplicate bot must not restart-loop"
+grep -A20 '^Description=awgram — isolated partner Telegram bots$' /etc/systemd/system/awgram-partners.service \
+  | grep -q '^PrivateTmp=false$' || fail "partner bot unit must share runtime lock"
 
 # --- сценарий 2: hardened reinstall поверх root-установки ---
 bash /repo/install.sh install --yes --lang en --mode hardened \

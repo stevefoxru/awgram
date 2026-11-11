@@ -126,6 +126,17 @@ async fn main() {
     };
     tracing::info!(admins = cfg.admin_ids.len(), "конфиг загружен");
 
+    let _bot_instance_lock = match awgram::runtime_lock::BotInstanceLock::acquire(&cfg.bot_token) {
+        Ok(lock) => {
+            tracing::info!(path = %lock.path().display(), "блокировка основного бота получена");
+            lock
+        }
+        Err(error) => {
+            tracing::error!(%error, "основной бот не запущен");
+            std::process::exit(73);
+        }
+    };
+
     let bot = Bot::new(&cfg.bot_token);
     let vpn = Arc::new(Vpn::from_config(&cfg));
     let store = match Store::open(&cfg.db_path) {
