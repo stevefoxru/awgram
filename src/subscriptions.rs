@@ -155,7 +155,7 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
         }
         let target = crate::calendar::legacy_renewal_target(now, Some(expires_at));
         let price =
-            store.legacy_renewal_price_for_user(*user_id, store.legacy_renewal_price_kopecks());
+            store.legacy_renewal_price_for_user(*user_id, store.legacy_renewal_price_at(now));
         let timing = if threshold == 0 {
             "срок уже истёк".to_string()
         } else {

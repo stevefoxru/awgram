@@ -1,6 +1,8 @@
 pub const LEGACY_RESTORE_DEADLINE: i64 = 1_798_761_599; // 2026-12-31 23:59:59 UTC
 /// 01.12.2026 00:00:00 по Москве (UTC+3), граница не включается.
 pub const LEGACY_REQUEST_DEADLINE: i64 = 1_796_072_400;
+/// 01.12.2026 00:00:00 по Москве: с этого момента действует декабрьская цена.
+pub const LEGACY_PRICE_CHANGE_AT: i64 = LEGACY_REQUEST_DEADLINE;
 
 pub fn legacy_requests_open(now: i64) -> bool {
     now < LEGACY_REQUEST_DEADLINE
@@ -66,6 +68,10 @@ pub fn year_at(epoch: i64) -> i64 {
 
 pub fn start_of_december(year: i64) -> i64 {
     days_from_civil(year, 12, 1) * 86_400
+}
+
+pub fn start_of_november(year: i64) -> i64 {
+    days_from_civil(year, 11, 1) * 86_400
 }
 
 pub fn end_of_year(year: i64) -> i64 {

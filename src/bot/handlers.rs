@@ -2232,7 +2232,7 @@ async fn admin_commerce_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Han
     } else {
         "не настроены — оплата выключена".to_string()
     };
-    bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy-продление: {:.2} ₽\nТестовый период: {}", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0, if settings.trial_enabled() { format!("{} дн.", settings.trial_days()) } else { "отключён".into() }))
+    bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy до 01.12: {:.2} ₽\nLegacy с 01.12: {:.2} ₽\nТестовый период: {}", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0, settings.legacy_renewal_regular_price_kopecks() as f64 / 100.0, if settings.trial_enabled() { format!("{} дн.", settings.trial_days()) } else { "отключён".into() }))
         .reply_markup(menu::admin_commerce_menu())
         .await?;
     Ok(())
@@ -2660,7 +2660,7 @@ async fn finance_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
 
 async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
     let requests = settings.legacy_requests("pending", 100);
-    let price = settings.legacy_renewal_price_kopecks();
+    let price = settings.legacy_renewal_price_at(now_epoch());
     let legacy = settings.legacy_clients();
     let restored = legacy.len();
     let used = legacy
@@ -5786,18 +5786,17 @@ async fn message_handler(
             .filter_map(|v| v.parse::<f64>().ok().map(|n| (n * 100.0).round() as i64))
             .collect::<Vec<_>>();
         let prices = match values.as_slice() {
-            [base] => Some((*base, 75_000, 50_000)),
-            [base, six, ten] => Some((*base, *six, *ten)),
+            [early, regular, six, ten] => Some((*early, *regular, *six, *ten)),
             _ => None,
         };
-        if let Some((base, six, ten)) =
-            prices.filter(|(a, b, c)| settings.set_legacy_prices_kopecks(*a, *b, *c))
+        if let Some((early, regular, six, ten)) = prices
+            .filter(|(a, b, c, d)| settings.set_legacy_scheduled_prices_kopecks(*a, *b, *c, *d))
         {
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "✅ Legacy-цены сохранены\nСтандартная: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽",
-                    base as f64/100.0,six as f64/100.0,ten as f64/100.0
+                    "✅ Legacy-цены сохранены\nДо 01.12: {:.2} ₽\nС 01.12: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽",
+                    early as f64/100.0,regular as f64/100.0,six as f64/100.0,ten as f64/100.0
                 ),
             )
             .reply_markup(menu::admin_dashboard_menu())
@@ -5806,7 +5805,7 @@ async fn message_handler(
         } else {
             bot.send_message(
                 msg.chat.id,
-                "Введите три цены в рублях, например: 1000 750 500",
+                "Введите четыре цены в рублях, например: 1000 1500 750 500",
             )
             .await?;
         }
@@ -10282,7 +10281,7 @@ async fn callback_handler(
         }
         Action::LegacyPriceAsk => {
             let (six, ten) = settings.legacy_discount_prices_kopecks();
-            bot.send_message(chat,format!("Legacy-цены:\nСтандартная: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽\n\nВведите три новые цены, например: 1000 750 500",settings.legacy_renewal_price_kopecks() as f64/100.0,six as f64/100.0,ten as f64/100.0)).await?;
+            bot.send_message(chat,format!("Legacy-цены:\nДо 01.12.2026: {:.2} ₽\nС 01.12.2026: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽\n\nВведите четыре цены, например: 1000 1500 750 500",settings.legacy_renewal_price_kopecks() as f64/100.0,settings.legacy_renewal_regular_price_kopecks() as f64/100.0,six as f64/100.0,ten as f64/100.0)).await?;
             dialogue.update(State::AwaitingLegacyPrice).await?;
         }
         Action::PromoInput => {
@@ -11298,7 +11297,7 @@ async fn callback_handler(
                     }
                     let price = settings.legacy_renewal_price_for_user(
                         uid,
-                        settings.legacy_renewal_price_kopecks(),
+                        settings.legacy_renewal_price_at(now_epoch()),
                     );
                     let target = crate::calendar::legacy_renewal_target(
                         now_epoch(),
@@ -11355,8 +11354,10 @@ async fn callback_handler(
                         .await?;
                     return Ok(());
                 }
-                let unit = settings
-                    .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+                let unit = settings.legacy_renewal_price_for_user(
+                    uid,
+                    settings.legacy_renewal_price_at(now_epoch()),
+                );
                 let total = unit.saturating_mul(names.len() as i64);
                 bot.send_message(
                     chat,
@@ -11383,8 +11384,10 @@ async fn callback_handler(
                 }
                 let target =
                     crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
-                let price = settings
-                    .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+                let price = settings.legacy_renewal_price_for_user(
+                    uid,
+                    settings.legacy_renewal_price_at(now_epoch()),
+                );
                 bot.send_message(chat,format!("Продление ключа «{name}» до 31.12.{} стоит {:.2} ₽. Выберите способ оплаты:",crate::calendar::year_at(target),price as f64 / 100.0)).reply_markup(menu::legacy_renew_method_menu(&name)).await?;
             }
         }
@@ -11398,8 +11401,10 @@ async fn callback_handler(
                     })
                     .collect::<Vec<_>>();
                 names.sort();
-                let amount = settings
-                    .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+                let amount = settings.legacy_renewal_price_for_user(
+                    uid,
+                    settings.legacy_renewal_price_at(now_epoch()),
+                );
                 let now = now_epoch();
                 let created = names
                     .into_iter()
@@ -11453,7 +11458,7 @@ async fn callback_handler(
                 return Ok(());
             }
             let amount = settings
-                .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+                .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_at(now_epoch()));
             let target =
                 crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
             if method == "balance" {

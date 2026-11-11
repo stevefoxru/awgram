@@ -299,7 +299,7 @@ async fn catalog(State(state): State<PortalState>) -> Response {
         "available":server.capacity.saturating_sub(state.store.server_client_count(server.id)).max(0)
     })).collect::<Vec<_>>();
     Json(serde_json::json!({"brand":brand,"bot_username":bot_username,"email_login_enabled":state.smtp.is_some(),"tariffs":tariffs,"servers":servers,
-        "legacy":{"request_deadline":crate::calendar::LEGACY_REQUEST_DEADLINE,"renewal_from":crate::calendar::start_of_december(crate::calendar::year_at(now_epoch())),"base_price_kopecks":state.store.legacy_renewal_price_kopecks()}})).into_response()
+        "legacy":{"request_deadline":crate::calendar::LEGACY_REQUEST_DEADLINE,"renewal_from":crate::calendar::start_of_november(crate::calendar::year_at(now_epoch())),"base_price_kopecks":state.store.legacy_renewal_price_at(now_epoch()),"early_price_kopecks":state.store.legacy_renewal_price_kopecks(),"regular_price_kopecks":state.store.legacy_renewal_regular_price_kopecks(),"price_change_at":crate::calendar::LEGACY_PRICE_CHANGE_AT}})).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -419,12 +419,12 @@ async fn create_web_renewal(
                 .into_response();
         }
         let year = crate::calendar::year_at(now);
-        if now < crate::calendar::start_of_december(year)
+        if now < crate::calendar::start_of_november(year)
             || now > crate::calendar::end_of_year(year)
         {
             return (
                 StatusCode::CONFLICT,
-                "Льготное продление Legacy-ключей доступно только в декабре",
+                "Продление Legacy-ключей доступно с 1 ноября до конца декабря",
             )
                 .into_response();
         }
@@ -432,7 +432,7 @@ async fn create_web_renewal(
             12,
             state
                 .store
-                .legacy_renewal_price_for_user(user_id, state.store.legacy_renewal_price_kopecks()),
+                .legacy_renewal_price_for_user(user_id, state.store.legacy_renewal_price_at(now)),
             true,
         )
     } else {
@@ -1335,7 +1335,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
             serde_json::json!({"name":name,"used":used,"rx":runtime.as_ref().map(|v|v.rx).unwrap_or(0),"tx":runtime.as_ref().map(|v|v.tx).unwrap_or(0),"last_handshake":runtime.and_then(|v|v.last_handshake)})
         }).collect::<Vec<_>>();
         let (_, billable, unused) = state.store.legacy_usage_for_user(owner);
-        let unit = state.store.legacy_renewal_price_for_user(owner,state.store.legacy_renewal_price_kopecks());
+        let unit = state.store.legacy_renewal_price_for_user(owner,state.store.legacy_renewal_price_at(now_epoch()));
         Some(serde_json::json!({"user_id":owner,"internal_id":state.store.internal_user_id(owner),"display_name":user.display_name,"username":user.username,"keys":keys,"billable":billable,"unused":unused,"unit_price_kopecks":unit,"discount_enabled":state.store.legacy_discount_enabled(owner),"total_kopecks":unit.saturating_mul(billable as i64)}))
     }).collect::<Vec<_>>();
     let tickets = state.store.support_tickets("open",100).into_iter()
@@ -1356,7 +1356,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "crm_tickets":tickets,
         "legacy_billing":legacy_billing,
         "legacy_request_deadline":crate::calendar::LEGACY_REQUEST_DEADLINE,
-        "legacy_prices":{"base":state.store.legacy_renewal_price_kopecks(),"six_to_nine":state.store.legacy_discount_prices_kopecks().0,"ten_plus":state.store.legacy_discount_prices_kopecks().1},
+        "legacy_prices":{"base":state.store.legacy_renewal_price_at(now_epoch()),"early_base":state.store.legacy_renewal_price_kopecks(),"regular_base":state.store.legacy_renewal_regular_price_kopecks(),"change_at":crate::calendar::LEGACY_PRICE_CHANGE_AT,"six_to_nine":state.store.legacy_discount_prices_kopecks().0,"ten_plus":state.store.legacy_discount_prices_kopecks().1},
         "promos":state.store.admin_promos(100),
         "partner_withdrawals":state.store.pending_partner_withdrawals(100),
         "cleanup": {"enabled": state.store.blocked_key_cleanup_enabled(), "days": state.store.blocked_key_cleanup_days()},
@@ -1379,6 +1379,7 @@ struct AdminCrmAction {
 #[derive(serde::Deserialize)]
 struct LegacyPricesInput {
     base_rubles: i64,
+    regular_base_rubles: Option<i64>,
     six_to_nine_rubles: i64,
     ten_plus_rubles: i64,
 }
@@ -1398,8 +1399,9 @@ async fn admin_legacy_prices(
     if !state.admin_ids.contains(&id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if state.store.set_legacy_prices_kopecks(
+    if state.store.set_legacy_scheduled_prices_kopecks(
         input.base_rubles * 100,
+        input.regular_base_rubles.unwrap_or(1500) * 100,
         input.six_to_nine_rubles * 100,
         input.ten_plus_rubles * 100,
     ) {
@@ -1407,7 +1409,7 @@ async fn admin_legacy_prices(
     } else {
         (
             StatusCode::BAD_REQUEST,
-            "Цены должны быть положительными и уменьшаться",
+            "Цены должны быть положительными; индивидуальные ступени не должны превышать базовую цену",
         )
             .into_response()
     }

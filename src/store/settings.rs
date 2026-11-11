@@ -291,6 +291,18 @@ impl Store {
             .unwrap_or(100_000)
             .max(0)
     }
+    pub fn legacy_renewal_regular_price_kopecks(&self) -> i64 {
+        self.get_json::<i64>("legacy_renewal_regular_price_kopecks")
+            .unwrap_or(150_000)
+            .max(0)
+    }
+    pub fn legacy_renewal_price_at(&self, now: i64) -> i64 {
+        if now < crate::calendar::LEGACY_PRICE_CHANGE_AT {
+            self.legacy_renewal_price_kopecks()
+        } else {
+            self.legacy_renewal_regular_price_kopecks()
+        }
+    }
     pub fn set_legacy_renewal_price_kopecks(&self, value: i64) {
         self.set_json("legacy_renewal_price_kopecks", &value.max(0));
     }
@@ -305,15 +317,31 @@ impl Store {
         )
     }
     pub fn set_legacy_prices_kopecks(&self, base: i64, six_to_nine: i64, ten_plus: i64) -> bool {
-        if base <= 0
+        self.set_legacy_scheduled_prices_kopecks(
+            base,
+            self.legacy_renewal_regular_price_kopecks(),
+            six_to_nine,
+            ten_plus,
+        )
+    }
+    pub fn set_legacy_scheduled_prices_kopecks(
+        &self,
+        early_base: i64,
+        regular_base: i64,
+        six_to_nine: i64,
+        ten_plus: i64,
+    ) -> bool {
+        if early_base <= 0
+            || regular_base <= 0
             || six_to_nine <= 0
             || ten_plus <= 0
-            || six_to_nine > base
+            || six_to_nine > early_base.min(regular_base)
             || ten_plus > six_to_nine
         {
             return false;
         }
-        self.set_json("legacy_renewal_price_kopecks", &base);
+        self.set_json("legacy_renewal_price_kopecks", &early_base);
+        self.set_json("legacy_renewal_regular_price_kopecks", &regular_base);
         self.set_json("legacy_discount_6_9_kopecks", &six_to_nine);
         self.set_json("legacy_discount_10_plus_kopecks", &ten_plus);
         true
@@ -591,6 +619,28 @@ mod tests {
         assert_eq!(store.runtime_version(), None);
         store.set_runtime_version("0.17.1");
         assert_eq!(store.runtime_version().as_deref(), Some("0.17.1"));
+    }
+
+    #[test]
+    fn legacy_price_changes_on_december_first_without_rewriting_old_setting() {
+        let store = Store::open_in_memory();
+        assert_eq!(
+            store.legacy_renewal_price_at(crate::calendar::LEGACY_PRICE_CHANGE_AT - 1),
+            100_000
+        );
+        assert_eq!(
+            store.legacy_renewal_price_at(crate::calendar::LEGACY_PRICE_CHANGE_AT),
+            150_000
+        );
+        assert!(store.set_legacy_scheduled_prices_kopecks(110_000, 160_000, 75_000, 50_000));
+        assert_eq!(
+            store.legacy_renewal_price_at(crate::calendar::LEGACY_PRICE_CHANGE_AT - 1),
+            110_000
+        );
+        assert_eq!(
+            store.legacy_renewal_price_at(crate::calendar::LEGACY_PRICE_CHANGE_AT),
+            160_000
+        );
     }
 
     #[test]
