@@ -551,17 +551,21 @@ state=/var/lib/awgram/update-status
 log=/var/lib/awgram/update.log
 cmd="${1:-}"
 case "$cmd" in
-  start)
+  start|start-stable|start-rc)
+    channel=stable
+    [[ "$cmd" == start-rc ]] && channel=rc
     command -v systemd-run >/dev/null 2>&1 || { echo 'systemd-run is required' >&2; exit 3; }
     install -d -m 750 /var/lib/awgram
     printf 'running\n' > "$state"; : > "$log"; chmod 640 "$state" "$log"
     systemd-run --quiet --collect --unit=awgram-self-update \
-      /usr/local/libexec/awgram-updatectl run
-    printf '{"ok":true,"unit":"awgram-self-update"}\n'
+      /usr/local/libexec/awgram-updatectl run "$channel"
+    printf '{"ok":true,"unit":"awgram-self-update","channel":"%s"}\n' "$channel"
     ;;
   run)
+    channel="${2:-stable}"
+    case "$channel" in stable|rc) ;; *) echo 'invalid update channel' >&2; exit 2 ;; esac
     set +e
-    /usr/local/bin/awgram-setup update --yes > "$log" 2>&1
+    /usr/local/bin/awgram-setup update --channel "$channel" --yes > "$log" 2>&1
     code=$?
     set -e
     if (( code == 0 )); then printf 'succeeded\n' > "$state"; else printf 'failed:%s\n' "$code" > "$state"; fi
@@ -586,7 +590,7 @@ case "$cmd" in
     printf 'rolled_back\n' > "$state"
     printf '{"ok":true,"status":"rolled_back"}\n'
     ;;
-  *) echo 'usage: awgram-updatectl start|status|rollback' >&2; exit 2 ;;
+  *) echo 'usage: awgram-updatectl start|start-stable|start-rc|status|rollback' >&2; exit 2 ;;
 esac
 AWGRAM_UPDATECTL
   chmod 755 "$UPDATECTL_PATH"
@@ -1094,7 +1098,10 @@ cmd_help() {
 # ---------- hardened mode setup ----------
 write_sudoers() {
   local tmp; tmp="$(mktemp)"
-  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start, %s *, %s *, %s start *, %s status\n' "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" "$UPDATECTL_PATH" "$DEPLOYCTL_PATH" "$MIGRATECTL_PATH" "$PORTAL_DOMAINCTL_PATH" "$PORTAL_DOMAINCTL_PATH" > "$tmp"
+  printf '%s ALL=(root) NOPASSWD: %s, %s, %s start, %s start-stable, %s start-rc, %s status, %s rollback, %s *, %s *, %s start *, %s status\n' \
+    "$SVC_USER" "$MANAGE_SCRIPT" "$CLIENTCTL_PATH" \
+    "$UPDATECTL_PATH" "$UPDATECTL_PATH" "$UPDATECTL_PATH" "$UPDATECTL_PATH" "$UPDATECTL_PATH" \
+    "$DEPLOYCTL_PATH" "$MIGRATECTL_PATH" "$PORTAL_DOMAINCTL_PATH" "$PORTAL_DOMAINCTL_PATH" > "$tmp"
   chmod 440 "$tmp"
   visudo -c -f "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die err_sudoers; }
   mv -f "$tmp" "$SUDOERS_FILE"

@@ -1258,12 +1258,24 @@ impl Vpn {
 
     /// Планирует обновление отдельным transient systemd-unit. Вызов сразу
     /// возвращается, поэтому перезапуск awgram не обрывает сам запуск обновления.
-    pub async fn schedule_bot_update(&self) -> Result<()> {
-        self.bot_update_control("start").await.map(|_| ())
+    pub async fn schedule_bot_update(&self, channel: &str) -> Result<()> {
+        let command = match channel {
+            "stable" => "start-stable",
+            "rc" => "start-rc",
+            _ => {
+                return Err(crate::error::Error::Parse(
+                    "неизвестный канал обновления".into(),
+                ))
+            }
+        };
+        self.bot_update_control(command).await.map(|_| ())
     }
 
     pub async fn bot_update_control(&self, command: &str) -> Result<String> {
-        if !matches!(command, "start" | "status" | "rollback") {
+        if !matches!(
+            command,
+            "start" | "start-stable" | "start-rc" | "status" | "rollback"
+        ) {
             return Err(crate::error::Error::Parse(
                 "неизвестная команда обновления".into(),
             ));

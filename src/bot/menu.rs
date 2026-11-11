@@ -483,7 +483,10 @@ pub fn portal_domain_menu(configured: bool) -> InlineKeyboardMarkup {
 
 pub fn bot_update_confirm_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
-        vec![cb("⬆️ Установить обновление", "admin:update:run")],
+        vec![
+            cb("✅ Последний stable", "admin:update:run:stable"),
+            cb("🧪 Последний RC", "admin:update:run:rc"),
+        ],
         vec![cb("❌ Отмена", "admin:system")],
     ])
 }
