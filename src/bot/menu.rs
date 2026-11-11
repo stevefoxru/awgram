@@ -367,6 +367,10 @@ pub fn admin_communication_hub() -> InlineKeyboardMarkup {
             cb("🆘 Поддержка", "admin:support"),
             cb("📣 Рассылка", "admin:broadcast"),
         ],
+        vec![cb(
+            "📣 Legacy: цена ноября",
+            "broadcast:audience:legacy-template",
+        )],
         vec![cb("📝 Шаблоны рассылок", "admin:broadcast:templates")],
         vec![cb("📊 История рассылок", "admin:broadcast:history")],
         vec![cb("⬅️ Админ-панель", "admin:dashboard")],
@@ -1639,8 +1643,16 @@ pub fn broadcast_audience_menu() -> InlineKeyboardMarkup {
             cb("⏳ Истекают за 7 дней", "broadcast:audience:expiring"),
             cb("🆕 Без ключей", "broadcast:audience:nokeys"),
         ],
+        vec![cb("🔧 Актуальные Legacy", "broadcast:audience:legacy")],
         vec![cb("⬅️ Связь", "admin:communication")],
     ])
+}
+
+pub fn legacy_broadcast_customer_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![cb(
+        "🔧 Выбрать Legacy-ключи для продления",
+        "legacy:renew:__all__",
+    )]])
 }
 
 pub fn broadcast_compose_menu() -> InlineKeyboardMarkup {
@@ -2031,6 +2043,7 @@ pub fn legacy_renew_menu(name: &str, price_kopecks: i64) -> InlineKeyboardMarkup
             &format!("💳 Продлить за {:.2} ₽", price_kopecks as f64 / 100.0),
             &format!("legacy:renew:{name}"),
         )],
+        vec![cb("🧾 Продлить все Legacy-ключи", "legacy:renew:__all__")],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
 }
@@ -2046,6 +2059,16 @@ pub fn legacy_renew_method_menu(name: &str) -> InlineKeyboardMarkup {
             &format!("legacy:renew:method:{name}:balance"),
         )],
         vec![cb("⬅️ Назад", &format!("legacy:renew:{name}"))],
+    ])
+}
+
+pub fn legacy_renew_all_method_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "💳 Оплатить все переводом",
+            "legacy:renew:method:__all__:manual",
+        )],
+        vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
 }
 

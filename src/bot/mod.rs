@@ -77,6 +77,10 @@ pub enum State {
     AwaitingPaymentProof {
         id: i64,
     },
+    AwaitingLegacyPaymentProof {
+        ids: Vec<i64>,
+        names: Vec<String>,
+    },
     AwaitingPaymentReject {
         id: i64,
     },

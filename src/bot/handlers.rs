@@ -2232,7 +2232,7 @@ async fn admin_commerce_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Han
     } else {
         "не настроены — оплата выключена".to_string()
     };
-    bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy-продление: {:.2} ₽\nТестовый период: {}", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0, if settings.trial_enabled() { format!("{} дн.", settings.trial_days()) } else { "отключён".into() }))
+    bot.send_message(chat, format!("🏷 Цены и промокоды\n\nТарифы 1 / 3 / 6 / 12 мес.:\n₽ {} / {} / {} / {}\n⭐ {stars_text}\n\nРеферальное вознаграждение: {}%\nLegacy до 01.12: {:.2} ₽\nLegacy с 01.12: {:.2} ₽\nТестовый период: {}", rub[0], rub[1], rub[2], rub[3], settings.referral_percent(), settings.legacy_renewal_price_kopecks() as f64 / 100.0, settings.legacy_renewal_regular_price_kopecks() as f64 / 100.0, if settings.trial_enabled() { format!("{} дн.", settings.trial_days()) } else { "отключён".into() }))
         .reply_markup(menu::admin_commerce_menu())
         .await?;
     Ok(())
@@ -2660,7 +2660,7 @@ async fn finance_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerRes
 
 async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> HandlerResult {
     let requests = settings.legacy_requests("pending", 100);
-    let price = settings.legacy_renewal_price_kopecks();
+    let price = settings.legacy_renewal_price_at(now_epoch());
     let legacy = settings.legacy_clients();
     let restored = legacy.len();
     let used = legacy
@@ -3889,6 +3889,7 @@ fn broadcast_audience_label(audience: &str, settings: &Store) -> String {
         "active" => "с активными ключами".into(),
         "expiring" => "истекают за 7 дней".into(),
         "nokeys" => "без ключей".into(),
+        "legacy" => "владельцы актуальных использовавшихся Legacy-ключей".into(),
         _ => audience
             .strip_prefix("server:")
             .and_then(|value| value.parse::<i64>().ok())
@@ -3916,6 +3917,12 @@ fn broadcast_recipients(audience: &str, settings: &Store, vpn: &Vpn, now: i64) -
                         .is_some_and(|expiry| expiry > now && expiry - now <= 7 * 86_400)
                 }),
                 "nokeys" => keys.is_empty(),
+                "legacy" => keys.iter().any(|name| {
+                    settings.is_legacy_client(name, *user_id)
+                        && settings.client_ever_used(name)
+                        && !vpn.client_disabled(name)
+                        && vpn.client_expiry(name).is_none_or(|expiry| expiry > now)
+                }),
                 value if value.starts_with("server:") => value
                     .strip_prefix("server:")
                     .and_then(|value| value.parse::<i64>().ok())
@@ -4679,6 +4686,68 @@ async fn message_handler(
                 "Укажите причину длиной до 500 символов либо заявка уже обработана.",
             )
             .await?;
+        }
+        return Ok(());
+    }
+    if let State::AwaitingLegacyPaymentProof { ids, names } = state.clone() {
+        if msg.photo().is_none() && msg.document().is_none() {
+            bot.send_message(
+                msg.chat.id,
+                "Для Legacy-продления пришлите скриншот или файл чека после перевода. Текст без изображения не принимается.",
+            )
+            .await?;
+            return Ok(());
+        }
+        let proof = msg.caption().unwrap_or("Скриншот перевода приложен");
+        let accepted = ids
+            .iter()
+            .filter(|id| settings.set_payment_proof(**id, uid, proof))
+            .copied()
+            .collect::<Vec<_>>();
+        if accepted.len() == ids.len() {
+            let keys = names.join(", ");
+            let request_ids = accepted
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            for owner in &cfg.admin_ids {
+                let _ = bot
+                    .send_message(
+                        ChatId(*owner),
+                        format!(
+                            "💳 Legacy-продление · получен общий чек\nПользователь: {uid}\nЗаявки: {request_ids}\nКлючи: {keys}\n\nПодтвердите каждый ключ отдельной кнопкой ниже."
+                        ),
+                    )
+                    .await;
+                for (id, name) in accepted.iter().zip(names.iter()) {
+                    let _ = bot
+                        .send_message(ChatId(*owner), format!("🔑 Заявка #{id} · {name}"))
+                        .reply_markup(menu::payment_admin_menu(*id))
+                        .await;
+                }
+                let _ = bot
+                    .forward_message(ChatId(*owner), msg.chat.id, msg.id)
+                    .await;
+            }
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "✅ Скриншот отправлен администратору.\n\nБудут проверены и продлены ключи:\n• {}",
+                    names.join("\n• ")
+                ),
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+            dialogue.update(State::Idle).await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Не удалось прикрепить чек ко всем заявкам. Возможно, одна из них уже обработана. Откройте «Мои ключи» и проверьте статус.",
+            )
+            .reply_markup(menu::customer_keyboard())
+            .await?;
+            dialogue.update(State::Idle).await?;
         }
         return Ok(());
     }
@@ -5724,18 +5793,17 @@ async fn message_handler(
             .filter_map(|v| v.parse::<f64>().ok().map(|n| (n * 100.0).round() as i64))
             .collect::<Vec<_>>();
         let prices = match values.as_slice() {
-            [base] => Some((*base, 75_000, 50_000)),
-            [base, six, ten] => Some((*base, *six, *ten)),
+            [early, regular, six, ten] => Some((*early, *regular, *six, *ten)),
             _ => None,
         };
-        if let Some((base, six, ten)) =
-            prices.filter(|(a, b, c)| settings.set_legacy_prices_kopecks(*a, *b, *c))
+        if let Some((early, regular, six, ten)) = prices
+            .filter(|(a, b, c, d)| settings.set_legacy_scheduled_prices_kopecks(*a, *b, *c, *d))
         {
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "✅ Legacy-цены сохранены\nСтандартная: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽",
-                    base as f64/100.0,six as f64/100.0,ten as f64/100.0
+                    "✅ Legacy-цены сохранены\nДо 01.12: {:.2} ₽\nС 01.12: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽",
+                    early as f64/100.0,regular as f64/100.0,six as f64/100.0,ten as f64/100.0
                 ),
             )
             .reply_markup(menu::admin_dashboard_menu())
@@ -5744,7 +5812,7 @@ async fn message_handler(
         } else {
             bot.send_message(
                 msg.chat.id,
-                "Введите три цены в рублях, например: 1000 750 500",
+                "Введите четыре цены в рублях, например: 1000 1500 750 500",
             )
             .await?;
         }
@@ -9638,14 +9706,18 @@ async fn callback_handler(
             let mut delivered = 0usize;
             let mut failed = 0usize;
             for user_id in recipients {
-                match bot
-                    .copy_message(
-                        ChatId(user_id),
-                        ChatId(source_chat_id),
-                        MessageId(source_message_id),
-                    )
-                    .await
-                {
+                let copy = bot.copy_message(
+                    ChatId(user_id),
+                    ChatId(source_chat_id),
+                    MessageId(source_message_id),
+                );
+                let result = if audience == "legacy" {
+                    copy.reply_markup(menu::legacy_broadcast_customer_menu())
+                        .await
+                } else {
+                    copy.await
+                };
+                match result {
                     Ok(_) => {
                         delivered += 1;
                         settings.record_broadcast_delivery(id, user_id, true, None, now_epoch());
@@ -9710,12 +9782,57 @@ async fn callback_handler(
             }
         }
         Action::BroadcastAudience(audience) => {
+            if audience == "legacy-template" {
+                let audience = "legacy".to_string();
+                let recipients = broadcast_recipients(&audience, &settings, &vpn, now_epoch());
+                if recipients.is_empty() {
+                    bot.send_message(
+                        chat,
+                        "Сейчас нет получателей с актуальными использовавшимися Legacy-ключами.",
+                    )
+                    .reply_markup(menu::admin_communication_hub())
+                    .await?;
+                    return Ok(());
+                }
+                let early = settings.legacy_renewal_price_kopecks() as f64 / 100.0;
+                let regular = settings.legacy_renewal_regular_price_kopecks() as f64 / 100.0;
+                let preview = bot
+                    .send_message(
+                        chat,
+                        format!(
+                            "🔔 Продление Legacy-ключей\n\nДо 30 ноября включительно вы можете оформить продление используемых Legacy-ключей по прежней цене — {early:.2} ₽ за ключ.\n\nС 1 декабря стоимость составит {regular:.2} ₽ за ключ.\n\nПеред оплатой бот покажет точный список выбранных ключей и итоговую сумму. Можно продлить один ключ или сразу все используемые Legacy-ключи. После перевода потребуется прислать скриншот или файл чека.\n\nОформите продление заранее, чтобы ключи продолжили работать после окончания текущего срока."
+                        ),
+                    )
+                    .await?;
+                bot.send_message(
+                    chat,
+                    format!(
+                        "📣 Предпросмотр готов\n\nАудитория: {}\nПолучателей: {}\n\nПользователям пока ничего не отправлено. Для запуска нажмите кнопку ниже.",
+                        broadcast_audience_label(&audience, &settings),
+                        recipients.len()
+                    ),
+                )
+                .reply_markup(menu::broadcast_confirm_menu(preview.id.0))
+                .await?;
+                dialogue
+                    .update(State::AwaitingBroadcastConfirm {
+                        source_chat_id: chat.0,
+                        source_message_id: preview.id.0,
+                        audience,
+                        recipients,
+                        created_at: now_epoch(),
+                    })
+                    .await?;
+                return Ok(());
+            }
             let server_segment = audience
                 .strip_prefix("server:")
                 .and_then(|value| value.parse::<i64>().ok())
                 .and_then(|id| settings.vpn_server(id));
-            if matches!(audience.as_str(), "all" | "active" | "expiring" | "nokeys")
-                || server_segment.is_some()
+            if matches!(
+                audience.as_str(),
+                "all" | "active" | "expiring" | "nokeys" | "legacy"
+            ) || server_segment.is_some()
             {
                 let label = broadcast_audience_label(&audience, &settings);
                 let count = broadcast_recipients(&audience, &settings, &vpn, now_epoch()).len();
@@ -9736,14 +9853,18 @@ async fn callback_handler(
             let mut recovered = 0usize;
             let mut failed = 0usize;
             for user_id in recipients {
-                match bot
-                    .copy_message(
-                        ChatId(user_id),
-                        ChatId(run.source_chat_id),
-                        MessageId(run.source_message_id),
-                    )
-                    .await
-                {
+                let copy = bot.copy_message(
+                    ChatId(user_id),
+                    ChatId(run.source_chat_id),
+                    MessageId(run.source_message_id),
+                );
+                let result = if run.audience == "legacy" {
+                    copy.reply_markup(menu::legacy_broadcast_customer_menu())
+                        .await
+                } else {
+                    copy.await
+                };
+                match result {
                     Ok(_) => {
                         recovered += 1;
                         settings.record_broadcast_delivery(id, user_id, true, None, now_epoch());
@@ -10220,7 +10341,7 @@ async fn callback_handler(
         }
         Action::LegacyPriceAsk => {
             let (six, ten) = settings.legacy_discount_prices_kopecks();
-            bot.send_message(chat,format!("Legacy-цены:\nСтандартная: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽\n\nВведите три новые цены, например: 1000 750 500",settings.legacy_renewal_price_kopecks() as f64/100.0,six as f64/100.0,ten as f64/100.0)).await?;
+            bot.send_message(chat,format!("Legacy-цены:\nДо 01.12.2026: {:.2} ₽\nС 01.12.2026: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽\n\nВведите четыре цены, например: 1000 1500 750 500",settings.legacy_renewal_price_kopecks() as f64/100.0,settings.legacy_renewal_regular_price_kopecks() as f64/100.0,six as f64/100.0,ten as f64/100.0)).await?;
             dialogue.update(State::AwaitingLegacyPrice).await?;
         }
         Action::PromoInput => {
@@ -11236,7 +11357,7 @@ async fn callback_handler(
                     }
                     let price = settings.legacy_renewal_price_for_user(
                         uid,
-                        settings.legacy_renewal_price_kopecks(),
+                        settings.legacy_renewal_price_at(now_epoch()),
                     );
                     let target = crate::calendar::legacy_renewal_target(
                         now_epoch(),
@@ -11278,6 +11399,39 @@ async fn callback_handler(
             }
         }
         Action::LegacyRenew(name) => {
+            if name == "__all__" {
+                let mut names = settings
+                    .legacy_clients()
+                    .into_iter()
+                    .filter_map(|(name, owner)| {
+                        (owner == uid && settings.client_ever_used(&name)).then_some(name)
+                    })
+                    .collect::<Vec<_>>();
+                names.sort();
+                if names.is_empty() {
+                    bot.send_message(chat, "Нет используемых Legacy-ключей, требующих оплаты.")
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    return Ok(());
+                }
+                let unit = settings.legacy_renewal_price_for_user(
+                    uid,
+                    settings.legacy_renewal_price_at(now_epoch()),
+                );
+                let total = unit.saturating_mul(names.len() as i64);
+                bot.send_message(
+                    chat,
+                    format!(
+                        "🧾 Продление всех Legacy-ключей\n\nБудут продлены:\n• {}\n\nКлючей: {}\nИтого к переводу: {:.2} ₽\n\nНеиспользованные ключи в оплату не включены.",
+                        names.join("\n• "),
+                        names.len(),
+                        total as f64 / 100.0
+                    ),
+                )
+                .reply_markup(menu::legacy_renew_all_method_menu())
+                .await?;
+                return Ok(());
+            }
             if settings.client_owner(&name) == Some(uid) && settings.is_legacy_client(&name, uid) {
                 if !settings.client_ever_used(&name) {
                     bot.send_message(
@@ -11290,12 +11444,67 @@ async fn callback_handler(
                 }
                 let target =
                     crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
-                let price = settings
-                    .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+                let price = settings.legacy_renewal_price_for_user(
+                    uid,
+                    settings.legacy_renewal_price_at(now_epoch()),
+                );
                 bot.send_message(chat,format!("Продление ключа «{name}» до 31.12.{} стоит {:.2} ₽. Выберите способ оплаты:",crate::calendar::year_at(target),price as f64 / 100.0)).reply_markup(menu::legacy_renew_method_menu(&name)).await?;
             }
         }
         Action::LegacyRenewMethod(name, method) => {
+            if name == "__all__" && method == "manual" {
+                let mut names = settings
+                    .legacy_clients()
+                    .into_iter()
+                    .filter_map(|(name, owner)| {
+                        (owner == uid && settings.client_ever_used(&name)).then_some(name)
+                    })
+                    .collect::<Vec<_>>();
+                names.sort();
+                let amount = settings.legacy_renewal_price_for_user(
+                    uid,
+                    settings.legacy_renewal_price_at(now_epoch()),
+                );
+                let now = now_epoch();
+                let created = names
+                    .into_iter()
+                    .filter_map(|name| {
+                        settings
+                            .create_legacy_renewal_request(uid, &name, amount, now)
+                            .map(|id| (id, name))
+                    })
+                    .collect::<Vec<_>>();
+                if created.is_empty() {
+                    bot.send_message(
+                        chat,
+                        "Для всех используемых Legacy-ключей уже созданы заявки, ожидающие проверки.",
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                    return Ok(());
+                }
+                let ids = created.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+                let names = created
+                    .into_iter()
+                    .map(|(_, name)| name)
+                    .collect::<Vec<_>>();
+                let total = amount.saturating_mul(names.len() as i64);
+                bot.send_message(
+                    chat,
+                    format!(
+                        "💳 Оплата Legacy-продления переводом\n\nБудут продлены:\n• {}\n\nКлючей: {}\nК переводу: {:.2} ₽\n\nРеквизиты:\n{}\n\nПосле перевода пришлите сюда скриншот или файл чека. По одному чеку администратор увидит весь список выбранных ключей.",
+                        names.join("\n• "),
+                        names.len(),
+                        total as f64 / 100.0,
+                        settings.payment_instructions()
+                    ),
+                )
+                .await?;
+                dialogue
+                    .update(State::AwaitingLegacyPaymentProof { ids, names })
+                    .await?;
+                return Ok(());
+            }
             if settings.client_owner(&name) != Some(uid) || !settings.is_legacy_client(&name, uid) {
                 return Ok(());
             }
@@ -11309,7 +11518,7 @@ async fn callback_handler(
                 return Ok(());
             }
             let amount = settings
-                .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_kopecks());
+                .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_at(now_epoch()));
             let target =
                 crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
             if method == "balance" {
@@ -11356,7 +11565,13 @@ async fn callback_handler(
                 if let Some(id) =
                     settings.create_legacy_renewal_request(uid, &name, amount, now_epoch())
                 {
-                    bot.send_message(chat,format!("Заявка #{id} на техническое продление ключа «{name}» до 31.12.{}\nСумма: {:.2} ₽\n\n{}",crate::calendar::year_at(target),amount as f64 / 100.0,settings.payment_instructions())).reply_markup(menu::payment_paid_menu(id)).await?;
+                    bot.send_message(chat,format!("💳 Оплата Legacy-продления переводом\n\nБудет продлён ключ:\n• {name}\nСрок после подтверждения: до 31.12.{}\nК переводу: {:.2} ₽\n\nРеквизиты:\n{}\n\nПосле перевода пришлите сюда скриншот или файл чека. Текст без изображения не принимается.",crate::calendar::year_at(target),amount as f64 / 100.0,settings.payment_instructions())).await?;
+                    dialogue
+                        .update(State::AwaitingLegacyPaymentProof {
+                            ids: vec![id],
+                            names: vec![name],
+                        })
+                        .await?;
                 } else {
                     bot.send_message(
                         chat,
@@ -14634,6 +14849,8 @@ mod tests {
             menu::renew_method_menu("alice", 1),
             menu::legacy_renew_menu("old_alice", 100_000),
             menu::legacy_renew_method_menu("old_alice"),
+            menu::legacy_renew_all_method_menu(),
+            menu::legacy_broadcast_customer_menu(),
             menu::legacy_restore_menu(false),
             menu::legacy_restore_menu(true),
             menu::legacy_request_admin_menu(1),
