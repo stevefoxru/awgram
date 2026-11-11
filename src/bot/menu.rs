@@ -1634,10 +1634,13 @@ pub fn broadcast_audience_menu() -> InlineKeyboardMarkup {
 }
 
 pub fn legacy_broadcast_customer_menu() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![cb(
-        "🔧 Выбрать Legacy-ключи для продления",
-        "legacy:renew:__all__",
-    )]])
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "🔧 Продлить все использовавшиеся",
+            "legacy:renew:__all__",
+        )],
+        vec![cb("🔑 Выбрать ключ отдельно", "mykeys")],
+    ])
 }
 
 pub fn broadcast_compose_menu() -> InlineKeyboardMarkup {
