@@ -63,6 +63,26 @@ async fn main() {
             }
         }
     }
+    if arguments.iter().any(|argument| argument == "--check-db") {
+        let db_path = database_path();
+        match awgram::store::audit_database(&db_path) {
+            Ok(report) => {
+                let healthy = report.is_healthy();
+                match serde_json::to_string_pretty(&report) {
+                    Ok(json) => println!("{json}"),
+                    Err(error) => {
+                        tracing::error!(%error, "не удалось сериализовать отчёт проверки БД");
+                        std::process::exit(1);
+                    }
+                }
+                std::process::exit(if healthy { 0 } else { 2 });
+            }
+            Err(error) => {
+                tracing::error!(%error, path = %db_path.display(), "проверка БД не выполнена");
+                std::process::exit(1);
+            }
+        }
+    }
     if arguments.iter().any(|argument| argument == "--migrate-db") {
         if !arguments
             .iter()

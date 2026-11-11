@@ -11,6 +11,7 @@ mod broadcasts;
 mod commerce;
 mod events;
 mod groups;
+mod health;
 mod inventory;
 mod nodes;
 mod partners;
@@ -31,6 +32,7 @@ pub use groups::{
     gen_invite_token, GroupError, GroupRow, InviteRow, InviteUse, ListScope, QuotaAssign,
     INVITE_TTL_SECS,
 };
+pub use health::{audit_database, DatabaseAudit, ForeignKeyViolation};
 pub use inventory::{InventoryItem, InventoryReport, KeyRuntimeStats, ServerRuntimeSummary};
 pub use nodes::{InstallationJob, VpnInstance, VpnNode};
 pub use partners::{Partner, PartnerOrder, PartnerSalesSummary, PartnerWithdrawal};
