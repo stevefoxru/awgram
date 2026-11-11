@@ -198,6 +198,10 @@ curl -fsSL https://github.com/stevefoxru/awgram/releases/download/vX.Y.Z-rc.N/in
 
 ## Как это работает
 
+Процедура подготовки major-релиза, production preflight и отката описана в
+[docs/release-zpnet-2.md](docs/release-zpnet-2.md). Она запрещает неявные
+миграции БД и отделяет dry-run сборку от подтверждённого production deploy.
+
 `awgram` — один статический бинарник (Rust, `teloxide`, long polling, без
 webhook), который живёт на том же VPS, что и VPN. Основные операции он
 выполняет через штатный `manage_amneziawg.sh`; root-helper awgram управляет

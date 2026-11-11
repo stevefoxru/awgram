@@ -1344,6 +1344,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
             "status":item.status,"category":item.category,"priority":item.priority,"updated_at":item.updated_at}))
         .collect::<Vec<_>>();
     Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
         "users": {"total": users.total, "new_today": users.new_today, "new_30d": users.new_30d, "paying": users.paying, "blocked": users.blocked},
         "keys": {"total": clients.len(), "online": online},
         "servers": servers,

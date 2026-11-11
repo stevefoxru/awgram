@@ -6,7 +6,15 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 mkdir -p /root/awg
 printf '#!/bin/sh\necho ok\n' > /root/awg/manage_amneziawg.sh
 chmod +x /root/awg/manage_amneziawg.sh
-printf '#!/bin/sh\necho awgram-stub\n' > /tmp/fakebin; chmod +x /tmp/fakebin
+cat > /tmp/fakebin <<'FAKEBIN'
+#!/bin/sh
+case "${1:-}" in
+  --schema-status) echo '{"compatible":true}' ;;
+  --check-db) echo '{"quick_check_ok":true,"schema_supported":true}' ;;
+  *) echo awgram-stub ;;
+esac
+FAKEBIN
+chmod +x /tmp/fakebin
 
 # --- сценарий 1: root install (без сети GitHub, без systemd) ---
 bash /repo/install.sh install --yes --lang en --mode root \
@@ -84,11 +92,34 @@ bash /repo/install.sh install --yes --script-path /root/awg/manage_amneziawg.sh 
   --binary-file /tmp/fakebin --no-systemd
 
 # --- сценарий 3: update локальным файлом ---
-printf '#!/bin/sh\necho v2\n' > /tmp/fakebin2; chmod +x /tmp/fakebin2
+cat > /tmp/fakebin2 <<'FAKEBIN'
+#!/bin/sh
+case "${1:-}" in
+  --schema-status) echo '{"compatible":true}' ;;
+  --check-db) echo '{"quick_check_ok":true,"schema_supported":true}' ;;
+  *) echo v2 ;;
+esac
+FAKEBIN
+chmod +x /tmp/fakebin2
 /usr/local/bin/awgram-setup update --binary-file /tmp/fakebin2 --yes --no-systemd
 [ "$(sha256sum < /usr/local/bin/awgram)" = "$(sha256sum < /tmp/fakebin2)" ] || fail "update binary content"
 [ -f /usr/local/bin/awgram.bak ] || fail "update backup"
 [ "$(sha256sum < /usr/local/bin/awgram.bak)" = "$(sha256sum < /tmp/fakebin)" ] || fail "backup is previous binary"
+
+# --- сценарий 3b: несовместимая схема блокирует замену бинарника ---
+cat > /tmp/fakebin-bad <<'FAKEBIN'
+#!/bin/sh
+case "${1:-}" in
+  --schema-status) echo '{"compatible":false}'; exit 3 ;;
+  --check-db) exit 2 ;;
+esac
+FAKEBIN
+chmod +x /tmp/fakebin-bad
+before_bad_update="$(sha256sum < /usr/local/bin/awgram)"
+if /usr/local/bin/awgram-setup update --binary-file /tmp/fakebin-bad --yes --no-systemd >/dev/null 2>&1; then
+  fail "schema-incompatible binary must be rejected"
+fi
+[ "$(sha256sum < /usr/local/bin/awgram)" = "$before_bad_update" ] || fail "binary changed after failed preflight"
 
 # --- сценарий 4: config флагами ---
 /usr/local/bin/awgram-setup config --admins 3 --yes --no-systemd
@@ -202,7 +233,15 @@ pick_channel_tag rc <<<"v0.1.0-nightly.1" && fail "pick must fail when nothing m
 # после сценария 7 всё удалено — ставим заново локальным бинарником
 bash /repo/install.sh install --yes --lang en --mode root \
   --token TESTTOKEN --admins 1 --binary-file /tmp/fakebin --no-systemd
-printf '#!/bin/sh\necho rc1\n' > /tmp/fakebin3; chmod +x /tmp/fakebin3
+cat > /tmp/fakebin3 <<'FAKEBIN'
+#!/bin/sh
+case "${1:-}" in
+  --schema-status) echo '{"compatible":true}' ;;
+  --check-db) echo '{"quick_check_ok":true,"schema_supported":true}' ;;
+  *) echo rc1 ;;
+esac
+FAKEBIN
+chmod +x /tmp/fakebin3
 sha256sum < /tmp/fakebin3 | cut -d' ' -f1 > /tmp/fakebin3.hash
 # фейковый GitHub: /releases/latest → v0.6.0 (stable), /releases → rc.1 сверху;
 # бинарники/чек-суммы/install.sh отдаются локально (тот же приём, что fake systemctl)

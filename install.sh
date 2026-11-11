@@ -149,6 +149,10 @@ MSG_RU[err_bad_token]="Токен выглядит некорректно (до�
 MSG_EN[err_bad_token]="Token looks invalid (letters/digits/:/_/- allowed)"
 MSG_RU[err_update_norollback]="Обновление не удалось, откат тоже не запустился — проверьте journalctl -u awgram"
 MSG_EN[err_update_norollback]="Update failed and rollback did not start either — check journalctl -u awgram"
+MSG_RU[err_release_schema]="Новый бинарник несовместим с текущей схемой БД; автоматическая миграция запрещена"
+MSG_EN[err_release_schema]="The new binary is incompatible with the current database schema; automatic migration is forbidden"
+MSG_RU[err_release_db]="DB Doctor обнаружил проблему; обновление отменено до ручной проверки"
+MSG_EN[err_release_db]="DB Doctor found a problem; update cancelled pending manual review"
 MSG_RU[err_path_not_abs]="Путь должен быть абсолютным (начинаться с /): %s"
 MSG_EN[err_path_not_abs]="Path must be absolute (start with /): %s"
 MSG_RU[err_space_path]="В hardened-режиме путь manage-скрипта не может содержать пробелы (ограничение sudoers): %s"
@@ -1140,6 +1144,29 @@ setup_hardened() {
   fi
 }
 
+preflight_staged_binary() { # $1=новый бинарник; только read-only проверки production-БД
+  local staged="$1" compact
+  chmod 700 "$staged" || die err_release_schema
+  if ! AWGRAM_CONFIG="$CFG_FILE" "$staged" --schema-status > "$TMPD/schema-status.json" 2>&1; then
+    cat "$TMPD/schema-status.json" >&2
+    die err_release_schema
+  fi
+  compact="$(tr -d '[:space:]' < "$TMPD/schema-status.json")"
+  case "$compact" in *'"compatible":true'*) ;; *) cat "$TMPD/schema-status.json" >&2; die err_release_schema ;; esac
+
+  if ! AWGRAM_CONFIG="$CFG_FILE" "$staged" --check-db > "$TMPD/db-doctor.json" 2>&1; then
+    cat "$TMPD/db-doctor.json" >&2
+    die err_release_db
+  fi
+  compact="$(tr -d '[:space:]' < "$TMPD/db-doctor.json")"
+  case "$compact" in *'"quick_check_ok":true'*) ;;
+    *) cat "$TMPD/db-doctor.json" >&2; die err_release_db ;;
+  esac
+  case "$compact" in *'"schema_supported":true'*) ;;
+    *) cat "$TMPD/db-doctor.json" >&2; die err_release_db ;;
+  esac
+}
+
 # ---------- заглушки (заменяются задачами 6-8) ----------
 cmd_update() {
   ensure_root; acquire_lock; init_tty; load_setup_conf; choose_language; detect_os; detect_arch
@@ -1166,6 +1193,7 @@ cmd_update() {
   TMPD="$(mktemp -d)"
   staged="$(fetch_binary "$tag")"
   partner_staged="$(fetch_partner_binary "$tag")"
+  preflight_staged_binary "$staged"
   install_binary "$staged"
   install_partner_binary "$partner_staged"
   install_clientctl
