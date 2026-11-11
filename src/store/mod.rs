@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 mod broadcasts;
 mod commerce;
@@ -914,18 +914,98 @@ pub struct Store {
 }
 
 impl Store {
+    /// Returns `(database schema, schema supported by this binary)` without
+    /// creating or changing the database.
+    pub fn schema_status(path: &Path) -> rusqlite::Result<(i64, i64)> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let latest = MIGRATIONS.len() as i64;
+        let current = ensure_supported_schema(&connection, latest)?;
+        Ok((current, latest))
+    }
+
     pub fn open(path: &Path) -> Result<Store, rusqlite::Error> {
-        if let Some(parent) = path.parent() {
-            // В проде каталог создаёт install.sh; здесь — на случай dev-запуска.
-            let _ = std::fs::create_dir_all(parent);
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let latest = MIGRATIONS.len() as i64;
+        let current = ensure_supported_schema(&conn, latest)?;
+        if current != latest {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "schema_version {current} requires explicit migration to {latest}"
+            )));
         }
-        let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        migrate(&conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Единственная точка применения DDL. Обычный запуск вызывает только
+    /// `open()` и никогда не меняет схему.
+    pub fn migrate_path(path: &Path) -> rusqlite::Result<(i64, i64)> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+        }
+        let connection = Connection::open(path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(30))?;
+        let from = ensure_supported_schema(&connection, MIGRATIONS.len() as i64)?;
+        migrate(&connection)?;
+        Ok((from, MIGRATIONS.len() as i64))
+    }
+
+    pub fn backup_before_schema_migration(
+        path: &Path,
+        now: i64,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        if !path.exists() || std::fs::metadata(path).map_or(true, |metadata| metadata.len() == 0) {
+            return Ok(None);
+        }
+        let connection = Connection::open(path).map_err(|error| error.to_string())?;
+        let current = ensure_supported_schema(&connection, MIGRATIONS.len() as i64)
+            .map_err(|error| error.to_string())?;
+        if current == 0 {
+            return Ok(None);
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| "у пути базы нет родительского каталога".to_string())?;
+        let directory = parent.join("backups").join("schema-migrations");
+        std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let mut backup = directory.join(format!("awgram-schema-v{current}-{now}.db"));
+        let mut suffix = 1_u32;
+        while backup.exists() {
+            backup = directory.join(format!("awgram-schema-v{current}-{now}-{suffix}.db"));
+            suffix = suffix.saturating_add(1);
+        }
+        connection
+            .execute("VACUUM INTO ?1", [backup.to_string_lossy().into_owned()])
+            .map_err(|error| error.to_string())?;
+        let verification = (|| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| format!("не удалось ограничить права backup: {error}"))?;
+            }
+            verify_schema_migration_backup(&backup, current)
+        })();
+        if let Err(error) = verification {
+            let _ = std::fs::remove_file(&backup);
+            return Err(error);
+        }
+        Ok(Some(backup))
+    }
+
+    #[cfg(test)]
+    pub fn open_migrating_for_test(path: &Path) -> Store {
+        Store::migrate_path(path).expect("test database migration");
+        Store::open(path).expect("test database open")
     }
 
     /// БД в памяти — для тестов store и соседних модулей.
@@ -960,27 +1040,97 @@ impl Store {
 }
 
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    migrate_batches(conn, MIGRATIONS)
+}
+
+fn verify_schema_migration_backup(path: &Path, expected_version: i64) -> Result<u64, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("файл резервной копии недоступен: {error}"))?;
+    if metadata.len() == 0 {
+        return Err("файл резервной копии пуст".into());
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("резервная копия не открывается как SQLite: {error}"))?;
+    let mut statement = connection
+        .prepare("PRAGMA quick_check")
+        .map_err(|error| format!("проверка SQLite не подготовлена: {error}"))?;
+    let messages = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("проверка SQLite не выполнена: {error}"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("результат SQLite quick_check не прочитан: {error}"))?;
+    if messages.as_slice() != ["ok"] {
+        return Err(format!("SQLite quick_check: {}", messages.join("; ")));
+    }
+    let version = ensure_supported_schema(&connection, MIGRATIONS.len() as i64)
+        .map_err(|error| format!("не удалось прочитать версию backup: {error}"))?;
+    if version != expected_version {
+        return Err(format!(
+            "версия backup изменилась: ожидалась {expected_version}, получена {version}"
+        ));
+    }
+    for table in ["meta", "clients"] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("не удалось проверить таблицу {table}: {error}"))?;
+        if !exists {
+            return Err(format!("в резервной копии отсутствует таблица {table}"));
+        }
+    }
+    Ok(metadata.len())
+}
+
+fn ensure_supported_schema(conn: &Connection, latest: i64) -> rusqlite::Result<i64> {
+    let meta_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
+        [],
+        |row| row.get(0),
     )?;
-    let current: i64 = conn
+    if !meta_exists {
+        return Ok(0);
+    }
+    let stored = conn
         .query_row(
             "SELECT value FROM meta WHERE key='schema_version'",
             [],
-            |r| r.get::<_, String>(0),
+            |row| row.get::<_, String>(0),
         )
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    for (i, batch) in MIGRATIONS.iter().enumerate() {
+        .optional()?;
+    let current = match stored {
+        Some(value) => value.parse::<i64>().map_err(|_| {
+            rusqlite::Error::InvalidParameterName(format!("invalid schema_version value {value:?}"))
+        })?,
+        None => 0,
+    };
+    if current > latest {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "schema_version {current} is newer than supported {latest}"
+        )));
+    }
+    Ok(current)
+}
+
+fn migrate_batches(conn: &Connection, migrations: &[&str]) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    )?;
+    let latest = migrations.len() as i64;
+    let current = ensure_supported_schema(conn, latest)?;
+    for (i, batch) in migrations.iter().enumerate() {
         let version = (i + 1) as i64;
         if version > current {
-            conn.execute_batch(batch)?;
-            conn.execute(
+            let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            transaction.execute_batch(batch)?;
+            transaction.execute(
                 "INSERT INTO meta(key,value) VALUES('schema_version',?1)
                  ON CONFLICT(key) DO UPDATE SET value=?1",
                 [version.to_string()],
             )?;
+            transaction.commit()?;
         }
     }
     Ok(())
@@ -991,17 +1141,118 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_creates_schema_and_version() {
+    fn explicit_migration_creates_schema_and_version() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("sub/awgram.db")).unwrap();
+        let path = dir.path().join("sub/awgram.db");
+        assert!(Store::open(&path).is_err());
+        let store = Store::open_migrating_for_test(&path);
         assert_eq!(store.schema_version(), MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn ordinary_open_refuses_schema_that_needs_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("awgram.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta(key,value) VALUES('schema_version','1');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = Store::open(&path)
+            .err()
+            .expect("old schema must be refused");
+        assert!(error.to_string().contains("requires explicit migration"));
+    }
+
+    #[test]
+    fn schema_status_reports_migration_need_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta(key,value) VALUES('schema_version','1');",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            Store::schema_status(&path).unwrap(),
+            (1, MIGRATIONS.len() as i64)
+        );
+        let connection = Connection::open(&path).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "1");
+    }
+
+    #[test]
+    fn schema_status_does_not_create_missing_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.db");
+        assert!(Store::schema_status(&path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn migration_backup_preserves_old_schema_and_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("awgram.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta(key,value) VALUES('schema_version','1');",
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATIONS[0]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO clients(name,ip,first_seen,last_seen)
+                 VALUES('backup-canary','10.0.0.2',1,1)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let backup = Store::backup_before_schema_migration(&path, 123)
+            .unwrap()
+            .unwrap();
+        assert!(verify_schema_migration_backup(&backup, 1).unwrap() > 0);
+        let backup_connection = Connection::open(&backup).unwrap();
+        let version: String = backup_connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let canary: i64 = backup_connection
+            .query_row(
+                "SELECT COUNT(*) FROM clients WHERE name='backup-canary'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "1");
+        assert_eq!(canary, 1);
     }
 
     #[test]
     fn reopen_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("awgram.db");
-        drop(Store::open(&path).unwrap());
+        drop(Store::open_migrating_for_test(&path));
         let store = Store::open(&path).unwrap();
         assert_eq!(store.schema_version(), MIGRATIONS.len() as i64);
     }
@@ -1010,5 +1261,73 @@ mod tests {
     fn in_memory_store_works() {
         let store = Store::open_in_memory();
         assert_eq!(store.schema_version(), MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn refuses_database_from_newer_application() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("awgram.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta(key,value) VALUES('schema_version','9999');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = Store::open(&path)
+            .err()
+            .expect("newer schema must not be opened for writing");
+        assert!(error.to_string().contains("schema_version 9999"));
+
+        let connection = Connection::open(&path).unwrap();
+        let journal_mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "delete");
+    }
+
+    #[test]
+    fn refuses_malformed_schema_version() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta(key,value) VALUES('schema_version','broken');",
+            )
+            .unwrap();
+
+        let error = migrate(&connection).unwrap_err();
+        assert!(error.to_string().contains("invalid schema_version"));
+    }
+
+    #[test]
+    fn failed_migration_batch_is_fully_rolled_back() {
+        let connection = Connection::open_in_memory().unwrap();
+        let result = migrate_batches(
+            &connection,
+            &["CREATE TABLE migration_probe(id INTEGER PRIMARY KEY);
+               INSERT INTO table_that_does_not_exist(id) VALUES(1);"],
+        );
+        assert!(result.is_err());
+
+        let table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                  WHERE type='table' AND name='migration_probe')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let version_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!table_exists);
+        assert_eq!(version_rows, 0);
     }
 }

@@ -489,7 +489,7 @@ mod tests {
             )
             .unwrap();
         }
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_migrating_for_test(&path);
         assert_eq!(
             store.schema_version(),
             crate::store::MIGRATIONS.len() as i64

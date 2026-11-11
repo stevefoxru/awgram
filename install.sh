@@ -986,6 +986,11 @@ CONTROLLER
   INSTALLED_VERSION="$tag"
   save_setup_conf
   self_install
+  # Только новая пустая установка: создание начальной схемы не изменяет
+  # production-данные. Существующая БД никогда не мигрируется автоматически.
+  if [ ! -e "$STATE_DIR/awgram.db" ]; then
+    AWGRAM_CONFIG="$CFG_FILE" "$BIN_PATH" --migrate-db --confirm-schema-change
+  fi
   start_service || exit 1
   summary
 }
