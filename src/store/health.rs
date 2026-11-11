@@ -291,6 +291,9 @@ mod tests {
         drop(Store::open_migrating_for_test(&path));
         let connection = Connection::open(&path).unwrap();
         connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection
             .execute(
                 "INSERT INTO clients(name,ip,first_seen,last_seen,owner_user_id)
                  VALUES('orphan','10.0.0.2',1,1,999)",

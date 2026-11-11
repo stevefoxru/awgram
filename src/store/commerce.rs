@@ -2195,13 +2195,9 @@ mod tests {
     #[test]
     fn unknown_payment_status_is_not_treated_as_pending() {
         let store = Store::open_in_memory();
+        store.upsert_user(1, Some("alice"), "Alice", None, 1);
         store
             .with_conn(|connection| {
-                connection.execute(
-                    "INSERT INTO users(user_id, username, full_name, created_at, last_seen)
-                     VALUES(1, 'alice', 'Alice', 1, 1)",
-                    [],
-                )?;
                 connection.execute(
                     "INSERT INTO payment_requests(
                         user_id, months, amount_kopecks, method, status, created_at
