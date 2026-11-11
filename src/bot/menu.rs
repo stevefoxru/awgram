@@ -2031,6 +2031,7 @@ pub fn legacy_renew_menu(name: &str, price_kopecks: i64) -> InlineKeyboardMarkup
             &format!("💳 Продлить за {:.2} ₽", price_kopecks as f64 / 100.0),
             &format!("legacy:renew:{name}"),
         )],
+        vec![cb("🧾 Продлить все Legacy-ключи", "legacy:renew:__all__")],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
 }
@@ -2046,6 +2047,16 @@ pub fn legacy_renew_method_menu(name: &str) -> InlineKeyboardMarkup {
             &format!("legacy:renew:method:{name}:balance"),
         )],
         vec![cb("⬅️ Назад", &format!("legacy:renew:{name}"))],
+    ])
+}
+
+pub fn legacy_renew_all_method_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "💳 Оплатить все переводом",
+            "legacy:renew:method:__all__:manual",
+        )],
+        vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
 }
 
