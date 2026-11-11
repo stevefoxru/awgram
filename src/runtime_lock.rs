@@ -65,22 +65,44 @@ fn runtime_directory() -> PathBuf {
 
 #[cfg(unix)]
 fn open_private_lock_file(path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-    match OpenOptions::new()
+    let opened = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .mode(0o600)
-        .open(path)
-    {
-        Ok(file) => Ok(file),
-        // A root installation can leave a 0600 lock file behind before the
-        // service is switched to its hardened user. flock(2) only needs an
-        // open descriptor, so read-only access is sufficient and safe here.
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => File::open(path),
-        Err(error) => Err(error),
+        // The file is in the shared /tmp so root and the hardened service user
+        // must both be able to open it. No token or application data is stored.
+        .mode(0o644)
+        // A privileged manual start must never follow an attacker-controlled
+        // symlink in /tmp.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path);
+    let (file, writable) = match opened {
+        Ok(file) => (file, true),
+        // flock(2) works on a read-only descriptor. This path is expected when
+        // root created the 0644 file before the hardened service starts.
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => (
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)?,
+            false,
+        ),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "lock path is not a single regular file",
+        ));
     }
+    if writable {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(file)
 }
 
 #[cfg(not(unix))]
@@ -119,5 +141,37 @@ mod tests {
         assert_ne!(first.path(), second.path());
         assert!(!first.path().to_string_lossy().contains("secret-token-one"));
         assert!(!second.path().to_string_lossy().contains("secret-token-two"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_file_is_regular_and_readable_by_hardened_user() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let lock = BotInstanceLock::acquire_in(directory.path(), "permission-token").unwrap();
+        let metadata = std::fs::symlink_metadata(lock.path()).unwrap();
+
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_cannot_be_used_as_lock_file() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let token = "symlink-token";
+        let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+        let path = directory
+            .path()
+            .join(format!("awgram-bot-{}.lock", &token_hash[..24]));
+        let target = directory.path().join("target");
+        std::fs::write(&target, b"must not be opened").unwrap();
+        symlink(&target, &path).unwrap();
+
+        assert!(BotInstanceLock::acquire_in(directory.path(), token).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"must not be opened");
     }
 }

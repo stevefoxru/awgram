@@ -96,6 +96,7 @@ dependencies = [
  "hmac",
  "image",
  "lettre",
+ "libc",
  "qrcode",
  "rand",
  "regex",
