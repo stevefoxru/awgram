@@ -24,6 +24,26 @@ fn threshold_days(left: i64) -> Option<i64> {
     }
 }
 
+/// Legacy-тариф оплачивается раз в год, поэтому предупреждаем заметно раньше
+/// обычной помесячной подписки. Возвращается ближайший актуальный порог: после
+/// простоя пользователь получит одно сообщение, а не всю пропущенную серию.
+fn legacy_threshold_days(left: i64) -> Option<i64> {
+    match left {
+        i64::MIN..=0 => Some(0),
+        1..=86_400 => Some(1),
+        86_401..=259_200 => Some(3),
+        259_201..=604_800 => Some(7),
+        604_801..=1_209_600 => Some(14),
+        1_209_601..=2_592_000 => Some(30),
+        2_592_001..=5_184_000 => Some(60),
+        _ => None,
+    }
+}
+
+fn days_left(left: i64) -> i64 {
+    left.max(0).saturating_add(86_399) / 86_400
+}
+
 async fn set_managed_expiry(
     vpn: &Vpn,
     store: &Store,
@@ -114,30 +134,55 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
             }
         }
     }
-    let year = crate::calendar::year_at(now);
-    if now >= crate::calendar::start_of_december(year) && now <= crate::calendar::end_of_year(year)
-    {
-        for (name, user_id) in store.legacy_clients() {
-            if !store.notification_preferences(user_id).0 {
-                continue;
-            }
-            let Some(expires_at) = vpn.client_expiry(&name) else {
-                continue;
-            };
-            if expires_at > crate::calendar::end_of_year(year)
-                || !store.mark_expiry_notification(&name, user_id, expires_at, 31, now)
-            {
-                continue;
-            }
-            let target_year = year + 1;
-            let price =
-                store.legacy_renewal_price_for_user(user_id, store.legacy_renewal_price_kopecks());
-            let sent=bot.send_message(ChatId(user_id),format!("🔧 Напоминание о техническом тарифе\n\nКлюч «{name}» действует до конца этого года. Продление за {:.2} ₽ сохранит доступ до 31.12.{target_year}.", price as f64 / 100.0))
-                .reply_markup(crate::bot::menu::legacy_renew_menu(&name, price)).await;
-            if let Err(error) = sent {
-                store.unmark_expiry_notification(&name, expires_at, 31);
-                tracing::warn!(%error,user_id,client=%name,"не удалось отправить legacy-напоминание");
-            }
+    let legacy_clients = store.legacy_clients();
+    let legacy_names = legacy_clients
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for (name, user_id) in &legacy_clients {
+        if !store.notification_preferences(*user_id).0 || !store.client_ever_used(name) {
+            continue;
+        }
+        let Some(expires_at) = vpn.client_expiry(name) else {
+            continue;
+        };
+        let left = expires_at.saturating_sub(now);
+        let Some(threshold) = legacy_threshold_days(left) else {
+            continue;
+        };
+        if !store.mark_expiry_notification(name, *user_id, expires_at, threshold, now) {
+            continue;
+        }
+        let target = crate::calendar::legacy_renewal_target(now, Some(expires_at));
+        let price =
+            store.legacy_renewal_price_for_user(*user_id, store.legacy_renewal_price_kopecks());
+        let timing = if threshold == 0 {
+            "срок уже истёк".to_string()
+        } else {
+            format!("осталось {} дн.", days_left(left))
+        };
+        let text = format!(
+            "🔔 Пора продлить Legacy-ключ\n\n🔑 {name}\n📅 Действует до: {} ({timing})\n💰 Продление до {}: {:.2} ₽\n\nОформите продление заранее, чтобы подключение не остановилось в конце срока.",
+            crate::calendar::format_date(expires_at),
+            crate::calendar::format_date(target),
+            price as f64 / 100.0
+        );
+        let sent = bot
+            .send_message(ChatId(*user_id), text.clone())
+            .reply_markup(crate::bot::menu::legacy_renew_menu(name, price))
+            .await;
+        if let Err(error) = sent {
+            store.unmark_expiry_notification(name, expires_at, threshold);
+            tracing::warn!(%error,user_id,client=%name,"не удалось отправить legacy-напоминание");
+        } else {
+            store.add_portal_notification(
+                *user_id,
+                "renewal",
+                "Пора продлить Legacy-ключ",
+                &text,
+                Some("/lk/keys"),
+                now,
+            );
         }
     }
     for user_id in store.all_user_ids() {
@@ -145,6 +190,9 @@ pub async fn tick(bot: &Bot, vpn: &Vpn, store: &Store, now: i64) {
             continue;
         }
         for name in store.user_client_names(user_id) {
+            if legacy_names.contains(name.as_str()) {
+                continue;
+            }
             let Some(expires_at) = vpn.client_expiry(&name) else {
                 continue;
             };
@@ -184,7 +232,7 @@ pub async fn run(bot: Bot, vpn: Arc<Vpn>, store: Arc<Store>) {
 
 #[cfg(test)]
 mod tests {
-    use super::threshold_days;
+    use super::{days_left, legacy_threshold_days, threshold_days};
 
     #[test]
     fn selects_current_expiry_bucket() {
@@ -193,5 +241,18 @@ mod tests {
         assert_eq!(threshold_days(2 * 86_400), Some(3));
         assert_eq!(threshold_days(6 * 86_400), Some(7));
         assert_eq!(threshold_days(8 * 86_400), None);
+    }
+
+    #[test]
+    fn selects_early_legacy_expiry_bucket_without_duplicate_backlog() {
+        assert_eq!(legacy_threshold_days(61 * 86_400), None);
+        assert_eq!(legacy_threshold_days(50 * 86_400), Some(60));
+        assert_eq!(legacy_threshold_days(30 * 86_400), Some(30));
+        assert_eq!(legacy_threshold_days(14 * 86_400), Some(14));
+        assert_eq!(legacy_threshold_days(7 * 86_400), Some(7));
+        assert_eq!(legacy_threshold_days(3 * 86_400), Some(3));
+        assert_eq!(legacy_threshold_days(86_400), Some(1));
+        assert_eq!(legacy_threshold_days(0), Some(0));
+        assert_eq!(days_left(49 * 86_400 + 1), 50);
     }
 }
