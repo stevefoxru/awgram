@@ -35,6 +35,7 @@ pub struct PortalOverview {
     pub balance_kopecks: i64,
     pub keys: Vec<PortalKey>,
     pub payments: Vec<PortalPayment>,
+    pub payment_instructions: String,
     pub balance_history: Vec<PortalBalanceEntry>,
     pub tickets: Vec<PortalTicket>,
     pub expiry_notifications: bool,
@@ -71,6 +72,9 @@ pub struct PortalPayment {
     pub amount_kopecks: i64,
     pub method: String,
     pub status: String,
+    pub proof_submitted: bool,
+    pub months: i64,
+    pub client_name: Option<String>,
     pub created_at: i64,
 }
 
@@ -841,7 +845,7 @@ impl Store {
         let payments = self
             .with_conn(|connection| {
                 let mut statement = connection.prepare(
-                    "SELECT id,amount_kopecks,method,status,created_at FROM payment_requests
+                    "SELECT id,amount_kopecks,method,status,proof IS NOT NULL,months,client_name,created_at FROM payment_requests
                  WHERE user_id=?1 ORDER BY created_at DESC LIMIT 20",
                 )?;
                 let rows = statement.query_map([user_id], |row| {
@@ -850,7 +854,10 @@ impl Store {
                         amount_kopecks: row.get(1)?,
                         method: row.get(2)?,
                         status: row.get(3)?,
-                        created_at: row.get(4)?,
+                        proof_submitted: row.get(4)?,
+                        months: row.get(5)?,
+                        client_name: row.get(6)?,
+                        created_at: row.get(7)?,
                     })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -892,6 +899,7 @@ impl Store {
             balance_kopecks: self.balance_kopecks(user_id),
             keys,
             payments,
+            payment_instructions: self.payment_instructions(),
             balance_history,
             tickets,
             expiry_notifications,
@@ -928,6 +936,38 @@ mod tests {
         assert!(overview.expiry_notifications);
         assert!(overview.maintenance_notifications);
         assert_eq!(overview.discount_percent, 0);
+    }
+
+    #[test]
+    fn payment_overview_keeps_recovery_context_for_checkout() {
+        let store = Store::open_in_memory();
+        store.upsert_user(7, Some("alice"), "Alice", None, 100);
+        store.set_payment_instructions("Переведите по реквизитам");
+        let payment_id = store
+            .create_renewal_request(7, "alice-phone", 3, 30_000, 101)
+            .unwrap();
+
+        let overview = store.portal_overview(7, 102).unwrap();
+        let payment = overview
+            .payments
+            .iter()
+            .find(|payment| payment.id == payment_id)
+            .unwrap();
+        assert_eq!(payment.months, 3);
+        assert_eq!(payment.client_name.as_deref(), Some("alice-phone"));
+        assert!(!payment.proof_submitted);
+        assert_eq!(overview.payment_instructions, "Переведите по реквизитам");
+
+        assert!(store.set_payment_proof(payment_id, 7, "operation 123"));
+        let overview = store.portal_overview(7, 103).unwrap();
+        assert!(
+            overview
+                .payments
+                .iter()
+                .find(|payment| payment.id == payment_id)
+                .unwrap()
+                .proof_submitted
+        );
     }
 
     #[test]

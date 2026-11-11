@@ -106,6 +106,12 @@ struct Raw {
     routing_control_command: Option<PathBuf>,
 }
 
+#[derive(serde::Deserialize)]
+struct DatabasePathConfig {
+    #[serde(default = "default_db_path")]
+    db_path: PathBuf,
+}
+
 fn default_smtp_port() -> u16 {
     587
 }
@@ -123,6 +129,15 @@ fn default_db_path() -> PathBuf {
 }
 
 impl Config {
+    /// Reads only the database location, without requiring bot secrets or
+    /// validating runtime dependencies. Used by release preflight commands.
+    pub fn database_path(path: &Path) -> Result<PathBuf, ConfigError> {
+        let text = std::fs::read_to_string(path)?;
+        let config: DatabasePathConfig =
+            toml::from_str(&text).map_err(|error| ConfigError::Parse(error.to_string()))?;
+        Ok(config.db_path)
+    }
+
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path)?;
         let raw: Raw = toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
@@ -357,6 +372,16 @@ mod tests {
         );
         let cfg = Config::load(&cfg_path).unwrap();
         assert_eq!(cfg.db_path, PathBuf::from("/custom/awgram.db"));
+    }
+
+    #[test]
+    fn database_path_does_not_require_runtime_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = write(&dir, "config.toml", "db_path = \"/custom/preflight.db\"\n");
+        assert_eq!(
+            Config::database_path(&cfg_path).unwrap(),
+            PathBuf::from("/custom/preflight.db")
+        );
     }
 
     #[test]

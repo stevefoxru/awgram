@@ -34,6 +34,7 @@ pub struct UserRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentStatus {
     Pending,
+    Processing,
     Approved,
     Rejected,
 }
@@ -42,15 +43,18 @@ impl PaymentStatus {
     fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Processing => "processing",
             Self::Approved => "approved",
             Self::Rejected => "rejected",
         }
     }
-    fn parse(value: &str) -> Self {
+    fn parse(value: &str) -> Option<Self> {
         match value {
-            "approved" => Self::Approved,
-            "rejected" => Self::Rejected,
-            _ => Self::Pending,
+            "pending" => Some(Self::Pending),
+            "processing" => Some(Self::Processing),
+            "approved" => Some(Self::Approved),
+            "rejected" => Some(Self::Rejected),
+            _ => None,
         }
     }
 }
@@ -1977,18 +1981,50 @@ impl Store {
         client_name: Option<&str>,
         now: i64,
     ) -> bool {
-        if status == PaymentStatus::Pending {
+        if matches!(status, PaymentStatus::Pending | PaymentStatus::Processing) {
             return false;
         }
         self.with_conn(|c| {
             c.execute(
                 "UPDATE payment_requests
                  SET status=?2,decided_at=?3,decided_by=?4,client_name=?5
-                 WHERE id=?1 AND status IN ('pending','processing')",
+                 WHERE id=?1 AND status IN ('pending','processing')
+                   AND NOT (method='topup' AND ?2='approved')",
                 rusqlite::params![id, status.as_str(), now, admin_id, client_name],
             )
         })
         .map(|n| n == 1)
+        .unwrap_or(false)
+    }
+
+    /// Атомарно одобряет пополнение и создаёт единственную проводку баланса.
+    /// Если проводку записать нельзя, статус заявки также остаётся pending.
+    pub fn approve_topup(&self, id: i64, admin_id: i64, details: Option<&str>, now: i64) -> bool {
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE payment_requests
+                 SET status='approved',decided_at=?2,decided_by=?3
+                 WHERE id=?1 AND method='topup' AND status='pending'
+                   AND amount_kopecks>0",
+                rusqlite::params![id, now, admin_id],
+            )?;
+            if changed != 1 {
+                return Ok(false);
+            }
+            let inserted = transaction.execute(
+                "INSERT INTO balance_ledger
+                 (user_id,amount_kopecks,kind,reference,details,created_at)
+                 SELECT user_id,amount_kopecks,'topup',?2,?3,?4
+                 FROM payment_requests WHERE id=?1 AND status='approved'",
+                rusqlite::params![id, format!("payment:{id}"), details, now],
+            )?;
+            if inserted != 1 {
+                return Ok(false);
+            }
+            transaction.commit()?;
+            Ok(true)
+        })
         .unwrap_or(false)
     }
 
@@ -2127,13 +2163,24 @@ fn legacy_request_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LegacyRequ
 
 fn payment_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentRequest> {
     let status: String = r.get(5)?;
+    let status = PaymentStatus::parse(&status).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown payment status {status:?}"),
+            )
+            .into(),
+        )
+    })?;
     Ok(PaymentRequest {
         id: r.get(0)?,
         user_id: r.get(1)?,
         months: r.get(2)?,
         amount_kopecks: r.get(3)?,
         method: r.get(4)?,
-        status: PaymentStatus::parse(&status),
+        status,
         proof: r.get(6)?,
         client_name: r.get(7)?,
         created_at: r.get(8)?,
@@ -2144,6 +2191,55 @@ fn payment_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_payment_status_is_not_treated_as_pending() {
+        let store = Store::open_in_memory();
+        store.upsert_user(1, Some("alice"), "Alice", None, 1);
+        store
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO payment_requests(
+                        user_id, months, amount_kopecks, method, status, created_at
+                     ) VALUES(1, 1, 10000, 'balance', 'unexpected', 1)",
+                    [],
+                )?;
+                let error = connection
+                    .query_row(
+                        "SELECT id,user_id,months,amount_kopecks,method,status,proof,
+                                client_name,created_at,server_id
+                         FROM payment_requests LIMIT 1",
+                        [],
+                        payment_from_row,
+                    )
+                    .unwrap_err();
+                assert!(error.to_string().contains("unknown payment status"));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn processing_payment_status_is_preserved() {
+        let store = Store::open_in_memory();
+        store.upsert_user(1, Some("alice"), "Alice", None, 1);
+        let id = store
+            .create_payment_request(1, 1, 10_000, "manual", 2)
+            .unwrap();
+        store
+            .with_conn(|connection| {
+                connection.execute(
+                    "UPDATE payment_requests SET status='processing' WHERE id=?1",
+                    [id],
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.payment_request(id).unwrap().status,
+            PaymentStatus::Processing
+        );
+    }
 
     #[test]
     fn user_referrer_is_sticky_and_balance_is_ledger_sum() {
@@ -2188,6 +2284,54 @@ mod tests {
             s.payment_request(id).unwrap().status,
             PaymentStatus::Approved
         );
+    }
+
+    #[test]
+    fn topup_approval_and_ledger_entry_are_atomic_and_one_shot() {
+        let s = Store::open_in_memory();
+        s.upsert_user(1, Some("alice"), "Alice", None, 10);
+        let id = s.create_payment_request(1, 0, 25_000, "topup", 11).unwrap();
+
+        assert!(!s.decide_payment(id, PaymentStatus::Approved, 99, None, 12));
+        assert!(s.approve_topup(id, 99, Some("approved by test"), 12));
+        assert!(!s.approve_topup(id, 99, Some("duplicate"), 13));
+        assert_eq!(
+            s.payment_request(id).unwrap().status,
+            PaymentStatus::Approved
+        );
+        assert_eq!(s.balance_kopecks(1), 25_000);
+        let matching_entries: i64 = s
+            .with_conn(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM balance_ledger WHERE reference=?1",
+                    [format!("payment:{id}")],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(matching_entries, 1);
+    }
+
+    #[test]
+    fn topup_approval_rolls_back_when_ledger_insert_fails() {
+        let s = Store::open_in_memory();
+        s.upsert_user(1, Some("alice"), "Alice", None, 10);
+        let id = s.create_payment_request(1, 0, 25_000, "topup", 11).unwrap();
+        assert!(s.add_ledger_entry(
+            1,
+            1,
+            "adjustment",
+            &format!("payment:{id}"),
+            Some("conflicting reference"),
+            11,
+        ));
+
+        assert!(!s.approve_topup(id, 99, None, 12));
+        assert_eq!(
+            s.payment_request(id).unwrap().status,
+            PaymentStatus::Pending
+        );
+        assert_eq!(s.balance_kopecks(1), 1);
     }
 
     #[test]

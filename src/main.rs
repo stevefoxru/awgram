@@ -9,6 +9,13 @@ use awgram::config::Config;
 use awgram::store::Store;
 use awgram::vpn::Vpn;
 
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -22,6 +29,94 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/etc/awgram/config.toml"));
 
+    let arguments = std::env::args().collect::<Vec<_>>();
+    let database_path = || match Config::database_path(&cfg_path) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!(%error, path = %cfg_path.display(), "не удалось определить путь БД");
+            std::process::exit(1);
+        }
+    };
+    if arguments
+        .iter()
+        .any(|argument| argument == "--database-path")
+    {
+        println!("{}", database_path().display());
+        return;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--schema-status")
+    {
+        let db_path = database_path();
+        match Store::schema_status(&db_path) {
+            Ok((current, supported)) => {
+                let compatible = current == supported;
+                println!(
+                    "{{\"schema_version\":{current},\"supported_schema_version\":{supported},\"compatible\":{compatible}}}"
+                );
+                std::process::exit(if compatible { 0 } else { 3 });
+            }
+            Err(error) => {
+                tracing::error!(%error, path = %db_path.display(), "не удалось проверить совместимость схемы БД");
+                std::process::exit(1);
+            }
+        }
+    }
+    if arguments.iter().any(|argument| argument == "--check-db") {
+        let db_path = database_path();
+        match awgram::store::audit_database(&db_path) {
+            Ok(report) => {
+                let healthy = report.is_healthy();
+                match serde_json::to_string_pretty(&report) {
+                    Ok(json) => println!("{json}"),
+                    Err(error) => {
+                        tracing::error!(%error, "не удалось сериализовать отчёт проверки БД");
+                        std::process::exit(1);
+                    }
+                }
+                std::process::exit(if healthy { 0 } else { 2 });
+            }
+            Err(error) => {
+                tracing::error!(%error, path = %db_path.display(), "проверка БД не выполнена");
+                std::process::exit(1);
+            }
+        }
+    }
+    if arguments.iter().any(|argument| argument == "--migrate-db") {
+        if !arguments
+            .iter()
+            .any(|argument| argument == "--confirm-schema-change")
+        {
+            tracing::error!("миграция не запущена: добавьте явный флаг --confirm-schema-change");
+            std::process::exit(64);
+        }
+        let db_path = database_path();
+        let backup = match Store::backup_before_schema_migration(&db_path, now_epoch()) {
+            Ok(backup) => backup,
+            Err(error) => {
+                tracing::error!(%error, "не удалось создать проверенную копию перед миграцией");
+                std::process::exit(1);
+            }
+        };
+        match Store::migrate_path(&db_path) {
+            Ok((from, to)) => {
+                println!(
+                    "schema migration complete: {from} -> {to}; backup={}",
+                    backup
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "not-required-new-database".into())
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::error!(%error, path = %db_path.display(), "миграция БД не выполнена");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cfg = match Config::load(&cfg_path) {
         Ok(c) => Arc::new(c),
         Err(e) => {
@@ -30,6 +125,17 @@ async fn main() {
         }
     };
     tracing::info!(admins = cfg.admin_ids.len(), "конфиг загружен");
+
+    let _bot_instance_lock = match awgram::runtime_lock::BotInstanceLock::acquire(&cfg.bot_token) {
+        Ok(lock) => {
+            tracing::info!(path = %lock.path().display(), "блокировка основного бота получена");
+            lock
+        }
+        Err(error) => {
+            tracing::error!(%error, "основной бот не запущен");
+            std::process::exit(73);
+        }
+    };
 
     let bot = Bot::new(&cfg.bot_token);
     let vpn = Arc::new(Vpn::from_config(&cfg));

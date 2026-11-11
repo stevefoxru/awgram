@@ -5,6 +5,7 @@ use teloxide::{dispatching::dialogue::InMemStorage, prelude::*};
 use crate::{
     bot::{handlers, State},
     config::Config,
+    runtime_lock::BotInstanceLock,
     store::Store,
     vpn::Vpn,
 };
@@ -33,6 +34,14 @@ pub async fn supervise(cfg: Arc<Config>, vpn: Arc<Vpn>, store: Arc<Store>) {
             if let Some((token, revision)) = desired {
                 match token {
                     token if !token.trim().is_empty() => {
+                        let instance_lock = match BotInstanceLock::acquire(token.trim()) {
+                            Ok(lock) => lock,
+                            Err(error) => {
+                                tracing::error!(%error, "зеркальный бот не запущен");
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                continue;
+                            }
+                        };
                         let bot = Bot::new(token.trim().to_owned());
                         let mirror_cfg = cfg.clone();
                         let mirror_vpn = vpn.clone();
@@ -40,6 +49,7 @@ pub async fn supervise(cfg: Arc<Config>, vpn: Arc<Vpn>, store: Arc<Store>) {
                         running = Some((
                             revision,
                             tokio::spawn(async move {
+                                let _instance_lock = instance_lock;
                                 Dispatcher::builder(bot, handlers::schema())
                                     .dependencies(dptree::deps![
                                         InMemStorage::<State>::new(),

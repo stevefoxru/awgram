@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     config::Config,
+    runtime_lock::BotInstanceLock,
     store::{Partner, Store},
 };
 
@@ -80,6 +81,13 @@ fn epoch_now() -> i64 {
 }
 
 async fn run_bot(partner: Partner, token: String, db_path: PathBuf) {
+    let _instance_lock = match BotInstanceLock::acquire(&token) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::error!(partner_id = partner.id, %error, "partner bot not started");
+            return;
+        }
+    };
     let bot = Bot::new(token);
     let partner_id = partner.id;
     let partner = Arc::new(partner);

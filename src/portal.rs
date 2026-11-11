@@ -1344,6 +1344,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
             "status":item.status,"category":item.category,"priority":item.priority,"updated_at":item.updated_at}))
         .collect::<Vec<_>>();
     Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
         "users": {"total": users.total, "new_today": users.new_today, "new_30d": users.new_30d, "paying": users.paying, "blocked": users.blocked},
         "keys": {"total": clients.len(), "online": online},
         "servers": servers,
@@ -1648,22 +1649,9 @@ async fn admin_payment_action(
     let now = now_epoch();
     let result = match input.action.as_str() {
         "approve" if payment.method == "topup" => {
-            let decided = state.store.decide_payment(
-                id,
-                crate::store::PaymentStatus::Approved,
-                admin_id,
-                None,
-                now,
-            );
-            decided
-                && state.store.add_ledger_entry(
-                    payment.user_id,
-                    payment.amount_kopecks,
-                    "topup",
-                    &format!("payment:{id}"),
-                    Some("Одобрено в веб-админке"),
-                    now,
-                )
+            state
+                .store
+                .approve_topup(id, admin_id, Some("Одобрено в веб-админке"), now)
         }
         "approve" if payment.method == "legacy_manual" => {
             let Some(name) = payment.client_name.as_deref() else {
@@ -2058,6 +2046,26 @@ async fn key_traffic(
     .into_response()
 }
 
+fn artifact_download_name(client_name: &str, extension: &str) -> String {
+    let stem = client_name
+        .chars()
+        .take(64)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let stem = stem.trim_matches('_');
+    format!(
+        "{}.{}",
+        if stem.is_empty() { "vpn-key" } else { stem },
+        extension
+    )
+}
+
 async fn download_config(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -2074,10 +2082,16 @@ async fn download_config(
     {
         Ok(bytes) => (
             [
-                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (
+                    header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8".to_string(),
+                ),
                 (
                     header::CONTENT_DISPOSITION,
-                    "attachment; filename=awgram.conf",
+                    format!(
+                        "attachment; filename=\"{}\"",
+                        artifact_download_name(&name, "conf")
+                    ),
                 ),
             ],
             bytes,
@@ -2116,10 +2130,13 @@ async fn download_qr(
     match bytes {
         Some(bytes) => (
             [
-                (header::CONTENT_TYPE, "image/png"),
+                (header::CONTENT_TYPE, "image/png".to_string()),
                 (
                     header::CONTENT_DISPOSITION,
-                    "inline; filename=awgram-qr.png",
+                    format!(
+                        "inline; filename=\"{}\"",
+                        artifact_download_name(&name, "png")
+                    ),
                 ),
             ],
             bytes,
@@ -2605,7 +2622,10 @@ fetch('/api/me').then(async r=>{if(!r.ok)throw 0;return r.json()}).then(d=>{
 
 #[cfg(test)]
 mod tests {
-    use super::{display_brand, purchase_admin_notification, same_site_request, valid_email};
+    use super::{
+        artifact_download_name, display_brand, purchase_admin_notification, same_site_request,
+        valid_email, APP_JS,
+    };
     use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -2639,5 +2659,23 @@ mod tests {
             purchase_admin_notification(42, 1001, 6, 7, 59_900),
             "🛒 Новая веб-заявка на покупку #42\nПользователь: 1001\nСрок: 6 мес.\nСервер: #7\nСумма: 599.00 ₽"
         );
+    }
+
+    #[test]
+    fn artifact_download_names_are_distinct_and_header_safe() {
+        assert_eq!(
+            artifact_download_name("alice-phone", "conf"),
+            "alice-phone.conf"
+        );
+        assert_eq!(artifact_download_name("../\r\nkey", "png"), "key.png");
+        assert_eq!(artifact_download_name("телефон", "conf"), "vpn-key.conf");
+    }
+
+    #[test]
+    fn checkout_ui_keeps_payment_proof_recovery_path() {
+        assert!(APP_JS.contains("paymentProofId"));
+        assert!(APP_JS.contains("payment-proof-open"));
+        assert!(APP_JS.contains("/api/payments/${sendProof.dataset.id}/proof"));
+        assert!(APP_JS.contains("Перед оплатой подтвердите почту"));
     }
 }

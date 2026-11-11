@@ -404,7 +404,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("awgram.db");
         {
-            let s = Store::open(&path).unwrap();
+            let s = Store::open_migrating_for_test(&path);
             s.set_lang(42, Lang::En);
             s.set_psk_default(true);
         }
@@ -418,7 +418,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("awgram.db");
         {
-            let s = Store::open(&path).unwrap();
+            let s = Store::open_migrating_for_test(&path);
             assert!(!s.name_slug()); // дефолт — выключено
             s.set_name_slug(true);
             assert!(s.name_slug());
@@ -451,7 +451,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("awgram.db");
         {
-            let s = Store::open(&path).unwrap();
+            let s = Store::open_migrating_for_test(&path);
             s.set_deliver_conf(false);
             s.set_deliver_qr(true);
             s.set_deliver_link(false);
@@ -484,7 +484,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("awgram.db");
         {
-            let s = Store::open(&path).unwrap();
+            let s = Store::open_migrating_for_test(&path);
             s.set_client_filter(1, ClientFilter::Offline);
         }
         let s2 = Store::open(&path).unwrap();

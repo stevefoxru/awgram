@@ -11,6 +11,9 @@ Environment=AWGRAM_CONFIG=/etc/awgram/config.toml
 EnvironmentFile=-/etc/awgram/env
 Restart=on-failure
 RestartSec=5
+RestartPreventExitStatus=73
+# Блокировка экземпляра общая с ручным запуском и хранится в системном /tmp.
+PrivateTmp=false
 NoNewPrivileges=false
 
 [Install]

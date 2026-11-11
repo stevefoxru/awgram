@@ -10,6 +10,7 @@ pub mod operations;
 pub mod partner_runtime;
 pub mod portal;
 pub mod routing;
+pub mod runtime_lock;
 pub mod store;
 pub mod subscriptions;
 pub mod vpn;
