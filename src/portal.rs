@@ -1648,22 +1648,9 @@ async fn admin_payment_action(
     let now = now_epoch();
     let result = match input.action.as_str() {
         "approve" if payment.method == "topup" => {
-            let decided = state.store.decide_payment(
-                id,
-                crate::store::PaymentStatus::Approved,
-                admin_id,
-                None,
-                now,
-            );
-            decided
-                && state.store.add_ledger_entry(
-                    payment.user_id,
-                    payment.amount_kopecks,
-                    "topup",
-                    &format!("payment:{id}"),
-                    Some("Одобрено в веб-админке"),
-                    now,
-                )
+            state
+                .store
+                .approve_topup(id, admin_id, Some("Одобрено в веб-админке"), now)
         }
         "approve" if payment.method == "legacy_manual" => {
             let Some(name) = payment.client_name.as_deref() else {

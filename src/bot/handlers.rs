@@ -10570,6 +10570,7 @@ async fn callback_handler(
                     .map(|p| {
                         let status = match p.status {
                             crate::store::PaymentStatus::Pending => "ожидает проверки",
+                            crate::store::PaymentStatus::Processing => "обрабатывается",
                             crate::store::PaymentStatus::Approved => "подтверждён",
                             crate::store::PaymentStatus::Rejected => "отклонён",
                         };
@@ -11587,21 +11588,7 @@ async fn callback_handler(
                 return Ok(());
             }
             if req.method == "topup" {
-                if settings.decide_payment(
-                    id,
-                    crate::store::PaymentStatus::Approved,
-                    uid,
-                    None,
-                    now_epoch(),
-                ) {
-                    let _ = settings.add_ledger_entry(
-                        req.user_id,
-                        req.amount_kopecks,
-                        "topup",
-                        &format!("payment:{id}"),
-                        None,
-                        now_epoch(),
-                    );
+                if settings.approve_topup(id, uid, None, now_epoch()) {
                     let _ = bot
                         .send_message(
                             ChatId(req.user_id),

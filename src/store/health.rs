@@ -192,7 +192,7 @@ pub fn audit_database(path: &Path) -> rusqlite::Result<DatabaseAudit> {
         &["payment_requests"],
         &[],
         "SELECT COUNT(*) FROM payment_requests
-         WHERE status NOT IN ('pending','approved','rejected')",
+         WHERE status NOT IN ('pending','processing','approved','rejected')",
     )?;
     count_if_supported(
         &connection,
@@ -227,6 +227,7 @@ pub fn audit_database(path: &Path) -> rusqlite::Result<DatabaseAudit> {
     let mut operation_counts = BTreeMap::new();
     for (name, table, status) in [
         ("payments_pending", "payment_requests", "pending"),
+        ("payments_processing", "payment_requests", "processing"),
         (
             "legacy_requests_processing",
             "legacy_requests",
