@@ -201,6 +201,8 @@ curl -fsSL https://github.com/stevefoxru/awgram/releases/download/vX.Y.Z-rc.N/in
 Процедура подготовки major-релиза, production preflight и отката описана в
 [docs/release-zpnet-2.md](docs/release-zpnet-2.md). Она запрещает неявные
 миграции БД и отделяет dry-run сборку от подтверждённого production deploy.
+Текущий Go/No-Go статус, матрица рисков и независимые задачи до RC находятся в
+[docs/zpnet-2-rc-audit.md](docs/zpnet-2-rc-audit.md).
 
 `awgram` — один статический бинарник (Rust, `teloxide`, long polling, без
 webhook), который живёт на том же VPS, что и VPN. Основные операции он
