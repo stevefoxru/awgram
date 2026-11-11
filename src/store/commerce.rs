@@ -951,17 +951,11 @@ impl Store {
         .flatten()
     }
 
-    pub fn legacy_renewal_price_for_user(&self, user_id: i64, base: i64) -> i64 {
-        if !self.legacy_discount_enabled(user_id) {
-            return base;
-        }
-        let count = self.legacy_usage_for_user(user_id).1;
-        let (six_to_nine, ten_plus) = self.legacy_discount_prices_kopecks();
-        match count {
-            10.. => ten_plus,
-            6..=9 => six_to_nine,
-            _ => base,
-        }
+    pub fn legacy_renewal_price_for_user(&self, _user_id: i64, base: i64) -> i64 {
+        // Legacy renewal has one public price for every customer.  Keep the
+        // historical discount table readable for compatibility, but never use
+        // it when calculating a new charge.
+        base
     }
 
     pub fn legacy_discount_enabled(&self, user_id: i64) -> bool {
@@ -2526,6 +2520,7 @@ mod tests {
         assert_eq!(s.legacy_renewal_price_for_user(7, 90_000), 90_000);
         assert!(s.set_legacy_discount_enabled(7, true, 1, 20));
         assert!(s.legacy_discount_enabled(7));
+        assert_eq!(s.legacy_renewal_price_for_user(7, 90_000), 90_000);
         assert!(s.set_legacy_discount_enabled(7, false, 1, 21));
         assert!(!s.legacy_discount_enabled(7));
     }

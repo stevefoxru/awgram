@@ -1352,24 +1352,9 @@ pub fn admin_user_menu(user_id: i64, blocked: bool) -> InlineKeyboardMarkup {
 pub fn admin_user_menu_with_legacy(
     user_id: i64,
     blocked: bool,
-    legacy_discount: bool,
+    _legacy_discount: bool,
 ) -> InlineKeyboardMarkup {
-    let mut menu = admin_user_menu(user_id, blocked);
-    menu.inline_keyboard.insert(
-        3,
-        vec![cb(
-            if legacy_discount {
-                "♻️ Legacy-скидка: включена"
-            } else {
-                "♻️ Legacy-скидка: выключена"
-            },
-            &format!(
-                "admin:userlegacy:{user_id}:{}",
-                if legacy_discount { "off" } else { "on" }
-            ),
-        )],
-    );
-    menu
+    admin_user_menu(user_id, blocked)
 }
 
 pub fn admin_user_keys_menu(user_id: i64, names: &[String]) -> InlineKeyboardMarkup {
@@ -2067,6 +2052,16 @@ pub fn legacy_renew_all_method_menu() -> InlineKeyboardMarkup {
         vec![cb(
             "💳 Оплатить все переводом",
             "legacy:renew:method:__all__:manual",
+        )],
+        vec![cb("⬅️ Мои ключи", "mykeys")],
+    ])
+}
+
+pub fn legacy_unused_confirm_menu(name: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![cb(
+            "✅ Да, продлить этот ключ",
+            &format!("legacy:renew:method:{name}:confirm"),
         )],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])

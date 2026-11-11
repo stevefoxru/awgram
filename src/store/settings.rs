@@ -346,6 +346,14 @@ impl Store {
         self.set_json("legacy_discount_10_plus_kopecks", &ten_plus);
         true
     }
+    pub fn set_legacy_base_prices_kopecks(&self, early_base: i64, regular_base: i64) -> bool {
+        if early_base <= 0 || regular_base <= 0 {
+            return false;
+        }
+        self.set_json("legacy_renewal_price_kopecks", &early_base);
+        self.set_json("legacy_renewal_regular_price_kopecks", &regular_base);
+        true
+    }
     /// Фильтр списка клиентов — персональный (групповой админ не меняет вид
     /// владельцу). Фолбэк на старый глобальный ключ: туда писали версии до
     /// per-user фильтра и миграция из legacy state.json.
@@ -641,6 +649,15 @@ mod tests {
             store.legacy_renewal_price_at(crate::calendar::LEGACY_PRICE_CHANGE_AT),
             160_000
         );
+    }
+
+    #[test]
+    fn legacy_base_prices_are_the_only_active_tiers() {
+        let store = Store::open_in_memory();
+        assert!(store.set_legacy_base_prices_kopecks(100_000, 150_000));
+        assert_eq!(store.legacy_renewal_price_kopecks(), 100_000);
+        assert_eq!(store.legacy_renewal_regular_price_kopecks(), 150_000);
+        assert!(!store.set_legacy_base_prices_kopecks(0, 150_000));
     }
 
     #[test]
