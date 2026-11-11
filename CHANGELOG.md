@@ -28,6 +28,8 @@
 - Single-instance lock безопасно работает после переключения с root на
   hardened-пользователя и не следует подменённым ссылкам в `/tmp`.
 - Добавлен итоговый review-манифест с точным составом будущего RC-коммита.
+- Обновлены bundled SQLite, Tokio и Rustls до версий с исправлениями актуальных
+  security advisories; в license allowlist добавлена OSI-approved `0BSD`.
 
 ## [1.98.0] - 2026-11-06
 
