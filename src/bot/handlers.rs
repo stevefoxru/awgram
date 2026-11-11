@@ -3889,7 +3889,7 @@ fn broadcast_audience_label(audience: &str, settings: &Store) -> String {
         "active" => "с активными ключами".into(),
         "expiring" => "истекают за 7 дней".into(),
         "nokeys" => "без ключей".into(),
-        "legacy" => "владельцы актуальных использовавшихся Legacy-ключей".into(),
+        "legacy" => "владельцы актуальных Legacy-ключей, включая неиспользованные".into(),
         _ => audience
             .strip_prefix("server:")
             .and_then(|value| value.parse::<i64>().ok())
@@ -3919,7 +3919,6 @@ fn broadcast_recipients(audience: &str, settings: &Store, vpn: &Vpn, now: i64) -
                 "nokeys" => keys.is_empty(),
                 "legacy" => keys.iter().any(|name| {
                     settings.is_legacy_client(name, *user_id)
-                        && settings.client_ever_used(name)
                         && !vpn.client_disabled(name)
                         && vpn.client_expiry(name).is_none_or(|expiry| expiry > now)
                 }),
@@ -9787,12 +9786,9 @@ async fn callback_handler(
                 let audience = "legacy".to_string();
                 let recipients = broadcast_recipients(&audience, &settings, &vpn, now_epoch());
                 if recipients.is_empty() {
-                    bot.send_message(
-                        chat,
-                        "Сейчас нет получателей с актуальными использовавшимися Legacy-ключами.",
-                    )
-                    .reply_markup(menu::admin_communication_hub())
-                    .await?;
+                    bot.send_message(chat, "Сейчас нет получателей с актуальными Legacy-ключами.")
+                        .reply_markup(menu::admin_communication_hub())
+                        .await?;
                     return Ok(());
                 }
                 let early = settings.legacy_renewal_price_kopecks() as f64 / 100.0;
@@ -9801,7 +9797,7 @@ async fn callback_handler(
                     .send_message(
                         chat,
                         format!(
-                            "🔔 Продление Legacy-ключей\n\nДо 30 ноября включительно вы можете оформить продление используемых Legacy-ключей по прежней цене — {early:.2} ₽ за ключ.\n\nС 1 декабря стоимость составит {regular:.2} ₽ за ключ.\n\nПеред оплатой бот покажет точный список выбранных ключей и итоговую сумму. Можно продлить один ключ или сразу все используемые Legacy-ключи. После перевода потребуется прислать скриншот или файл чека.\n\nОформите продление заранее, чтобы ключи продолжили работать после окончания текущего срока."
+                            "🔔 Продление Legacy-ключей\n\nДо 30 ноября включительно вы можете оформить продление Legacy-ключей по прежней цене — {early:.2} ₽ за ключ.\n\nС 1 декабря стоимость составит {regular:.2} ₽ за ключ.\n\nПеред оплатой бот покажет точный список выбранных ключей и итоговую сумму. Все использовавшиеся ключи можно продлить вместе. Ключ, который ещё ни разу не подключался, не включается в общий расчёт автоматически, но его можно выбрать отдельно и подтвердить продление. После перевода потребуется прислать скриншот или файл чека.\n\nОформите продление заранее, чтобы нужные ключи продолжили работать после окончания текущего срока."
                         ),
                     )
                     .await?;
