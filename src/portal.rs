@@ -324,6 +324,8 @@ fn purchase_admin_notification(
 #[derive(serde::Deserialize)]
 struct RenewalRequest {
     months: Option<i64>,
+    payment_method: Option<String>,
+    confirm_unused: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -411,10 +413,10 @@ async fn create_web_renewal(
     }
     let now = now_epoch();
     let (months, amount, legacy) = if state.store.is_legacy_client(&name, user_id) {
-        if !state.store.client_ever_used(&name) {
+        if !state.store.client_ever_used(&name) && input.confirm_unused != Some(true) {
             return (
                 StatusCode::CONFLICT,
-                "Ключ ни разу не использовался и сейчас не требует оплаты",
+                "Ключ ни разу не использовался. Подтвердите, что хотите продлить именно его",
             )
                 .into_response();
         }
@@ -442,6 +444,48 @@ async fn create_web_renewal(
         };
         (months, amount, false)
     };
+    if input.payment_method.as_deref() == Some("balance") {
+        let target = if legacy {
+            crate::calendar::legacy_renewal_target(now, state.vpn.client_expiry(&name))
+        } else {
+            state
+                .vpn
+                .client_expiry(&name)
+                .unwrap_or(now)
+                .max(now)
+                .saturating_add(months.saturating_mul(30 * 24 * 60 * 60))
+        };
+        let reference = format!("web-renew:{user_id}:{name}:{target}");
+        if !state.store.spend_balance(user_id, amount, &reference, now) {
+            return (StatusCode::CONFLICT, "Недостаточно средств на балансе").into_response();
+        }
+        if let Err(error) =
+            crate::bot::handlers::set_managed_expiry(&state.vpn, &state.store, &name, target).await
+        {
+            state.store.add_ledger_entry(
+                user_id,
+                amount,
+                "refund",
+                &format!("refund:{reference}"),
+                Some("web renewal failed"),
+                now,
+            );
+            return (
+                StatusCode::CONFLICT,
+                format!("Не удалось продлить ключ: {error}"),
+            )
+                .into_response();
+        }
+        state.store.add_portal_notification(
+            user_id,
+            "renewal",
+            "Ключ продлён",
+            &format!("Ключ «{name}» оплачен с баланса."),
+            Some("/?view=keys"),
+            now,
+        );
+        return Json(serde_json::json!({"ok":true,"completed":true,"payment_method":"balance","amount_kopecks":amount,"months":months,"legacy":legacy,"expires_at":target})).into_response();
+    }
     let id = if legacy {
         state
             .store
@@ -1336,7 +1380,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         }).collect::<Vec<_>>();
         let (_, billable, unused) = state.store.legacy_usage_for_user(owner);
         let unit = state.store.legacy_renewal_price_for_user(owner,state.store.legacy_renewal_price_at(now_epoch()));
-        Some(serde_json::json!({"user_id":owner,"internal_id":state.store.internal_user_id(owner),"display_name":user.display_name,"username":user.username,"keys":keys,"billable":billable,"unused":unused,"unit_price_kopecks":unit,"discount_enabled":state.store.legacy_discount_enabled(owner),"total_kopecks":unit.saturating_mul(billable as i64)}))
+        Some(serde_json::json!({"user_id":owner,"internal_id":state.store.internal_user_id(owner),"display_name":user.display_name,"username":user.username,"keys":keys,"billable":billable,"unused":unused,"unit_price_kopecks":unit,"total_kopecks":unit.saturating_mul(billable as i64)}))
     }).collect::<Vec<_>>();
     let tickets = state.store.support_tickets("open",100).into_iter()
         .chain(state.store.support_tickets("in_progress",100))
@@ -1356,7 +1400,7 @@ async fn admin_overview(State(state): State<PortalState>, headers: HeaderMap) ->
         "crm_tickets":tickets,
         "legacy_billing":legacy_billing,
         "legacy_request_deadline":crate::calendar::LEGACY_REQUEST_DEADLINE,
-        "legacy_prices":{"base":state.store.legacy_renewal_price_at(now_epoch()),"early_base":state.store.legacy_renewal_price_kopecks(),"regular_base":state.store.legacy_renewal_regular_price_kopecks(),"change_at":crate::calendar::LEGACY_PRICE_CHANGE_AT,"six_to_nine":state.store.legacy_discount_prices_kopecks().0,"ten_plus":state.store.legacy_discount_prices_kopecks().1},
+        "legacy_prices":{"base":state.store.legacy_renewal_price_at(now_epoch()),"early_base":state.store.legacy_renewal_price_kopecks(),"regular_base":state.store.legacy_renewal_regular_price_kopecks(),"change_at":crate::calendar::LEGACY_PRICE_CHANGE_AT},
         "promos":state.store.admin_promos(100),
         "partner_withdrawals":state.store.pending_partner_withdrawals(100),
         "cleanup": {"enabled": state.store.blocked_key_cleanup_enabled(), "days": state.store.blocked_key_cleanup_days()},
@@ -1380,8 +1424,6 @@ struct AdminCrmAction {
 struct LegacyPricesInput {
     base_rubles: i64,
     regular_base_rubles: Option<i64>,
-    six_to_nine_rubles: i64,
-    ten_plus_rubles: i64,
 }
 
 async fn admin_legacy_prices(
@@ -1399,19 +1441,13 @@ async fn admin_legacy_prices(
     if !state.admin_ids.contains(&id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if state.store.set_legacy_scheduled_prices_kopecks(
+    if state.store.set_legacy_base_prices_kopecks(
         input.base_rubles * 100,
         input.regular_base_rubles.unwrap_or(1500) * 100,
-        input.six_to_nine_rubles * 100,
-        input.ten_plus_rubles * 100,
     ) {
         Json(serde_json::json!({"ok":true})).into_response()
     } else {
-        (
-            StatusCode::BAD_REQUEST,
-            "Цены должны быть положительными; индивидуальные ступени не должны превышать базовую цену",
-        )
-            .into_response()
+        (StatusCode::BAD_REQUEST, "Цены должны быть положительными").into_response()
     }
 }
 
@@ -1594,9 +1630,12 @@ async fn admin_user_profile(
     let Some(user) = state.store.user(user_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(overview) = state.store.portal_overview(user_id, now_epoch()) else {
+    let Some(mut overview) = state.store.portal_overview(user_id, now_epoch()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    for key in &mut overview.keys {
+        key.expires_at = state.vpn.client_expiry(&key.name);
+    }
     Json(serde_json::json!({"user":{"id":user.user_id,"internal_id":overview.internal_id,"display_name":user.display_name,"username":user.username,"created_at":user.created_at,"balance_kopecks":overview.balance_kopecks,"referral_count":overview.referral_count},"keys":overview.keys,"payments":overview.payments,"tickets":overview.tickets,"balance_history":overview.balance_history})).into_response()
 }
 

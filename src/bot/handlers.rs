@@ -2698,7 +2698,7 @@ async fn legacy_admin_screen(bot: &Bot, chat: ChatId, settings: &Store) -> Handl
             )
         })
         .collect::<Vec<_>>();
-    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nВосстановлено: {} у {} пользователей\nИспользовались: {} · ни разу не использовались: {}\nПрогноз продлений: {:.2} ₽\n\nСтандартная цена: {:.2} ₽ за используемый ключ/год.\nСкидки по умолчанию отключены. Администратор может индивидуально включить шкалу: 6–9 ключей — 750 ₽, 10 и более — 500 ₽.\nНеиспользованные ключи в оплату не входят.\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),restored,owners.len(),used,unused,forecast as f64/100.0,price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
+    bot.send_message(chat,format!("♻️ Legacy-ключи\n\nОжидают проверки: {}\nВосстановлено: {} у {} пользователей\nИспользовались: {} · ни разу не использовались: {}\nПрогноз продлений используемых ключей: {:.2} ₽\n\nЕдиная цена: {:.2} ₽ за ключ/год. Индивидуальные скидки не применяются.\nНеиспользованный ключ можно продлить только после отдельного подтверждения владельца.\nПриём заявок закрывается 01.12.2026.\n\n{}",requests.len(),restored,owners.len(),used,unused,forecast as f64/100.0,price as f64/100.0,if details.is_empty(){"Новых заявок нет".into()}else{details.join("\n")})).reply_markup(menu::legacy_admin_menu(&requests)).await?;
     Ok(())
 }
 
@@ -5793,17 +5793,18 @@ async fn message_handler(
             .filter_map(|v| v.parse::<f64>().ok().map(|n| (n * 100.0).round() as i64))
             .collect::<Vec<_>>();
         let prices = match values.as_slice() {
-            [early, regular, six, ten] => Some((*early, *regular, *six, *ten)),
+            [early, regular] => Some((*early, *regular)),
             _ => None,
         };
-        if let Some((early, regular, six, ten)) = prices
-            .filter(|(a, b, c, d)| settings.set_legacy_scheduled_prices_kopecks(*a, *b, *c, *d))
+        if let Some((early, regular)) =
+            prices.filter(|(a, b)| settings.set_legacy_base_prices_kopecks(*a, *b))
         {
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "✅ Legacy-цены сохранены\nДо 01.12: {:.2} ₽\nС 01.12: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽",
-                    early as f64/100.0,regular as f64/100.0,six as f64/100.0,ten as f64/100.0
+                    "✅ Legacy-цены сохранены\nДо 01.12: {:.2} ₽\nС 01.12: {:.2} ₽",
+                    early as f64 / 100.0,
+                    regular as f64 / 100.0
                 ),
             )
             .reply_markup(menu::admin_dashboard_menu())
@@ -5812,7 +5813,7 @@ async fn message_handler(
         } else {
             bot.send_message(
                 msg.chat.id,
-                "Введите четыре цены в рублях, например: 1000 1500 750 500",
+                "Введите две цены в рублях, например: 1000 1500",
             )
             .await?;
         }
@@ -10340,8 +10341,7 @@ async fn callback_handler(
             legacy_admin_screen(&bot, chat, &settings).await?;
         }
         Action::LegacyPriceAsk => {
-            let (six, ten) = settings.legacy_discount_prices_kopecks();
-            bot.send_message(chat,format!("Legacy-цены:\nДо 01.12.2026: {:.2} ₽\nС 01.12.2026: {:.2} ₽\n6–9 ключей: {:.2} ₽\n10+ ключей: {:.2} ₽\n\nВведите четыре цены, например: 1000 1500 750 500",settings.legacy_renewal_price_kopecks() as f64/100.0,settings.legacy_renewal_regular_price_kopecks() as f64/100.0,six as f64/100.0,ten as f64/100.0)).await?;
+            bot.send_message(chat,format!("Legacy-цены:\nДо 01.12.2026: {:.2} ₽\nС 01.12.2026: {:.2} ₽\n\nВведите две цены, например: 1000 1500",settings.legacy_renewal_price_kopecks() as f64/100.0,settings.legacy_renewal_regular_price_kopecks() as f64/100.0)).await?;
             dialogue.update(State::AwaitingLegacyPrice).await?;
         }
         Action::PromoInput => {
@@ -11436,9 +11436,9 @@ async fn callback_handler(
                 if !settings.client_ever_used(&name) {
                     bot.send_message(
                         chat,
-                        "Этот legacy-ключ ни разу не использовался и не требует оплаты.",
+                        format!("⚠️ Ключ «{name}» ни разу не подключался.\n\nПродлевайте его только если точно планируете использовать: после подтверждения оплата будет такой же, как для активного Legacy-ключа."),
                     )
-                    .reply_markup(menu::customer_keyboard())
+                    .reply_markup(menu::legacy_unused_confirm_menu(&name))
                     .await?;
                     return Ok(());
                 }
@@ -11508,13 +11508,16 @@ async fn callback_handler(
             if settings.client_owner(&name) != Some(uid) || !settings.is_legacy_client(&name, uid) {
                 return Ok(());
             }
-            if !settings.client_ever_used(&name) {
-                bot.send_message(
-                    chat,
-                    "Этот legacy-ключ ни разу не использовался и не требует оплаты.",
-                )
-                .reply_markup(menu::customer_keyboard())
-                .await?;
+            if method == "confirm" {
+                let target =
+                    crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
+                let amount = settings.legacy_renewal_price_for_user(
+                    uid,
+                    settings.legacy_renewal_price_at(now_epoch()),
+                );
+                bot.send_message(chat, format!("Подтверждено: будет продлён неиспользованный ключ «{name}» до 31.12.{} за {:.2} ₽. Выберите способ оплаты:", crate::calendar::year_at(target), amount as f64 / 100.0))
+                    .reply_markup(menu::legacy_renew_method_menu(&name))
+                    .await?;
                 return Ok(());
             }
             let amount = settings
