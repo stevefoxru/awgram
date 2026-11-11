@@ -11352,7 +11352,24 @@ async fn callback_handler(
             if settings.client_owner(&name) == Some(uid) {
                 if settings.is_legacy_client(&name, uid) {
                     if !settings.client_ever_used(&name) {
-                        bot.send_message(chat,format!("🟢 Legacy-ключ «{name}» ни разу не использовался. Он не включён в расчёт оплаты. Если ключ вам не нужен, оплачивать его не требуется.")).reply_markup(menu::customer_keyboard()).await?;
+                        let price = settings.legacy_renewal_price_for_user(
+                            uid,
+                            settings.legacy_renewal_price_at(now_epoch()),
+                        );
+                        let target = crate::calendar::legacy_renewal_target(
+                            now_epoch(),
+                            vpn.client_expiry(&name),
+                        );
+                        bot.send_message(
+                            chat,
+                            format!(
+                                "⚠️ Legacy-ключ «{name}» ни разу не использовался. Поэтому он не включается в массовое продление автоматически.\n\nЕсли ключ вам нужен, его можно продлить отдельно до 31.12.{} за {:.2} ₽. Перед выбором оплаты подтвердите, что хотите продлить именно этот ключ.",
+                                crate::calendar::year_at(target),
+                                price as f64 / 100.0
+                            ),
+                        )
+                        .reply_markup(menu::legacy_unused_confirm_menu(&name))
+                        .await?;
                         return Ok(());
                     }
                     let price = settings.legacy_renewal_price_for_user(
