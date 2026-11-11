@@ -2045,6 +2045,26 @@ async fn key_traffic(
     .into_response()
 }
 
+fn artifact_download_name(client_name: &str, extension: &str) -> String {
+    let stem = client_name
+        .chars()
+        .take(64)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let stem = stem.trim_matches('_');
+    format!(
+        "{}.{}",
+        if stem.is_empty() { "vpn-key" } else { stem },
+        extension
+    )
+}
+
 async fn download_config(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -2061,10 +2081,16 @@ async fn download_config(
     {
         Ok(bytes) => (
             [
-                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (
+                    header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8".to_string(),
+                ),
                 (
                     header::CONTENT_DISPOSITION,
-                    "attachment; filename=awgram.conf",
+                    format!(
+                        "attachment; filename=\"{}\"",
+                        artifact_download_name(&name, "conf")
+                    ),
                 ),
             ],
             bytes,
@@ -2103,10 +2129,13 @@ async fn download_qr(
     match bytes {
         Some(bytes) => (
             [
-                (header::CONTENT_TYPE, "image/png"),
+                (header::CONTENT_TYPE, "image/png".to_string()),
                 (
                     header::CONTENT_DISPOSITION,
-                    "inline; filename=awgram-qr.png",
+                    format!(
+                        "inline; filename=\"{}\"",
+                        artifact_download_name(&name, "png")
+                    ),
                 ),
             ],
             bytes,
@@ -2592,7 +2621,10 @@ fetch('/api/me').then(async r=>{if(!r.ok)throw 0;return r.json()}).then(d=>{
 
 #[cfg(test)]
 mod tests {
-    use super::{display_brand, purchase_admin_notification, same_site_request, valid_email};
+    use super::{
+        artifact_download_name, display_brand, purchase_admin_notification, same_site_request,
+        valid_email, APP_JS,
+    };
     use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -2626,5 +2658,23 @@ mod tests {
             purchase_admin_notification(42, 1001, 6, 7, 59_900),
             "🛒 Новая веб-заявка на покупку #42\nПользователь: 1001\nСрок: 6 мес.\nСервер: #7\nСумма: 599.00 ₽"
         );
+    }
+
+    #[test]
+    fn artifact_download_names_are_distinct_and_header_safe() {
+        assert_eq!(
+            artifact_download_name("alice-phone", "conf"),
+            "alice-phone.conf"
+        );
+        assert_eq!(artifact_download_name("../\r\nkey", "png"), "key.png");
+        assert_eq!(artifact_download_name("телефон", "conf"), "vpn-key.conf");
+    }
+
+    #[test]
+    fn checkout_ui_keeps_payment_proof_recovery_path() {
+        assert!(APP_JS.contains("paymentProofId"));
+        assert!(APP_JS.contains("payment-proof-open"));
+        assert!(APP_JS.contains("/api/payments/${sendProof.dataset.id}/proof"));
+        assert!(APP_JS.contains("Перед оплатой подтвердите почту"));
     }
 }
