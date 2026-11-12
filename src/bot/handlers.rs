@@ -3533,6 +3533,7 @@ fn authorize(action: &Action, role: &Role, settings: &Store) -> bool {
         | ProfilePasswordResetConfirm
         | Portal
         | Balance
+        | PaymentProofCancel
         | CustomerKey(_)
         | CustomerMove(_)
         | CustomerMoveServer(_, _)
@@ -11132,14 +11133,34 @@ async fn callback_handler(
                 return Ok(());
             }
             if method == "crystals" {
+                let Some(server_id) = settings.purchase_server(uid).filter(|selected| {
+                    settings
+                        .available_vpn_servers()
+                        .iter()
+                        .any(|server| server.id == *selected)
+                }) else {
+                    bot.send_message(
+                        chat,
+                        "Выбранная локация больше недоступна. Выберите её заново.",
+                    )
+                    .reply_markup(menu::buy_servers_menu(
+                        &settings.available_vpn_servers(),
+                        &settings,
+                    ))
+                    .await?;
+                    return Ok(());
+                };
                 let value = settings.crystal_value_kopecks();
                 let required = amount.saturating_add(value - 1) / value;
-                let reference = format!("legacy-crystals:{uid}:{name}:{target}");
+                let reference = format!(
+                    "crystal-purchase:{uid}:{server_id}:{months}:{}",
+                    now_epoch() / 600
+                );
                 if !settings.spend_crystals(uid, required, &reference, now_epoch()) {
                     bot.send_message(
                         chat,
                         format!(
-                            "Недостаточно кристаллов. Нужно: {required} 💎, доступно: {} 💎.",
+                            "Недостаточно кристаллов либо покупка уже обрабатывается. Нужно: {required} 💎, доступно: {} 💎.",
                             settings.crystal_balance(uid)
                         ),
                     )
@@ -11147,17 +11168,25 @@ async fn callback_handler(
                     .await?;
                     return Ok(());
                 }
-                match set_managed_expiry(&vpn, &settings, &name, target).await {
-                    Ok(()) => {
+                match provision_customer_key(&vpn, &settings, uid, months, server_id).await {
+                    Ok(result) => {
+                        settings.log_event(
+                            now_epoch(),
+                            EventKind::ClientAdd,
+                            Some(&result.name),
+                            Some(uid),
+                            Some("crystal_purchase"),
+                        );
                         bot.send_message(
                             chat,
-                            format!(
-                                "✅ Ключ «{name}» продлён за {required} 💎 до 31.12.{}.",
-                                crate::calendar::year_at(target)
-                            ),
+                            format!("✅ Ключ {} создан за {required} 💎.", result.name),
                         )
-                        .reply_markup(menu::customer_keyboard())
                         .await?;
+                        if let Err(error) =
+                            render::send_client_files(&bot, chat, lang, &result).await
+                        {
+                            tracing::error!(%error, "не удалось выдать купленный ключ");
+                        }
                     }
                     Err(error) => {
                         settings.add_crystals(
@@ -11165,14 +11194,16 @@ async fn callback_handler(
                             required,
                             "refund",
                             &format!("refund:{reference}"),
-                            Some("Ошибка продления"),
+                            Some("Ошибка создания ключа"),
                             now_epoch(),
                         );
                         bot.send_message(chat, i18n::error_text(lang, &error))
                             .await?;
                     }
                 }
-            } else if method == "balance" {
+                return Ok(());
+            }
+            if method == "balance" {
                 let balance = settings.balance_kopecks(uid);
                 if balance < amount {
                     bot.send_message(chat, format!("Недостаточно средств на внутреннем балансе.\n\nДоступно: {:.2} ₽\nСтоимость: {:.2} ₽\nНе хватает: {:.2} ₽\n\nПополните баланс и повторите покупку — выбранная локация сохранится.", balance as f64 / 100.0, amount as f64 / 100.0, amount.saturating_sub(balance) as f64 / 100.0))
@@ -11640,12 +11671,7 @@ async fn callback_handler(
             if method == "crystals" {
                 let value = settings.crystal_value_kopecks();
                 let required = amount.saturating_add(value - 1) / value;
-                let target = vpn
-                    .client_expiry(&name)
-                    .unwrap_or(now_epoch())
-                    .max(now_epoch())
-                    .saturating_add(seconds);
-                let reference = format!("renew-crystals:{uid}:{name}:{target}:{months}");
+                let reference = format!("legacy-crystals:{uid}:{name}:{target}");
                 if !settings.spend_crystals(uid, required, &reference, now_epoch()) {
                     bot.send_message(
                         chat,
@@ -11663,12 +11689,12 @@ async fn callback_handler(
                         bot.send_message(
                             chat,
                             format!(
-                                "✅ Ключ {name} продлён за {required} 💎 до {}.",
-                                crate::calendar::format_date(target)
+                                "✅ Ключ «{name}» продлён за {required} 💎 до 31.12.{}.",
+                                crate::calendar::year_at(target)
                             ),
                         )
                         .reply_markup(menu::customer_keyboard())
-                        .await?
+                        .await?;
                     }
                     Err(error) => {
                         settings.add_crystals(
@@ -11682,7 +11708,7 @@ async fn callback_handler(
                         bot.send_message(chat, i18n::error_text(lang, &error))
                             .await?;
                     }
-                };
+                }
                 return Ok(());
             }
             if method == "balance" {
@@ -11815,6 +11841,54 @@ async fn callback_handler(
             };
             let amount = base_amount.saturating_mul(100 - discount.clamp(0, 100)) / 100;
             let seconds = duration_seconds(expiry).unwrap_or(0);
+            if method == "crystals" {
+                let value = settings.crystal_value_kopecks();
+                let required = amount.saturating_add(value - 1) / value;
+                let target = vpn
+                    .client_expiry(&name)
+                    .unwrap_or(now_epoch())
+                    .max(now_epoch())
+                    .saturating_add(seconds);
+                let reference = format!("renew-crystals:{uid}:{name}:{target}:{months}");
+                if !settings.spend_crystals(uid, required, &reference, now_epoch()) {
+                    bot.send_message(
+                        chat,
+                        format!(
+                            "Недостаточно кристаллов. Нужно: {required} 💎, доступно: {} 💎.",
+                            settings.crystal_balance(uid)
+                        ),
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                    return Ok(());
+                }
+                match set_managed_expiry(&vpn, &settings, &name, target).await {
+                    Ok(()) => {
+                        bot.send_message(
+                            chat,
+                            format!(
+                                "✅ Ключ {name} продлён за {required} 💎 до {}.",
+                                crate::calendar::format_date(target)
+                            ),
+                        )
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    }
+                    Err(error) => {
+                        settings.add_crystals(
+                            uid,
+                            required,
+                            "refund",
+                            &format!("refund:{reference}"),
+                            Some("Ошибка продления"),
+                            now_epoch(),
+                        );
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
             if method == "balance" {
                 let balance = settings.balance_kopecks(uid);
                 if balance < amount {
@@ -15316,6 +15390,7 @@ mod tests {
             ProfilePasswordResetConfirm,
             Portal,
             Balance,
+            PaymentProofCancel,
             CustomerKey("s".into()),
             CustomerMove("s".into()),
             CustomerMoveServer("s".into(), 1),
@@ -15597,6 +15672,7 @@ mod tests {
                 ProfilePasswordResetConfirm => {}
                 Portal => {}
                 Balance => {}
+                PaymentProofCancel => {}
                 PaymentApprove(_) => {}
                 PaymentReject(_) => {}
                 AssignOwnerAsk(_) => {}
