@@ -15849,6 +15849,7 @@ mod tests {
             (Action::ProfilePasswordReset, true, true),
             (Action::ProfilePasswordResetConfirm, true, true),
             (Action::Balance, true, true),
+            (Action::PaymentProofCancel, true, true),
             (Action::CustomerKey("mine".into()), true, true),
             (Action::CustomerRefresh("mine".into()), true, true),
             (Action::CustomerRefreshRun("mine".into()), true, true),
