@@ -260,6 +260,7 @@ pub enum Action {
     ProfilePasswordResetConfirm,
     Portal,
     Balance,
+    PaymentProofCancel,
     PaymentApprove(i64),
     PaymentReject(i64),
     AssignOwnerAsk(String),
@@ -390,6 +391,7 @@ fn parse_callback(data: &str) -> Action {
         "profile:password:reset:confirm" => Action::ProfilePasswordResetConfirm,
         "portal" => Action::Portal,
         "balance" => Action::Balance,
+        "payment:proof:cancel" => Action::PaymentProofCancel,
         "set:payment" => Action::PaymentInstructionsAsk,
         "set:acquiring" => Action::AcquiringUrlAsk,
         "finance:export" => Action::FinanceExport,
@@ -1586,7 +1588,7 @@ fn legacy_recovery_server(settings: &Store) -> Option<crate::store::VpnServer> {
         .or_else(|| servers.into_iter().next())
 }
 
-async fn extend_managed_client(
+pub(crate) async fn extend_managed_client(
     vpn: &Vpn,
     settings: &Store,
     name: &str,
@@ -5142,7 +5144,24 @@ async fn message_handler(
             dialogue.update(State::Idle).await?;
             return Ok(());
         }
-        let raw = msg.text().unwrap_or_default().trim().to_ascii_lowercase();
+        let input = msg.text().unwrap_or_default().trim();
+        let parts = input.splitn(3, '|').map(str::trim).collect::<Vec<_>>();
+        let raw = parts
+            .first()
+            .copied()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let paid_kopecks = parts
+            .get(1)
+            .and_then(|value| value.replace(',', ".").parse::<f64>().ok())
+            .map(|value| (value * 100.0).round() as i64);
+        let note = parts
+            .get(2)
+            .copied()
+            .unwrap_or("Ручное продление администратором");
+        let months = duration_seconds(&raw)
+            .map(|seconds| (seconds.saturating_add(30 * 86_400 - 1) / (30 * 86_400)).max(1));
+        let owner = settings.client_owner(&name);
         let result = if matches!(raw.as_str(), "none" | "без срока" | "бессрочно")
         {
             match settings.client_vpn_server(&name) {
@@ -5165,9 +5184,26 @@ async fn message_handler(
         };
         match result {
             Ok(Some(epoch)) => {
+                let payment = paid_kopecks.and_then(|amount| {
+                    settings.record_admin_manual_renewal(
+                        owner?,
+                        &name,
+                        months.unwrap_or(1),
+                        amount,
+                        uid,
+                        note,
+                        now_epoch(),
+                    )
+                });
                 bot.send_message(
                     msg.chat.id,
-                    format!("✅ Срок ключа {name} изменён. Новая дата (Unix): {epoch}"),
+                    format!(
+                        "✅ Срок ключа {name} изменён. Новая дата: {}.{}",
+                        crate::calendar::format_date(epoch),
+                        payment
+                            .map(|id| format!(" Оплата учтена в финансах как операция #{id}."))
+                            .unwrap_or_default()
+                    ),
                 )
                 .reply_markup(menu::admin_keyboard())
                 .await?;
@@ -7619,6 +7655,7 @@ async fn callback_handler(
             | Action::Profile
             | Action::Portal
             | Action::Balance
+            | Action::PaymentProofCancel
             | Action::CustomerKey(_)
             | Action::CustomerMove(_)
             | Action::CustomerMoveServer(_, _)
@@ -11094,7 +11131,48 @@ async fn callback_handler(
                 bot.send_message(chat, "Стоимость заказа превышает лимит одной операции 10 000 ₽. Обратитесь в поддержку.").await?;
                 return Ok(());
             }
-            if method == "balance" {
+            if method == "crystals" {
+                let value = settings.crystal_value_kopecks();
+                let required = amount.saturating_add(value - 1) / value;
+                let reference = format!("legacy-crystals:{uid}:{name}:{target}");
+                if !settings.spend_crystals(uid, required, &reference, now_epoch()) {
+                    bot.send_message(
+                        chat,
+                        format!(
+                            "Недостаточно кристаллов. Нужно: {required} 💎, доступно: {} 💎.",
+                            settings.crystal_balance(uid)
+                        ),
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                    return Ok(());
+                }
+                match set_managed_expiry(&vpn, &settings, &name, target).await {
+                    Ok(()) => {
+                        bot.send_message(
+                            chat,
+                            format!(
+                                "✅ Ключ «{name}» продлён за {required} 💎 до 31.12.{}.",
+                                crate::calendar::year_at(target)
+                            ),
+                        )
+                        .reply_markup(menu::customer_keyboard())
+                        .await?;
+                    }
+                    Err(error) => {
+                        settings.add_crystals(
+                            uid,
+                            required,
+                            "refund",
+                            &format!("refund:{reference}"),
+                            Some("Ошибка продления"),
+                            now_epoch(),
+                        );
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
+                }
+            } else if method == "balance" {
                 let balance = settings.balance_kopecks(uid);
                 if balance < amount {
                     bot.send_message(chat, format!("Недостаточно средств на внутреннем балансе.\n\nДоступно: {:.2} ₽\nСтоимость: {:.2} ₽\nНе хватает: {:.2} ₽\n\nПополните баланс и повторите покупку — выбранная локация сохранится.", balance as f64 / 100.0, amount as f64 / 100.0, amount.saturating_sub(balance) as f64 / 100.0))
@@ -11280,6 +11358,7 @@ async fn callback_handler(
                     chat,
                     "Пришлите номер операции, комментарий или скриншот чека.",
                 )
+                .reply_markup(menu::payment_proof_cancel_menu())
                 .await?;
                 dialogue.update(State::AwaitingPaymentProof { id }).await?;
             }
@@ -11342,6 +11421,26 @@ async fn callback_handler(
                 ),
             )
             .reply_markup(menu::profile_menu(cfg.portal_public_url.is_some()))
+            .await?;
+        }
+        Action::PaymentProofCancel => {
+            let state = dialogue.get().await?.unwrap_or_default();
+            let ids = match state {
+                State::AwaitingPaymentProof { id } => vec![id],
+                State::AwaitingLegacyPaymentProof { ids, .. } => ids,
+                _ => Vec::new(),
+            };
+            let cancelled = settings.cancel_pending_payments(uid, &ids, now_epoch());
+            dialogue.update(State::Idle).await?;
+            bot.send_message(
+                chat,
+                if cancelled > 0 {
+                    "Операция отменена. Заявка снята с проверки; оплату отправлять не нужно."
+                } else {
+                    "Шаг оплаты закрыт. Заявка уже была обработана либо отсутствует."
+                },
+            )
+            .reply_markup(menu::customer_keyboard())
             .await?;
         }
         Action::Renew(name) => {
@@ -11512,6 +11611,7 @@ async fn callback_handler(
                         settings.payment_instructions()
                     ),
                 )
+                .reply_markup(menu::payment_proof_cancel_menu())
                 .await?;
                 dialogue
                     .update(State::AwaitingLegacyPaymentProof { ids, names })
@@ -11537,6 +11637,54 @@ async fn callback_handler(
                 .legacy_renewal_price_for_user(uid, settings.legacy_renewal_price_at(now_epoch()));
             let target =
                 crate::calendar::legacy_renewal_target(now_epoch(), vpn.client_expiry(&name));
+            if method == "crystals" {
+                let value = settings.crystal_value_kopecks();
+                let required = amount.saturating_add(value - 1) / value;
+                let target = vpn
+                    .client_expiry(&name)
+                    .unwrap_or(now_epoch())
+                    .max(now_epoch())
+                    .saturating_add(seconds);
+                let reference = format!("renew-crystals:{uid}:{name}:{target}:{months}");
+                if !settings.spend_crystals(uid, required, &reference, now_epoch()) {
+                    bot.send_message(
+                        chat,
+                        format!(
+                            "Недостаточно кристаллов. Нужно: {required} 💎, доступно: {} 💎.",
+                            settings.crystal_balance(uid)
+                        ),
+                    )
+                    .reply_markup(menu::customer_keyboard())
+                    .await?;
+                    return Ok(());
+                }
+                match set_managed_expiry(&vpn, &settings, &name, target).await {
+                    Ok(()) => {
+                        bot.send_message(
+                            chat,
+                            format!(
+                                "✅ Ключ {name} продлён за {required} 💎 до {}.",
+                                crate::calendar::format_date(target)
+                            ),
+                        )
+                        .reply_markup(menu::customer_keyboard())
+                        .await?
+                    }
+                    Err(error) => {
+                        settings.add_crystals(
+                            uid,
+                            required,
+                            "refund",
+                            &format!("refund:{reference}"),
+                            Some("Ошибка продления"),
+                            now_epoch(),
+                        );
+                        bot.send_message(chat, i18n::error_text(lang, &error))
+                            .await?;
+                    }
+                };
+                return Ok(());
+            }
             if method == "balance" {
                 let reference = format!("legacy-renew:{uid}:{name}:{target}");
                 if !settings.spend_balance(uid, amount, &reference, now_epoch()) {
@@ -11581,7 +11729,9 @@ async fn callback_handler(
                 if let Some(id) =
                     settings.create_legacy_renewal_request(uid, &name, amount, now_epoch())
                 {
-                    bot.send_message(chat,format!("💳 Оплата Legacy-продления переводом\n\nБудет продлён ключ:\n• {name}\nСрок после подтверждения: до 31.12.{}\nК переводу: {:.2} ₽\n\nРеквизиты:\n{}\n\nПосле перевода пришлите сюда скриншот или файл чека. Текст без изображения не принимается.",crate::calendar::year_at(target),amount as f64 / 100.0,settings.payment_instructions())).await?;
+                    bot.send_message(chat,format!("💳 Оплата Legacy-продления переводом\n\nБудет продлён ключ:\n• {name}\nСрок после подтверждения: до 31.12.{}\nК переводу: {:.2} ₽\n\nРеквизиты:\n{}\n\nПосле перевода пришлите сюда скриншот или файл чека. Текст без изображения не принимается.",crate::calendar::year_at(target),amount as f64 / 100.0,settings.payment_instructions()))
+                        .reply_markup(menu::payment_proof_cancel_menu())
+                        .await?;
                     dialogue
                         .update(State::AwaitingLegacyPaymentProof {
                             ids: vec![id],
@@ -11763,7 +11913,7 @@ async fn callback_handler(
             } else {
                 "нет активной скидки".into()
             };
-            bot.send_message(chat, format!("👤 Профиль\n\n{display_name}\nTelegram ID: {uid}\n🔑 Ключей: {}\n💰 Баланс: {:.2} ₽\n🎟 Скидка: {discount_text}\n👥 Приглашено: {}\n🎁 Реферальное начисление: {}% от покупки\n\nВаша ссылка:\nhttps://t.me/{username}?start=ref_{uid}\n\nНачисления за приглашённых автоматически появляются в истории баланса.", settings.user_client_names(uid).len(), settings.balance_kopecks(uid) as f64 / 100.0, settings.referral_count(uid), settings.referral_percent()))
+            bot.send_message(chat, format!("👤 Профиль\n\n{display_name}\nTelegram ID: {uid}\n🔑 Ключей: {}\n💰 Баланс: {:.2} ₽\n💎 Кристаллы: {}\n🎟 Скидка: {discount_text}\n👥 Приглашено: {}\n🎁 Реферальное начисление: {}% от покупки\n\nВаша ссылка:\nhttps://t.me/{username}?start=ref_{uid}\n\nЗа каждые 100 ₽ подтверждённой оплаты начисляется {} кристалл(а). Правила можно расширять без изменения истории.", settings.user_client_names(uid).len(), settings.balance_kopecks(uid) as f64 / 100.0, settings.crystal_balance(uid), settings.referral_count(uid), settings.referral_percent(), settings.crystals_per_100_rubles()))
                 .reply_markup(menu::profile_menu(cfg.portal_public_url.is_some())).await?;
         }
         Action::ProfileSettings => {
@@ -12050,7 +12200,7 @@ async fn callback_handler(
                 .await?;
                 return Ok(());
             }
-            bot.send_message(chat, format!("Текущий срок ключа {name}: {:?}\n\nВведите, на сколько продлить: 12h, 7d, 30d, 6m, 1y. Для бессрочного ключа — none. Новый период добавляется к оставшемуся сроку.", vpn.client_expiry(&name))).await?;
+            bot.send_message(chat, format!("Текущий срок ключа {name}: {:?}\n\nВведите срок, сумму фактически полученной оплаты и комментарий через |.\n\nПример: 1y | 700 | Частичная оплата переводом\n\nДопустимые сроки: 12h, 7d, 30d, 6m, 1y. Если финансовый учёт не нужен, можно отправить только срок. Новый период добавляется к оставшемуся сроку.", vpn.client_expiry(&name))).await?;
             dialogue.update(State::AwaitingAdminExpiry { name }).await?;
         }
         Action::SetClientEnabled(name, enabled) => {

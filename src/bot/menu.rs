@@ -1,4 +1,6 @@
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup};
+use teloxide::types::{
+    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup, WebAppInfo,
+};
 
 use crate::i18n::{self, Lang};
 use crate::vpn::model::{format_handshake_compact, Client, ClientFilter};
@@ -90,7 +92,7 @@ pub fn notification_settings_menu(expiry: bool, maintenance: bool) -> InlineKeyb
 
 pub fn portal_link_menu(url: &str) -> InlineKeyboardMarkup {
     let button = reqwest::Url::parse(url)
-        .map(|url| InlineKeyboardButton::url("🚀 Войти в кабинет", url))
+        .map(|url| InlineKeyboardButton::web_app("🚀 Открыть приложение", WebAppInfo { url }))
         .unwrap_or_else(|_| cb("Вернуться", "profile"));
     InlineKeyboardMarkup::new(vec![vec![button], vec![cb("⬅️ Кабинет", "profile")]])
 }
@@ -2017,6 +2019,10 @@ pub fn renew_method_menu(name: &str, months: i64) -> InlineKeyboardMarkup {
             &format!("renew:method:{name}:{months}:balance"),
         )],
         vec![cb(
+            "💎 Кристаллы",
+            &format!("renew:method:{name}:{months}:crystals"),
+        )],
+        vec![cb(
             "⭐ Telegram Stars",
             &format!("renew:method:{name}:{months}:stars"),
         )],
@@ -2046,6 +2052,10 @@ pub fn legacy_renew_method_menu(name: &str) -> InlineKeyboardMarkup {
             "💰 Внутренний баланс",
             &format!("legacy:renew:method:{name}:balance"),
         )],
+        vec![cb(
+            "💎 Кристаллы",
+            &format!("legacy:renew:method:{name}:crystals"),
+        )],
         vec![cb("⬅️ Назад", &format!("legacy:renew:{name}"))],
     ])
 }
@@ -2058,6 +2068,13 @@ pub fn legacy_renew_all_method_menu() -> InlineKeyboardMarkup {
         )],
         vec![cb("⬅️ Мои ключи", "mykeys")],
     ])
+}
+
+pub fn payment_proof_cancel_menu() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![cb(
+        "❌ Отменить оплату и вернуться",
+        "payment:proof:cancel",
+    )]])
 }
 
 pub fn legacy_unused_confirm_menu(name: &str) -> InlineKeyboardMarkup {

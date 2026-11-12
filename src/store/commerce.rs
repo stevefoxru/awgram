@@ -158,6 +158,78 @@ pub struct KeyReplacement {
 }
 
 impl Store {
+    pub fn crystal_balance(&self, user_id: i64) -> i64 {
+        self.with_conn(|connection| {
+            connection.query_row(
+                "SELECT COALESCE(SUM(amount),0) FROM crystal_ledger WHERE user_id=?1",
+                [user_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap_or(0)
+    }
+
+    pub fn add_crystals(
+        &self,
+        user_id: i64,
+        amount: i64,
+        kind: &str,
+        reference: &str,
+        details: Option<&str>,
+        now: i64,
+    ) -> bool {
+        if amount == 0 || kind.trim().is_empty() || reference.trim().is_empty() {
+            return false;
+        }
+        self.with_conn(|connection| {
+            connection.execute(
+                "INSERT OR IGNORE INTO crystal_ledger(user_id,amount,kind,reference,details,created_at)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![user_id, amount, kind, reference, details, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn spend_crystals(&self, user_id: i64, amount: i64, reference: &str, now: i64) -> bool {
+        if amount <= 0 {
+            return false;
+        }
+        self.with_conn(|connection| {
+            connection.execute(
+                "INSERT OR IGNORE INTO crystal_ledger(user_id,amount,kind,reference,details,created_at)
+                 SELECT ?1,-?2,'redemption',?3,'Оплата услуги кристаллами',?4
+                 WHERE (SELECT COALESCE(SUM(amount),0) FROM crystal_ledger WHERE user_id=?1)>=?2",
+                rusqlite::params![user_id, amount, reference, now],
+            )
+        })
+        .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn award_payment_crystals(&self, payment_id: i64, now: i64) -> i64 {
+        let Some(payment) = self
+            .payment_request(payment_id)
+            .filter(|payment| payment.status == PaymentStatus::Approved)
+        else {
+            return 0;
+        };
+        let amount =
+            (payment.amount_kopecks / 10_000).saturating_mul(self.crystals_per_100_rubles());
+        if amount > 0
+            && self.add_crystals(
+                payment.user_id,
+                amount,
+                "payment_bonus",
+                &format!("payment:{payment_id}"),
+                Some("Бонус за подтверждённую оплату"),
+                now,
+            )
+        {
+            amount
+        } else {
+            0
+        }
+    }
     pub fn client_name_for_ip(&self, ip: &str) -> Option<String> {
         self.with_conn(|connection| {
             connection
@@ -1929,6 +2001,48 @@ impl Store {
         }).ok().flatten()
     }
 
+    pub fn record_admin_manual_renewal(
+        &self,
+        user_id: i64,
+        client_name: &str,
+        months: i64,
+        amount_kopecks: i64,
+        admin_id: i64,
+        details: &str,
+        now: i64,
+    ) -> Option<i64> {
+        if self.client_owner(client_name) != Some(user_id)
+            || months <= 0
+            || amount_kopecks < 0
+            || details.trim().is_empty()
+            || details.chars().count() > 500
+        {
+            return None;
+        }
+        let id = self.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO payment_requests
+                 (user_id,months,amount_kopecks,method,status,proof,client_name,created_at,decided_at,decided_by)
+                 VALUES(?1,?2,?3,'admin_manual','approved',?4,?5,?6,?6,?7)",
+                rusqlite::params![
+                    user_id,
+                    months,
+                    amount_kopecks,
+                    details.trim(),
+                    client_name,
+                    now,
+                    admin_id
+                ],
+            )?;
+            Ok(connection.last_insert_rowid())
+        })
+        .ok();
+        if let Some(id) = id {
+            self.award_payment_crystals(id, now);
+        }
+        id
+    }
+
     pub fn set_payment_proof(&self, id: i64, user_id: i64, proof: &str) -> bool {
         self.with_conn(|c| {
             c.execute(
@@ -1978,48 +2092,58 @@ impl Store {
         if matches!(status, PaymentStatus::Pending | PaymentStatus::Processing) {
             return false;
         }
-        self.with_conn(|c| {
-            c.execute(
-                "UPDATE payment_requests
+        let changed = self
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE payment_requests
                  SET status=?2,decided_at=?3,decided_by=?4,client_name=?5
                  WHERE id=?1 AND status IN ('pending','processing')
                    AND NOT (method='topup' AND ?2='approved')",
-                rusqlite::params![id, status.as_str(), now, admin_id, client_name],
-            )
-        })
-        .map(|n| n == 1)
-        .unwrap_or(false)
+                    rusqlite::params![id, status.as_str(), now, admin_id, client_name],
+                )
+            })
+            .map(|n| n == 1)
+            .unwrap_or(false);
+        if changed && status == PaymentStatus::Approved {
+            self.award_payment_crystals(id, now);
+        }
+        changed
     }
 
     /// Атомарно одобряет пополнение и создаёт единственную проводку баланса.
     /// Если проводку записать нельзя, статус заявки также остаётся pending.
     pub fn approve_topup(&self, id: i64, admin_id: i64, details: Option<&str>, now: i64) -> bool {
-        self.with_conn(|connection| {
-            let transaction = connection.unchecked_transaction()?;
-            let changed = transaction.execute(
-                "UPDATE payment_requests
+        let approved = self
+            .with_conn(|connection| {
+                let transaction = connection.unchecked_transaction()?;
+                let changed = transaction.execute(
+                    "UPDATE payment_requests
                  SET status='approved',decided_at=?2,decided_by=?3
                  WHERE id=?1 AND method='topup' AND status='pending'
                    AND amount_kopecks>0",
-                rusqlite::params![id, now, admin_id],
-            )?;
-            if changed != 1 {
-                return Ok(false);
-            }
-            let inserted = transaction.execute(
-                "INSERT INTO balance_ledger
+                    rusqlite::params![id, now, admin_id],
+                )?;
+                if changed != 1 {
+                    return Ok(false);
+                }
+                let inserted = transaction.execute(
+                    "INSERT INTO balance_ledger
                  (user_id,amount_kopecks,kind,reference,details,created_at)
                  SELECT user_id,amount_kopecks,'topup',?2,?3,?4
                  FROM payment_requests WHERE id=?1 AND status='approved'",
-                rusqlite::params![id, format!("payment:{id}"), details, now],
-            )?;
-            if inserted != 1 {
-                return Ok(false);
-            }
-            transaction.commit()?;
-            Ok(true)
-        })
-        .unwrap_or(false)
+                    rusqlite::params![id, format!("payment:{id}"), details, now],
+                )?;
+                if inserted != 1 {
+                    return Ok(false);
+                }
+                transaction.commit()?;
+                Ok(true)
+            })
+            .unwrap_or(false);
+        if approved {
+            self.award_payment_crystals(id, now);
+        }
+        approved
     }
 
     pub fn reject_payment(&self, id: i64, admin_id: i64, reason: &str, now: i64) -> bool {
@@ -2028,6 +2152,24 @@ impl Store {
             return false;
         }
         self.with_conn(|c|c.execute("UPDATE payment_requests SET status='rejected',reject_reason=?2,decided_at=?3,decided_by=?4 WHERE id=?1 AND status='pending'",rusqlite::params![id,reason,now,admin_id])).map(|n|n==1).unwrap_or(false)
+    }
+
+    pub fn cancel_pending_payments(&self, user_id: i64, ids: &[i64], now: i64) -> usize {
+        self.with_conn(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let mut changed = 0usize;
+            for id in ids {
+                changed += transaction.execute(
+                    "UPDATE payment_requests
+                     SET status='rejected',reject_reason='Отменено пользователем',decided_at=?3,decided_by=?2
+                     WHERE id=?1 AND user_id=?2 AND status='pending'",
+                    rusqlite::params![id, user_id, now],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed)
+        })
+        .unwrap_or(0)
     }
 
     pub fn claim_acquiring_webhook(
@@ -2342,6 +2484,38 @@ mod tests {
         assert!(s
             .create_renewal_request(1, "alice_phone", 6, 100_000, 14)
             .is_some());
+    }
+
+    #[test]
+    fn payment_crystals_are_idempotent_and_spend_atomically() {
+        let store = Store::open_in_memory();
+        store.upsert_user(1, Some("alice"), "Alice", None, 10);
+        let payment = store
+            .create_payment_request(1, 0, 100_000, "topup", 11)
+            .unwrap();
+        assert!(store.approve_topup(payment, 99, Some("test"), 12));
+        assert_eq!(store.crystal_balance(1), 10);
+        assert_eq!(store.award_payment_crystals(payment, 13), 0);
+        assert!(store.spend_crystals(1, 7, "test-redemption", 14));
+        assert_eq!(store.crystal_balance(1), 3);
+        assert!(!store.spend_crystals(1, 4, "too-much", 15));
+        assert!(!store.spend_crystals(1, 1, "test-redemption", 16));
+    }
+
+    #[test]
+    fn user_can_cancel_only_own_pending_payment() {
+        let store = Store::open_in_memory();
+        store.upsert_user(1, None, "Alice", None, 10);
+        store.upsert_user(2, None, "Bob", None, 10);
+        let payment = store
+            .create_payment_request(1, 1, 10_000, "manual", 11)
+            .unwrap();
+        assert_eq!(store.cancel_pending_payments(2, &[payment], 12), 0);
+        assert_eq!(store.cancel_pending_payments(1, &[payment], 13), 1);
+        assert_eq!(
+            store.payment_request(payment).unwrap().status,
+            PaymentStatus::Rejected
+        );
     }
 
     #[test]
