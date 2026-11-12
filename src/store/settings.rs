@@ -25,6 +25,21 @@ struct LegacyState {
 }
 
 impl Store {
+    pub fn crystals_per_100_rubles(&self) -> i64 {
+        self.get_json::<i64>("crystals_per_100_rubles")
+            .unwrap_or(1)
+            .max(0)
+    }
+
+    pub fn set_crystals_per_100_rubles(&self, value: i64) {
+        self.set_json("crystals_per_100_rubles", &value.max(0));
+    }
+
+    pub fn crystal_value_kopecks(&self) -> i64 {
+        self.get_json::<i64>("crystal_value_kopecks")
+            .unwrap_or(1_000)
+            .max(1)
+    }
     fn get_json<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
         self.with_conn(|c| {
             c.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {

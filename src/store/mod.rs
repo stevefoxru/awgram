@@ -24,8 +24,9 @@ mod stats;
 
 pub use broadcasts::BroadcastRun;
 pub use commerce::{
-    AdminUserProfile, AdminUserStats, BalanceEntry, FinanceSummary, KeyReplacement, LegacyRequest,
-    MonitorEvent, MonitorState, PaymentRequest, PaymentStatus, PromoCode, SupportTicket, UserRow,
+    AdminManualRenewal, AdminUserProfile, AdminUserStats, BalanceEntry, FinanceSummary,
+    KeyReplacement, LegacyRequest, MonitorEvent, MonitorState, PaymentRequest, PaymentStatus,
+    PromoCode, SupportTicket, UserRow,
 };
 pub use events::{EventKind, EventRow};
 pub use groups::{
@@ -908,6 +909,20 @@ pub(crate) const MIGRATIONS: &[&str] = &[
       INSERT OR IGNORE INTO user_internal_ids(user_id,internal_id)
       VALUES(NEW.user_id,COALESCE((SELECT MAX(internal_id)+1 FROM user_internal_ids),1));
     END;
+    "#,
+    // v45: универсальный журнал бонусных кристаллов. Источник и reference
+    // позволяют безопасно добавлять будущие правила без повторных начислений.
+    r#"
+    CREATE TABLE crystal_ledger(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        amount INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        reference TEXT NOT NULL UNIQUE,
+        details TEXT,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_crystal_ledger_user ON crystal_ledger(user_id,created_at DESC,id DESC);
     "#,
 ];
 

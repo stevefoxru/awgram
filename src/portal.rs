@@ -444,6 +444,49 @@ async fn create_web_renewal(
         };
         (months, amount, false)
     };
+    if input.payment_method.as_deref() == Some("crystals") {
+        let target = if legacy {
+            crate::calendar::legacy_renewal_target(now, state.vpn.client_expiry(&name))
+        } else {
+            state
+                .vpn
+                .client_expiry(&name)
+                .unwrap_or(now)
+                .max(now)
+                .saturating_add(months.saturating_mul(30 * 24 * 60 * 60))
+        };
+        let value = state.store.crystal_value_kopecks();
+        let required = amount.saturating_add(value - 1) / value;
+        let reference = format!("web-renew-crystals:{user_id}:{name}:{target}");
+        if !state
+            .store
+            .spend_crystals(user_id, required, &reference, now)
+        {
+            return (
+                StatusCode::CONFLICT,
+                format!("Недостаточно кристаллов. Нужно {required} 💎"),
+            )
+                .into_response();
+        }
+        if let Err(error) =
+            crate::bot::handlers::set_managed_expiry(&state.vpn, &state.store, &name, target).await
+        {
+            state.store.add_crystals(
+                user_id,
+                required,
+                "refund",
+                &format!("refund:{reference}"),
+                Some("web renewal failed"),
+                now,
+            );
+            return (
+                StatusCode::CONFLICT,
+                format!("Не удалось продлить ключ: {error}"),
+            )
+                .into_response();
+        }
+        return Json(serde_json::json!({"ok":true,"completed":true,"payment_method":"crystals","crystals":required,"months":months,"legacy":legacy,"expires_at":target})).into_response();
+    }
     if input.payment_method.as_deref() == Some("balance") {
         let target = if legacy {
             crate::calendar::legacy_renewal_target(now, state.vpn.client_expiry(&name))
@@ -1464,6 +1507,13 @@ struct AdminBalanceAction {
 }
 
 #[derive(serde::Deserialize)]
+struct AdminManualRenewalInput {
+    months: i64,
+    amount_rubles: f64,
+    reason: String,
+}
+
+#[derive(serde::Deserialize)]
 struct AdminPromoInput {
     code: String,
     discount_percent: i64,
@@ -1636,7 +1686,7 @@ async fn admin_user_profile(
     for key in &mut overview.keys {
         key.expires_at = state.vpn.client_expiry(&key.name);
     }
-    Json(serde_json::json!({"user":{"id":user.user_id,"internal_id":overview.internal_id,"display_name":user.display_name,"username":user.username,"created_at":user.created_at,"balance_kopecks":overview.balance_kopecks,"referral_count":overview.referral_count},"keys":overview.keys,"payments":overview.payments,"tickets":overview.tickets,"balance_history":overview.balance_history})).into_response()
+    Json(serde_json::json!({"user":{"id":user.user_id,"internal_id":overview.internal_id,"display_name":user.display_name,"username":user.username,"created_at":user.created_at,"balance_kopecks":overview.balance_kopecks,"crystal_balance":overview.crystal_balance,"referral_count":overview.referral_count},"keys":overview.keys,"payments":overview.payments,"tickets":overview.tickets,"balance_history":overview.balance_history})).into_response()
 }
 
 async fn admin_ticket_action(
@@ -1883,6 +1933,87 @@ async fn admin_balance_action(
             .await;
     }
     Json(serde_json::json!({"ok":true,"balance_kopecks":state.store.balance_kopecks(id)}))
+        .into_response()
+}
+
+async fn admin_manual_renewal(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+    Json(input): Json<AdminManualRenewalInput>,
+) -> Response {
+    if !same_site_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(admin_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(user_id) = state.store.client_owner(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !matches!(input.months, 1 | 3 | 6 | 12) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Допустимый срок: 1, 3, 6 или 12 месяцев",
+        )
+            .into_response();
+    }
+    let amount = (input.amount_rubles * 100.0).round() as i64;
+    let reason = input.reason.trim();
+    if !(0..=10_000_000).contains(&amount) || reason.is_empty() || reason.chars().count() > 500 {
+        return (StatusCode::BAD_REQUEST, "Проверьте сумму и комментарий").into_response();
+    }
+    let seconds = input.months.saturating_mul(30 * 86_400);
+    let now = now_epoch();
+    let expires_at = match crate::bot::handlers::extend_managed_client(
+        &state.vpn,
+        &state.store,
+        &name,
+        seconds,
+        now,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::CONFLICT, error.to_string()).into_response(),
+    };
+    let Some(payment_id) =
+        state
+            .store
+            .record_admin_manual_renewal(crate::store::AdminManualRenewal {
+                user_id,
+                client_name: &name,
+                months: input.months,
+                amount_kopecks: amount,
+                admin_id,
+                details: reason,
+                now,
+            })
+    else {
+        return (
+            StatusCode::CONFLICT,
+            "Срок продлён, но финансовую операцию записать не удалось",
+        )
+            .into_response();
+    };
+    state.store.add_portal_notification(
+        user_id,
+        "renewal",
+        "Ключ продлён администратором",
+        &format!(
+            "Ключ «{name}» продлён до {}. Учтена оплата {:.2} ₽.",
+            crate::calendar::format_date(expires_at),
+            amount as f64 / 100.0
+        ),
+        Some("/?view=keys"),
+        now,
+    );
+    Json(serde_json::json!({"ok":true,"payment_id":payment_id,"expires_at":expires_at}))
         .into_response()
 }
 
@@ -2574,6 +2705,7 @@ pub async fn run(
         .route("/api/admin/users/{id}/action", post(admin_user_action))
         .route("/api/admin/users/{id}", get(admin_user_profile))
         .route("/api/admin/users/{id}/balance", post(admin_balance_action))
+        .route("/api/admin/keys/{name}/renew", post(admin_manual_renewal))
         .route("/api/admin/legacy/prices", patch(admin_legacy_prices))
         .route("/api/admin/tickets/{id}/action", post(admin_ticket_action))
         .route(
