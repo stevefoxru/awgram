@@ -1965,7 +1965,7 @@ async fn admin_manual_renewal(
     }
     let amount = (input.amount_rubles * 100.0).round() as i64;
     let reason = input.reason.trim();
-    if amount < 0 || amount > 10_000_000 || reason.is_empty() || reason.chars().count() > 500 {
+    if !(0..=10_000_000).contains(&amount) || reason.is_empty() || reason.chars().count() > 500 {
         return (StatusCode::BAD_REQUEST, "Проверьте сумму и комментарий").into_response();
     }
     let seconds = input.months.saturating_mul(30 * 86_400);
@@ -1982,15 +1982,19 @@ async fn admin_manual_renewal(
         Ok(value) => value,
         Err(error) => return (StatusCode::CONFLICT, error.to_string()).into_response(),
     };
-    let Some(payment_id) = state.store.record_admin_manual_renewal(
-        user_id,
-        &name,
-        input.months,
-        amount,
-        admin_id,
-        reason,
-        now,
-    ) else {
+    let Some(payment_id) =
+        state
+            .store
+            .record_admin_manual_renewal(crate::store::AdminManualRenewal {
+                user_id,
+                client_name: &name,
+                months: input.months,
+                amount_kopecks: amount,
+                admin_id,
+                details: reason,
+                now,
+            })
+    else {
         return (
             StatusCode::CONFLICT,
             "Срок продлён, но финансовую операцию записать не удалось",

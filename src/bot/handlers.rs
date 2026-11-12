@@ -5186,15 +5186,15 @@ async fn message_handler(
         match result {
             Ok(Some(epoch)) => {
                 let payment = paid_kopecks.and_then(|amount| {
-                    settings.record_admin_manual_renewal(
-                        owner?,
-                        &name,
-                        months.unwrap_or(1),
-                        amount,
-                        uid,
-                        note,
-                        now_epoch(),
-                    )
+                    settings.record_admin_manual_renewal(crate::store::AdminManualRenewal {
+                        user_id: owner?,
+                        client_name: &name,
+                        months: months.unwrap_or(1),
+                        amount_kopecks: amount,
+                        admin_id: uid,
+                        details: note,
+                        now: now_epoch(),
+                    })
                 });
                 bot.send_message(
                     msg.chat.id,

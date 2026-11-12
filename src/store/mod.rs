@@ -24,8 +24,9 @@ mod stats;
 
 pub use broadcasts::BroadcastRun;
 pub use commerce::{
-    AdminUserProfile, AdminUserStats, BalanceEntry, FinanceSummary, KeyReplacement, LegacyRequest,
-    MonitorEvent, MonitorState, PaymentRequest, PaymentStatus, PromoCode, SupportTicket, UserRow,
+    AdminManualRenewal, AdminUserProfile, AdminUserStats, BalanceEntry, FinanceSummary,
+    KeyReplacement, LegacyRequest, MonitorEvent, MonitorState, PaymentRequest, PaymentStatus,
+    PromoCode, SupportTicket, UserRow,
 };
 pub use events::{EventKind, EventRow};
 pub use groups::{

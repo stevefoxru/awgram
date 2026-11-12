@@ -73,6 +73,16 @@ pub struct PaymentRequest {
     pub server_id: Option<i64>,
 }
 
+pub struct AdminManualRenewal<'a> {
+    pub user_id: i64,
+    pub client_name: &'a str,
+    pub months: i64,
+    pub amount_kopecks: i64,
+    pub admin_id: i64,
+    pub details: &'a str,
+    pub now: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct SupportTicket {
     pub id: i64,
@@ -2001,16 +2011,16 @@ impl Store {
         }).ok().flatten()
     }
 
-    pub fn record_admin_manual_renewal(
-        &self,
-        user_id: i64,
-        client_name: &str,
-        months: i64,
-        amount_kopecks: i64,
-        admin_id: i64,
-        details: &str,
-        now: i64,
-    ) -> Option<i64> {
+    pub fn record_admin_manual_renewal(&self, input: AdminManualRenewal<'_>) -> Option<i64> {
+        let AdminManualRenewal {
+            user_id,
+            client_name,
+            months,
+            amount_kopecks,
+            admin_id,
+            details,
+            now,
+        } = input;
         if self.client_owner(client_name) != Some(user_id)
             || months <= 0
             || amount_kopecks < 0
