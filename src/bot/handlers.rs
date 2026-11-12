@@ -9780,15 +9780,15 @@ async fn callback_handler(
                 .await?;
                 return Ok(());
             }
-            let Some(id) = settings.create_broadcast_run(
-                uid,
+            let Some(id) = settings.create_broadcast_run(crate::store::NewBroadcastRun {
+                admin_id: uid,
                 source_chat_id,
                 source_message_id,
-                &audience,
-                &recipients,
-                telegram_bot_id(&bot),
-                now_epoch(),
-            ) else {
+                audience: &audience,
+                recipients: &recipients,
+                bot_id: telegram_bot_id(&bot),
+                now: now_epoch(),
+            }) else {
                 bot.send_message(chat, "Рассылка уже была запущена или не удалось создать отчёт. Повторная отправка не выполнялась.")
                     .reply_markup(menu::admin_communication_hub()).await?;
                 return Ok(());

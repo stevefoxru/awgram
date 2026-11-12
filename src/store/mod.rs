@@ -22,7 +22,7 @@ mod settings;
 mod stars;
 mod stats;
 
-pub use broadcasts::{BotReachability, BroadcastRun};
+pub use broadcasts::{BotReachability, BroadcastRun, NewBroadcastRun};
 pub use commerce::{
     AdminManualRenewal, AdminUserProfile, AdminUserStats, BalanceEntry, FinanceSummary,
     KeyReplacement, LegacyRequest, MonitorEvent, MonitorState, PaymentRequest, PaymentStatus,

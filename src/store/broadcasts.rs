@@ -20,17 +20,27 @@ pub enum BotReachability {
     Unreachable,
 }
 
+pub struct NewBroadcastRun<'a> {
+    pub admin_id: i64,
+    pub source_chat_id: i64,
+    pub source_message_id: i32,
+    pub audience: &'a str,
+    pub recipients: &'a [i64],
+    pub bot_id: i64,
+    pub now: i64,
+}
+
 impl Store {
-    pub fn create_broadcast_run(
-        &self,
-        admin_id: i64,
-        source_chat_id: i64,
-        source_message_id: i32,
-        audience: &str,
-        recipients: &[i64],
-        bot_id: i64,
-        now: i64,
-    ) -> Option<i64> {
+    pub fn create_broadcast_run(&self, input: NewBroadcastRun<'_>) -> Option<i64> {
+        let NewBroadcastRun {
+            admin_id,
+            source_chat_id,
+            source_message_id,
+            audience,
+            recipients,
+            bot_id,
+            now,
+        } = input;
         self.with_conn(|connection| {
             let transaction = connection.unchecked_transaction()?;
             let already_sent: bool = transaction.query_row(
@@ -176,10 +186,26 @@ mod tests {
         let store = Store::open_in_memory();
         store.upsert_user(10, None, "Alice", None, 100);
         store.upsert_user(11, None, "Bob", None, 100);
-        let first = store.create_broadcast_run(1, 1, 77, "all", &[10, 11], 1000, 100);
+        let first = store.create_broadcast_run(super::NewBroadcastRun {
+            admin_id: 1,
+            source_chat_id: 1,
+            source_message_id: 77,
+            audience: "all",
+            recipients: &[10, 11],
+            bot_id: 1000,
+            now: 100,
+        });
         assert!(first.is_some());
         assert!(store
-            .create_broadcast_run(1, 1, 77, "all", &[10, 11], 1000, 101)
+            .create_broadcast_run(super::NewBroadcastRun {
+                admin_id: 1,
+                source_chat_id: 1,
+                source_message_id: 77,
+                audience: "all",
+                recipients: &[10, 11],
+                bot_id: 1000,
+                now: 101,
+            })
             .is_none());
         let id = first.unwrap();
         store.record_broadcast_delivery(id, 10, true, None, 102);
