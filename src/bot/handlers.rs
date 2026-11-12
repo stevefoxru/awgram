@@ -1134,6 +1134,21 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+fn telegram_bot_id(bot: &Bot) -> i64 {
+    bot.token()
+        .split_once(':')
+        .and_then(|(id, _)| id.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+fn is_permanent_delivery_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("bot was blocked")
+        || error.contains("chat not found")
+        || error.contains("user is deactivated")
+        || error.contains("forbidden")
+}
+
 async fn fresh_panel_inventory(
     vpn: &Vpn,
     settings: &Store,
@@ -3902,8 +3917,21 @@ fn broadcast_audience_label(audience: &str, settings: &Store) -> String {
     }
 }
 
-fn broadcast_recipients(audience: &str, settings: &Store, vpn: &Vpn, now: i64) -> Vec<i64> {
-    settings
+struct BroadcastAudience {
+    recipients: Vec<i64>,
+    reachable: usize,
+    unknown: usize,
+    unavailable: usize,
+}
+
+fn broadcast_recipients(
+    audience: &str,
+    settings: &Store,
+    vpn: &Vpn,
+    bot_id: i64,
+    now: i64,
+) -> BroadcastAudience {
+    let eligible = settings
         .all_user_ids()
         .into_iter()
         .filter(|user_id| *user_id > 0)
@@ -3938,7 +3966,30 @@ fn broadcast_recipients(audience: &str, settings: &Store, vpn: &Vpn, now: i64) -
                 _ => false,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let mut recipients = Vec::with_capacity(eligible.len());
+    let mut reachable = 0;
+    let mut unknown = 0;
+    let mut unavailable = 0;
+    for user_id in eligible {
+        match settings.bot_user_reachability(bot_id, user_id) {
+            crate::store::BotReachability::Reachable => {
+                reachable += 1;
+                recipients.push(user_id);
+            }
+            crate::store::BotReachability::Unknown => {
+                unknown += 1;
+                recipients.push(user_id);
+            }
+            crate::store::BotReachability::Unreachable => unavailable += 1,
+        }
+    }
+    BroadcastAudience {
+        recipients,
+        reachable,
+        unknown,
+        unavailable,
+    }
 }
 
 async fn message_handler(
@@ -3971,6 +4022,7 @@ async fn message_handler(
             referrer,
             now_epoch(),
         );
+        settings.mark_bot_user_reachable(telegram_bot_id(&bot), uid, now_epoch());
         if let Some(source) = msg
             .text()
             .and_then(|text| text.strip_prefix("/start "))
@@ -4415,22 +4467,28 @@ async fn message_handler(
                 return Ok(());
             }
         };
-        let recipients = broadcast_recipients(&audience, &settings, &vpn, now_epoch());
-        if recipients.is_empty() {
+        let selection = broadcast_recipients(
+            &audience,
+            &settings,
+            &vpn,
+            telegram_bot_id(&bot),
+            now_epoch(),
+        );
+        if selection.recipients.is_empty() {
             bot.send_message(msg.chat.id, "В выбранной аудитории нет получателей Telegram. Выберите другой сегмент; ничего не отправлено.")
                 .reply_markup(menu::broadcast_audience_menu()).await?;
             dialogue.update(State::Idle).await?;
             return Ok(());
         }
-        let count = recipients.len();
-        bot.send_message(msg.chat.id, format!("📣 Предпросмотр рассылки выше\n\nАудитория: {}\nПолучателей: {count}\n\nПроверьте содержание и нажмите кнопку отправки. До этого момента пользователям ничего не отправлено.", broadcast_audience_label(&audience, &settings)))
+        let count = selection.recipients.len();
+        bot.send_message(msg.chat.id, format!("📣 Предпросмотр рассылки выше\n\nАудитория: {}\nПолучателей: {count}\n✅ Проверено для этого бота: {}\n❔ Ещё не проверено: {}\n⛔ Недоступно этому боту: {}\n\nНеизвестные получатели включены в первую попытку. Проверьте содержание и нажмите кнопку отправки. До этого момента пользователям ничего не отправлено.", broadcast_audience_label(&audience, &settings), selection.reachable, selection.unknown, selection.unavailable))
             .reply_markup(menu::broadcast_confirm_menu(msg.id.0)).await?;
         dialogue
             .update(State::AwaitingBroadcastConfirm {
                 source_chat_id: msg.chat.id.0,
                 source_message_id: msg.id.0,
                 audience,
-                recipients,
+                recipients: selection.recipients,
                 created_at: now_epoch(),
             })
             .await?;
@@ -7638,6 +7696,7 @@ async fn callback_handler(
         None,
         now_epoch(),
     );
+    settings.mark_bot_user_reachable(telegram_bot_id(&bot), uid, now_epoch());
     let role = resolve_role(uid, &cfg.admin_ids, &settings);
     let data = q.data.clone().unwrap_or_default();
     let action = parse_callback(&data);
@@ -9721,14 +9780,15 @@ async fn callback_handler(
                 .await?;
                 return Ok(());
             }
-            let Some(id) = settings.create_broadcast_run(
-                uid,
+            let Some(id) = settings.create_broadcast_run(crate::store::NewBroadcastRun {
+                admin_id: uid,
                 source_chat_id,
                 source_message_id,
-                &audience,
-                &recipients,
-                now_epoch(),
-            ) else {
+                audience: &audience,
+                recipients: &recipients,
+                bot_id: telegram_bot_id(&bot),
+                now: now_epoch(),
+            }) else {
                 bot.send_message(chat, "Рассылка уже была запущена или не удалось создать отчёт. Повторная отправка не выполнялась.")
                     .reply_markup(menu::admin_communication_hub()).await?;
                 return Ok(());
@@ -9758,10 +9818,23 @@ async fn callback_handler(
                 match result {
                     Ok(_) => {
                         delivered += 1;
+                        settings.mark_bot_user_reachable(
+                            telegram_bot_id(&bot),
+                            user_id,
+                            now_epoch(),
+                        );
                         settings.record_broadcast_delivery(id, user_id, true, None, now_epoch());
                     }
                     Err(error) => {
                         failed += 1;
+                        if is_permanent_delivery_error(&error.to_string()) {
+                            settings.mark_bot_user_unreachable(
+                                telegram_bot_id(&bot),
+                                user_id,
+                                &error.to_string(),
+                                now_epoch(),
+                            );
+                        }
                         settings.record_broadcast_delivery(
                             id,
                             user_id,
@@ -9782,8 +9855,11 @@ async fn callback_handler(
                     "id={id} audience={audience} delivered={delivered} failed={failed}"
                 )),
             );
+            let can_retry = settings
+                .broadcast_run(id)
+                .is_some_and(|run| run.failed > 0 || run.pending > 0);
             bot.send_message(chat, format!("📊 Рассылка #{id} завершена\n\n✅ Доставлено: {delivered}\n❌ Ошибок: {failed}\n\nНеудачные доставки можно повторить отдельной кнопкой."))
-                .reply_markup(menu::broadcast_report_menu(id, failed > 0)).await?;
+                .reply_markup(menu::broadcast_report_menu(id, can_retry)).await?;
         }
         Action::AdminBroadcastTemplates => {
             bot.send_message(chat, "📝 Шаблоны рассылок\n\nНажмите на текст сообщения, чтобы быстро выделить и скопировать. Перед отправкой замените значения в {фигурных скобках}.\n\n<pre>⚠️ Технические работы\n\n{дата} с {начало} до {конец} возможны перерывы подключения на сервере {страна}. После завершения ничего переустанавливать не нужно.</pre>\n\n<pre>🔑 Требуется замена ключа\n\nВаш старый ключ на сервере {страна} больше не работает. Откройте «Мои ключи», выберите его и нажмите «Заменить нерабочий ключ».</pre>\n\n<pre>✅ Новый сервер доступен\n\nДобавлена локация {страна} на AWG 1.0. Приобрести подключение можно в разделе «Купить ключ».</pre>\n\n<pre>💳 Напоминание об оплате\n\nСрок ключа {ключ} истекает {дата}. Продлить его можно из карточки ключа.</pre>")
@@ -9794,7 +9870,7 @@ async fn callback_handler(
             let text = if runs.is_empty() {
                 "📊 История рассылок\n\nПока рассылок нет.".to_string()
             } else {
-                format!("📊 Последние рассылки\n\n{}\n\nНажмите на отчёт для подробностей и повтора ошибок.", runs.iter().map(|run| format!("#{} · {} · доставлено {} · ошибок {}", run.id, broadcast_audience_label(&run.audience, &settings), run.delivered, run.failed)).collect::<Vec<_>>().join("\n"))
+                format!("📊 Последние рассылки\n\n{}\n\nНажмите на отчёт для подробностей и продолжения незавершённых доставок.", runs.iter().map(|run| format!("#{} · {} · доставлено {} · ошибок {} · ожидает {}", run.id, broadcast_audience_label(&run.audience, &settings), run.delivered, run.failed, run.pending)).collect::<Vec<_>>().join("\n"))
             };
             bot.send_message(chat, text)
                 .reply_markup(menu::broadcast_history_menu(&runs))
@@ -9805,13 +9881,17 @@ async fn callback_handler(
                 bot.send_message(
                     chat,
                     format!(
-                        "📊 Рассылка #{id}\n\nАудитория: {}\n✅ Доставлено: {}\n❌ Ошибок: {}",
+                        "📊 Рассылка #{id}\n\nАудитория: {}\n✅ Доставлено: {}\n❌ Ошибок: {}\n⏳ Не завершено: {}",
                         broadcast_audience_label(&run.audience, &settings),
                         run.delivered,
-                        run.failed
+                        run.failed,
+                        run.pending
                     ),
                 )
-                .reply_markup(menu::broadcast_report_menu(id, run.failed > 0))
+                .reply_markup(menu::broadcast_report_menu(
+                    id,
+                    run.failed > 0 || run.pending > 0,
+                ))
                 .await?;
             } else {
                 bot.send_message(chat, "Отчёт рассылки не найден.")
@@ -9822,8 +9902,14 @@ async fn callback_handler(
         Action::BroadcastAudience(audience) => {
             if audience == "legacy-template" {
                 let audience = "legacy".to_string();
-                let recipients = broadcast_recipients(&audience, &settings, &vpn, now_epoch());
-                if recipients.is_empty() {
+                let selection = broadcast_recipients(
+                    &audience,
+                    &settings,
+                    &vpn,
+                    telegram_bot_id(&bot),
+                    now_epoch(),
+                );
+                if selection.recipients.is_empty() {
                     bot.send_message(chat, "Сейчас нет получателей с актуальными Legacy-ключами.")
                         .reply_markup(menu::admin_communication_hub())
                         .await?;
@@ -9844,7 +9930,7 @@ async fn callback_handler(
                     format!(
                         "📣 Предпросмотр готов\n\nАудитория: {}\nПолучателей: {}\n\nПользователям пока ничего не отправлено. Для запуска нажмите кнопку ниже.",
                         broadcast_audience_label(&audience, &settings),
-                        recipients.len()
+                        selection.recipients.len()
                     ),
                 )
                 .reply_markup(menu::broadcast_confirm_menu(preview.id.0))
@@ -9854,7 +9940,7 @@ async fn callback_handler(
                         source_chat_id: chat.0,
                         source_message_id: preview.id.0,
                         audience,
-                        recipients,
+                        recipients: selection.recipients,
                         created_at: now_epoch(),
                     })
                     .await?;
@@ -9870,8 +9956,14 @@ async fn callback_handler(
             ) || server_segment.is_some()
             {
                 let label = broadcast_audience_label(&audience, &settings);
-                let count = broadcast_recipients(&audience, &settings, &vpn, now_epoch()).len();
-                bot.send_message(chat,format!("👥 Аудитория: {label}\nСейчас в сегменте: {count}\n\nОтправьте сообщение для предпросмотра (текст, фото или документ). После него появится кнопка отправки. Доступны только пользователи Telegram, уже открывшие этого бота.")).reply_markup(menu::broadcast_compose_menu()).await?;
+                let selection = broadcast_recipients(
+                    &audience,
+                    &settings,
+                    &vpn,
+                    telegram_bot_id(&bot),
+                    now_epoch(),
+                );
+                bot.send_message(chat,format!("👥 Аудитория: {label}\nБудет предпринята доставка: {}\n✅ Проверено для этого бота: {}\n❔ Ещё не проверено: {}\n⛔ Ранее подтверждено недоступных: {}\n\nНеизвестные получатели будут проверены при отправке. Отправьте сообщение для предпросмотра (текст, фото или документ).", selection.recipients.len(), selection.reachable, selection.unknown, selection.unavailable)).reply_markup(menu::broadcast_compose_menu()).await?;
                 dialogue
                     .update(State::AwaitingBroadcast { audience })
                     .await?;
@@ -9884,7 +9976,16 @@ async fn callback_handler(
                     .await?;
                 return Ok(());
             };
-            let recipients = settings.failed_broadcast_recipients(id);
+            if run.bot_id != 0 && run.bot_id != telegram_bot_id(&bot) {
+                bot.send_message(
+                    chat,
+                    "Эта рассылка создана другим ботом. Повторите ошибки через того же бота, иначе Telegram не даст скопировать исходное сообщение.",
+                )
+                .reply_markup(menu::admin_communication_hub())
+                .await?;
+                return Ok(());
+            }
+            let recipients = settings.retryable_broadcast_recipients(id);
             let mut recovered = 0usize;
             let mut failed = 0usize;
             for user_id in recipients {
@@ -9902,10 +10003,23 @@ async fn callback_handler(
                 match result {
                     Ok(_) => {
                         recovered += 1;
+                        settings.mark_bot_user_reachable(
+                            telegram_bot_id(&bot),
+                            user_id,
+                            now_epoch(),
+                        );
                         settings.record_broadcast_delivery(id, user_id, true, None, now_epoch());
                     }
                     Err(error) => {
                         failed += 1;
+                        if is_permanent_delivery_error(&error.to_string()) {
+                            settings.mark_bot_user_unreachable(
+                                telegram_bot_id(&bot),
+                                user_id,
+                                &error.to_string(),
+                                now_epoch(),
+                            );
+                        }
                         settings.record_broadcast_delivery(
                             id,
                             user_id,
@@ -9917,8 +10031,11 @@ async fn callback_handler(
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             }
+            let can_retry = settings
+                .broadcast_run(id)
+                .is_some_and(|run| run.failed > 0 || run.pending > 0);
             bot.send_message(chat,format!("🔁 Повтор рассылки #{id} завершён.\n\nДоставлено при повторе: {recovered}\nОсталось ошибок: {failed}"))
-                .reply_markup(menu::broadcast_report_menu(id,failed>0)).await?;
+                .reply_markup(menu::broadcast_report_menu(id,can_retry)).await?;
         }
         Action::AdminHelp => {
             bot.send_message(chat,"ℹ️ Навигация\n\n➕ Создать ключ — один новый клиент\n📦 Создать оптом — пакет последовательных ключей\n📊 Статистика — трафик, активность, лидеры и подразделы\n🔎 Поиск — ключи и владельцы\n🧰 Массовое управление — включение, отключение и продление по префиксу\n🧑‍💼 Роли — назначение сотрудников\n\nВсе основные действия выполняются кнопками; текстовые команды оставлены только для совместимости.").reply_markup(menu::admin_dashboard_menu()).await?;

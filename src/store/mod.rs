@@ -22,7 +22,7 @@ mod settings;
 mod stars;
 mod stats;
 
-pub use broadcasts::BroadcastRun;
+pub use broadcasts::{BotReachability, BroadcastRun, NewBroadcastRun};
 pub use commerce::{
     AdminManualRenewal, AdminUserProfile, AdminUserStats, BalanceEntry, FinanceSummary,
     KeyReplacement, LegacyRequest, MonitorEvent, MonitorState, PaymentRequest, PaymentStatus,
@@ -923,6 +923,21 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL
     );
     CREATE INDEX idx_crystal_ledger_user ON crystal_ledger(user_id,created_at DESC,id DESC);
+    "#,
+    // v46: доступность пользователя отдельно для каждого Telegram-бота.
+    // Старые кампании получают bot_id=0 и остаются читаемыми.
+    r#"
+    ALTER TABLE broadcasts ADD COLUMN bot_id INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE bot_user_reachability(
+        bot_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK(status IN ('reachable','unreachable')),
+        last_seen_at INTEGER NOT NULL,
+        last_error TEXT,
+        PRIMARY KEY(bot_id,user_id)
+    );
+    CREATE INDEX idx_bot_user_reachability_status
+        ON bot_user_reachability(bot_id,status,last_seen_at DESC);
     "#,
 ];
 
