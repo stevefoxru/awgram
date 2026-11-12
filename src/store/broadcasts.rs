@@ -10,6 +10,14 @@ pub struct BroadcastRun {
     pub audience: String,
     pub delivered: i64,
     pub failed: i64,
+    pub bot_id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BotReachability {
+    Unknown,
+    Reachable,
+    Unreachable,
 }
 
 impl Store {
@@ -20,20 +28,21 @@ impl Store {
         source_message_id: i32,
         audience: &str,
         recipients: &[i64],
+        bot_id: i64,
         now: i64,
     ) -> Option<i64> {
         self.with_conn(|connection| {
             let transaction = connection.unchecked_transaction()?;
             let already_sent: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM broadcasts WHERE source_chat_id=?1 AND source_message_id=?2)",
-                rusqlite::params![source_chat_id, source_message_id],
+                "SELECT EXISTS(SELECT 1 FROM broadcasts WHERE source_chat_id=?1 AND source_message_id=?2 AND bot_id=?3)",
+                rusqlite::params![source_chat_id, source_message_id, bot_id],
                 |row| row.get(0),
             )?;
             if already_sent { return Ok(None); }
             transaction.execute(
-                "INSERT INTO broadcasts(admin_id,source_chat_id,source_message_id,audience,created_at)
-                 VALUES(?1,?2,?3,?4,?5)",
-                rusqlite::params![admin_id,source_chat_id,source_message_id,audience,now],
+                "INSERT INTO broadcasts(admin_id,source_chat_id,source_message_id,audience,created_at,bot_id)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![admin_id,source_chat_id,source_message_id,audience,now,bot_id],
             )?;
             let id = transaction.last_insert_rowid();
             for user_id in recipients {
@@ -46,6 +55,56 @@ impl Store {
             transaction.commit()?;
             Ok(Some(id))
         }).ok().flatten()
+    }
+
+    pub fn mark_bot_user_reachable(&self, bot_id: i64, user_id: i64, now: i64) {
+        if bot_id <= 0 || user_id <= 0 {
+            return;
+        }
+        let _ = self.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO bot_user_reachability(bot_id,user_id,status,last_seen_at,last_error)
+                 VALUES(?1,?2,'reachable',?3,NULL)
+                 ON CONFLICT(bot_id,user_id) DO UPDATE SET
+                   status='reachable',last_seen_at=excluded.last_seen_at,last_error=NULL",
+                rusqlite::params![bot_id, user_id, now],
+            )
+        });
+    }
+
+    pub fn mark_bot_user_unreachable(&self, bot_id: i64, user_id: i64, error: &str, now: i64) {
+        if bot_id <= 0 || user_id <= 0 {
+            return;
+        }
+        let details = error.chars().take(500).collect::<String>();
+        let _ = self.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO bot_user_reachability(bot_id,user_id,status,last_seen_at,last_error)
+                 VALUES(?1,?2,'unreachable',?3,?4)
+                 ON CONFLICT(bot_id,user_id) DO UPDATE SET
+                   status='unreachable',last_seen_at=excluded.last_seen_at,last_error=excluded.last_error",
+                rusqlite::params![bot_id, user_id, now, details],
+            )
+        });
+    }
+
+    pub fn bot_user_reachability(&self, bot_id: i64, user_id: i64) -> BotReachability {
+        self.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT status FROM bot_user_reachability WHERE bot_id=?1 AND user_id=?2",
+                    rusqlite::params![bot_id, user_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+        .map_or(BotReachability::Unknown, |status| match status.as_str() {
+            "reachable" => BotReachability::Reachable,
+            "unreachable" => BotReachability::Unreachable,
+            _ => BotReachability::Unknown,
+        })
     }
 
     pub fn record_broadcast_delivery(
@@ -88,20 +147,20 @@ impl Store {
 
     pub fn broadcast_run(&self, id: i64) -> Option<BroadcastRun> {
         self.with_conn(|connection| connection.query_row(
-            "SELECT id,source_chat_id,source_message_id,audience,delivered,failed FROM broadcasts WHERE id=?1",
+            "SELECT id,source_chat_id,source_message_id,audience,delivered,failed,bot_id FROM broadcasts WHERE id=?1",
             [id],
-            |row| Ok(BroadcastRun { id:row.get(0)?,source_chat_id:row.get(1)?,source_message_id:row.get(2)?,audience:row.get(3)?,delivered:row.get(4)?,failed:row.get(5)? }),
+            |row| Ok(BroadcastRun { id:row.get(0)?,source_chat_id:row.get(1)?,source_message_id:row.get(2)?,audience:row.get(3)?,delivered:row.get(4)?,failed:row.get(5)?,bot_id:row.get(6)? }),
         ).optional()).ok().flatten()
     }
 
     pub fn recent_broadcasts(&self, limit: usize) -> Vec<BroadcastRun> {
         self.with_conn(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id,source_chat_id,source_message_id,audience,delivered,failed FROM broadcasts ORDER BY id DESC LIMIT ?1",
+                "SELECT id,source_chat_id,source_message_id,audience,delivered,failed,bot_id FROM broadcasts ORDER BY id DESC LIMIT ?1",
             )?;
             let rows = statement.query_map([limit.min(20) as i64], |row| Ok(BroadcastRun {
                 id: row.get(0)?, source_chat_id: row.get(1)?, source_message_id: row.get(2)?,
-                audience: row.get(3)?, delivered: row.get(4)?, failed: row.get(5)?,
+                audience: row.get(3)?, delivered: row.get(4)?, failed: row.get(5)?, bot_id: row.get(6)?,
             }))?;
             rows.collect()
         }).unwrap_or_default()
@@ -117,10 +176,10 @@ mod tests {
         let store = Store::open_in_memory();
         store.upsert_user(10, None, "Alice", None, 100);
         store.upsert_user(11, None, "Bob", None, 100);
-        let first = store.create_broadcast_run(1, 1, 77, "all", &[10, 11], 100);
+        let first = store.create_broadcast_run(1, 1, 77, "all", &[10, 11], 1000, 100);
         assert!(first.is_some());
         assert!(store
-            .create_broadcast_run(1, 1, 77, "all", &[10, 11], 101)
+            .create_broadcast_run(1, 1, 77, "all", &[10, 11], 1000, 101)
             .is_none());
         let id = first.unwrap();
         store.record_broadcast_delivery(id, 10, true, None, 102);
@@ -129,5 +188,29 @@ mod tests {
         let report = store.broadcast_run(id).unwrap();
         assert_eq!((report.delivered, report.failed), (1, 1));
         assert_eq!(store.recent_broadcasts(10).len(), 1);
+    }
+
+    #[test]
+    fn reachability_is_scoped_to_bot() {
+        let store = Store::open_in_memory();
+        store.upsert_user(10, None, "Alice", None, 100);
+        assert_eq!(
+            store.bot_user_reachability(1, 10),
+            super::BotReachability::Unknown
+        );
+        store.mark_bot_user_reachable(1, 10, 101);
+        assert_eq!(
+            store.bot_user_reachability(1, 10),
+            super::BotReachability::Reachable
+        );
+        assert_eq!(
+            store.bot_user_reachability(2, 10),
+            super::BotReachability::Unknown
+        );
+        store.mark_bot_user_unreachable(1, 10, "blocked", 102);
+        assert_eq!(
+            store.bot_user_reachability(1, 10),
+            super::BotReachability::Unreachable
+        );
     }
 }
