@@ -10,6 +10,7 @@ pub struct BroadcastRun {
     pub audience: String,
     pub delivered: i64,
     pub failed: i64,
+    pub pending: i64,
     pub bot_id: i64,
 }
 
@@ -145,32 +146,40 @@ impl Store {
         });
     }
 
-    pub fn failed_broadcast_recipients(&self, id: i64) -> Vec<i64> {
+    pub fn retryable_broadcast_recipients(&self, id: i64) -> Vec<i64> {
         self.with_conn(|connection| {
             let mut statement = connection.prepare(
-                "SELECT user_id FROM broadcast_deliveries WHERE broadcast_id=?1 AND status='failed' ORDER BY user_id",
+                "SELECT user_id FROM broadcast_deliveries
+                 WHERE broadcast_id=?1 AND status IN ('failed','pending') ORDER BY user_id",
             )?;
             let rows = statement.query_map([id], |row| row.get(0))?;
             rows.collect()
-        }).unwrap_or_default()
+        })
+        .unwrap_or_default()
     }
 
     pub fn broadcast_run(&self, id: i64) -> Option<BroadcastRun> {
         self.with_conn(|connection| connection.query_row(
-            "SELECT id,source_chat_id,source_message_id,audience,delivered,failed,bot_id FROM broadcasts WHERE id=?1",
+            "SELECT id,source_chat_id,source_message_id,audience,delivered,failed,
+                    (SELECT COUNT(*) FROM broadcast_deliveries d WHERE d.broadcast_id=broadcasts.id AND d.status='pending'),
+                    bot_id
+             FROM broadcasts WHERE id=?1",
             [id],
-            |row| Ok(BroadcastRun { id:row.get(0)?,source_chat_id:row.get(1)?,source_message_id:row.get(2)?,audience:row.get(3)?,delivered:row.get(4)?,failed:row.get(5)?,bot_id:row.get(6)? }),
+            |row| Ok(BroadcastRun { id:row.get(0)?,source_chat_id:row.get(1)?,source_message_id:row.get(2)?,audience:row.get(3)?,delivered:row.get(4)?,failed:row.get(5)?,pending:row.get(6)?,bot_id:row.get(7)? }),
         ).optional()).ok().flatten()
     }
 
     pub fn recent_broadcasts(&self, limit: usize) -> Vec<BroadcastRun> {
         self.with_conn(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id,source_chat_id,source_message_id,audience,delivered,failed,bot_id FROM broadcasts ORDER BY id DESC LIMIT ?1",
+                "SELECT id,source_chat_id,source_message_id,audience,delivered,failed,
+                        (SELECT COUNT(*) FROM broadcast_deliveries d WHERE d.broadcast_id=broadcasts.id AND d.status='pending'),
+                        bot_id
+                 FROM broadcasts ORDER BY id DESC LIMIT ?1",
             )?;
             let rows = statement.query_map([limit.min(20) as i64], |row| Ok(BroadcastRun {
                 id: row.get(0)?, source_chat_id: row.get(1)?, source_message_id: row.get(2)?,
-                audience: row.get(3)?, delivered: row.get(4)?, failed: row.get(5)?, bot_id: row.get(6)?,
+                audience: row.get(3)?, delivered: row.get(4)?, failed: row.get(5)?, pending: row.get(6)?, bot_id: row.get(7)?,
             }))?;
             rows.collect()
         }).unwrap_or_default()
@@ -210,10 +219,33 @@ mod tests {
         let id = first.unwrap();
         store.record_broadcast_delivery(id, 10, true, None, 102);
         store.record_broadcast_delivery(id, 11, false, Some("blocked"), 102);
-        assert_eq!(store.failed_broadcast_recipients(id), vec![11]);
+        assert_eq!(store.retryable_broadcast_recipients(id), vec![11]);
         let report = store.broadcast_run(id).unwrap();
         assert_eq!((report.delivered, report.failed), (1, 1));
+        assert_eq!(report.pending, 0);
         assert_eq!(store.recent_broadcasts(10).len(), 1);
+    }
+
+    #[test]
+    fn interrupted_broadcast_keeps_pending_recipients_retryable() {
+        let store = Store::open_in_memory();
+        store.upsert_user(10, None, "Alice", None, 100);
+        store.upsert_user(11, None, "Bob", None, 100);
+        let id = store
+            .create_broadcast_run(super::NewBroadcastRun {
+                admin_id: 1,
+                source_chat_id: 1,
+                source_message_id: 77,
+                audience: "all",
+                recipients: &[10, 11],
+                bot_id: 1000,
+                now: 100,
+            })
+            .unwrap();
+        store.record_broadcast_delivery(id, 10, true, None, 101);
+        assert_eq!(store.retryable_broadcast_recipients(id), vec![11]);
+        let report = store.broadcast_run(id).unwrap();
+        assert_eq!((report.delivered, report.failed, report.pending), (1, 0, 1));
     }
 
     #[test]

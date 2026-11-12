@@ -9855,8 +9855,11 @@ async fn callback_handler(
                     "id={id} audience={audience} delivered={delivered} failed={failed}"
                 )),
             );
+            let can_retry = settings
+                .broadcast_run(id)
+                .is_some_and(|run| run.failed > 0 || run.pending > 0);
             bot.send_message(chat, format!("📊 Рассылка #{id} завершена\n\n✅ Доставлено: {delivered}\n❌ Ошибок: {failed}\n\nНеудачные доставки можно повторить отдельной кнопкой."))
-                .reply_markup(menu::broadcast_report_menu(id, failed > 0)).await?;
+                .reply_markup(menu::broadcast_report_menu(id, can_retry)).await?;
         }
         Action::AdminBroadcastTemplates => {
             bot.send_message(chat, "📝 Шаблоны рассылок\n\nНажмите на текст сообщения, чтобы быстро выделить и скопировать. Перед отправкой замените значения в {фигурных скобках}.\n\n<pre>⚠️ Технические работы\n\n{дата} с {начало} до {конец} возможны перерывы подключения на сервере {страна}. После завершения ничего переустанавливать не нужно.</pre>\n\n<pre>🔑 Требуется замена ключа\n\nВаш старый ключ на сервере {страна} больше не работает. Откройте «Мои ключи», выберите его и нажмите «Заменить нерабочий ключ».</pre>\n\n<pre>✅ Новый сервер доступен\n\nДобавлена локация {страна} на AWG 1.0. Приобрести подключение можно в разделе «Купить ключ».</pre>\n\n<pre>💳 Напоминание об оплате\n\nСрок ключа {ключ} истекает {дата}. Продлить его можно из карточки ключа.</pre>")
@@ -9867,7 +9870,7 @@ async fn callback_handler(
             let text = if runs.is_empty() {
                 "📊 История рассылок\n\nПока рассылок нет.".to_string()
             } else {
-                format!("📊 Последние рассылки\n\n{}\n\nНажмите на отчёт для подробностей и повтора ошибок.", runs.iter().map(|run| format!("#{} · {} · доставлено {} · ошибок {}", run.id, broadcast_audience_label(&run.audience, &settings), run.delivered, run.failed)).collect::<Vec<_>>().join("\n"))
+                format!("📊 Последние рассылки\n\n{}\n\nНажмите на отчёт для подробностей и продолжения незавершённых доставок.", runs.iter().map(|run| format!("#{} · {} · доставлено {} · ошибок {} · ожидает {}", run.id, broadcast_audience_label(&run.audience, &settings), run.delivered, run.failed, run.pending)).collect::<Vec<_>>().join("\n"))
             };
             bot.send_message(chat, text)
                 .reply_markup(menu::broadcast_history_menu(&runs))
@@ -9878,13 +9881,17 @@ async fn callback_handler(
                 bot.send_message(
                     chat,
                     format!(
-                        "📊 Рассылка #{id}\n\nАудитория: {}\n✅ Доставлено: {}\n❌ Ошибок: {}",
+                        "📊 Рассылка #{id}\n\nАудитория: {}\n✅ Доставлено: {}\n❌ Ошибок: {}\n⏳ Не завершено: {}",
                         broadcast_audience_label(&run.audience, &settings),
                         run.delivered,
-                        run.failed
+                        run.failed,
+                        run.pending
                     ),
                 )
-                .reply_markup(menu::broadcast_report_menu(id, run.failed > 0))
+                .reply_markup(menu::broadcast_report_menu(
+                    id,
+                    run.failed > 0 || run.pending > 0,
+                ))
                 .await?;
             } else {
                 bot.send_message(chat, "Отчёт рассылки не найден.")
@@ -9978,7 +9985,7 @@ async fn callback_handler(
                 .await?;
                 return Ok(());
             }
-            let recipients = settings.failed_broadcast_recipients(id);
+            let recipients = settings.retryable_broadcast_recipients(id);
             let mut recovered = 0usize;
             let mut failed = 0usize;
             for user_id in recipients {
@@ -10024,8 +10031,11 @@ async fn callback_handler(
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             }
+            let can_retry = settings
+                .broadcast_run(id)
+                .is_some_and(|run| run.failed > 0 || run.pending > 0);
             bot.send_message(chat,format!("🔁 Повтор рассылки #{id} завершён.\n\nДоставлено при повторе: {recovered}\nОсталось ошибок: {failed}"))
-                .reply_markup(menu::broadcast_report_menu(id,failed>0)).await?;
+                .reply_markup(menu::broadcast_report_menu(id,can_retry)).await?;
         }
         Action::AdminHelp => {
             bot.send_message(chat,"ℹ️ Навигация\n\n➕ Создать ключ — один новый клиент\n📦 Создать оптом — пакет последовательных ключей\n📊 Статистика — трафик, активность, лидеры и подразделы\n🔎 Поиск — ключи и владельцы\n🧰 Массовое управление — включение, отключение и продление по префиксу\n🧑‍💼 Роли — назначение сотрудников\n\nВсе основные действия выполняются кнопками; текстовые команды оставлены только для совместимости.").reply_markup(menu::admin_dashboard_menu()).await?;
