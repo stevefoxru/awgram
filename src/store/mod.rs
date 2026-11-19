@@ -20,6 +20,7 @@ mod servers;
 mod settings;
 mod stars;
 mod stats;
+mod yandex_orders;
 
 pub use broadcasts::BroadcastRun;
 pub use commerce::{
@@ -44,6 +45,7 @@ pub use servers::{
 };
 pub use stars::{NewStarOrder, StarOrder, StarPaymentClaim};
 pub use stats::{PeriodTotals, Sample, TrafficSummary};
+pub use yandex_orders::{YandexImportResult, YandexOrderSummary};
 
 /// SQL-батчи миграций: индекс в массиве + 1 == schema_version после применения.
 /// Только добавлять в конец — существующие батчи менять нельзя (уже применены
@@ -906,6 +908,35 @@ pub(crate) const MIGRATIONS: &[&str] = &[
       INSERT OR IGNORE INTO user_internal_ids(user_id,internal_id)
       VALUES(NEW.user_id,COALESCE((SELECT MAX(internal_id)+1 FROM user_internal_ids),1));
     END;
+    "#,
+    // v45: реестр заказов из ежемесячных отчётов Яндекс Про.
+    r#"
+    CREATE TABLE yandex_orders(
+        order_id TEXT PRIMARY KEY,
+        order_number TEXT NOT NULL,
+        report_owner TEXT,
+        source_sheet TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        status TEXT NOT NULL CHECK(status IN ('Выполнен','Отменён')),
+        amount_kopecks INTEGER,
+        commission_source TEXT,
+        data_json TEXT NOT NULL,
+        imported_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_yandex_orders_started ON yandex_orders(started_at);
+    CREATE INDEX idx_yandex_orders_status ON yandex_orders(status,started_at);
+    CREATE TABLE yandex_order_imports(
+        id INTEGER PRIMARY KEY,
+        report_owner TEXT,
+        file_name TEXT NOT NULL,
+        total_rows INTEGER NOT NULL,
+        added_rows INTEGER NOT NULL,
+        duplicate_rows INTEGER NOT NULL,
+        changed_rows INTEGER NOT NULL,
+        imported_at INTEGER NOT NULL,
+        imported_by INTEGER NOT NULL
+    );
     "#,
 ];
 

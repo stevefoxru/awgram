@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::Request;
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -41,6 +41,13 @@ pub struct PortalOptions {
 #[derive(serde::Deserialize)]
 struct LoginQuery {
     token: String,
+}
+
+#[derive(serde::Deserialize)]
+struct YandexImportQuery {
+    #[serde(default)]
+    commit: bool,
+    file_name: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1270,6 +1277,66 @@ async fn confirm_email_login(
     match state.store.create_portal_session(user_id, now_epoch()) {
         Some(value) => session_response(&value, state.secure_cookie),
         None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn admin_yandex_orders(State(state): State<PortalState>, headers: HeaderMap) -> Response {
+    let Some(admin_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    Json(serde_json::json!({"summary": state.store.yandex_order_summary()})).into_response()
+}
+
+async fn admin_import_yandex_orders(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Query(query): Query<YandexImportQuery>,
+    body: Bytes,
+) -> Response {
+    let Some(admin_id) =
+        session(&headers).and_then(|value| state.store.portal_user_id(value, now_epoch()))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.admin_ids.contains(&admin_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if body.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Выберите Excel-файл").into_response();
+    }
+    let report = match crate::yandex_orders::parse_yandex_report(&body) {
+        Ok(report) => report,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let comparison = state.store.compare_yandex_orders(&report.orders);
+    if !query.commit {
+        return Json(serde_json::json!({"owner":report.owner,"sheets":report.sheets,"comparison":comparison,"summary":state.store.yandex_order_summary()})).into_response();
+    }
+    let file_name = query
+        .file_name
+        .as_deref()
+        .unwrap_or("report.xlsx")
+        .trim()
+        .chars()
+        .take(180)
+        .collect::<String>();
+    match state.store.import_yandex_orders(
+        report.owner.as_deref(),
+        &file_name,
+        &report.orders,
+        admin_id,
+        now_epoch(),
+    ) {
+        Ok(result) => {
+            Json(serde_json::json!({"result":result,"summary":state.store.yandex_order_summary()}))
+                .into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
     }
 }
 
@@ -2513,6 +2580,11 @@ pub async fn run(
         .route("/api/profile", patch(update_profile))
         .route("/api/me", get(me))
         .route("/api/admin/overview", get(admin_overview))
+        .route("/api/admin/yandex-orders", get(admin_yandex_orders))
+        .route(
+            "/api/admin/yandex-orders/import",
+            post(admin_import_yandex_orders),
+        )
         .route("/api/admin/users/{id}/action", post(admin_user_action))
         .route("/api/admin/users/{id}", get(admin_user_profile))
         .route("/api/admin/users/{id}/balance", post(admin_balance_action))
@@ -2550,6 +2622,7 @@ pub async fn run(
         .route("/api/transfers/{id}/action", post(web_transfer_action))
         .route("/api/payments/{id}/proof", post(submit_payment_proof))
         .route("/api/payments/webhook", post(acquiring_webhook))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .with_state(PortalState {
             store,

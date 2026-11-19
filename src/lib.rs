@@ -13,3 +13,4 @@ pub mod routing;
 pub mod store;
 pub mod subscriptions;
 pub mod vpn;
+pub mod yandex_orders;
